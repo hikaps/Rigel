@@ -1,0 +1,17 @@
+Rigel — Third-party notices
+============================
+
+FFmpeg
+------
+Rigel bundles FFmpeg static libraries (libavformat, libavcodec, libavutil,
+libswresample, libswscale) built for iOS from the official FFmpeg source.
+
+License: GNU Lesser General Public License version 3 (LGPL-3.0), or any later
+version. FFmpeg source code is available at https://ffmpeg.org/ .
+The build configuration used is in scripts/build-ffmpeg.sh.
+
+Object code of the FFmpeg libraries is dynamically linked at application
+runtime via a separate framework target. In accordance with LGPL-3.0, the
+complete corresponding source code and the build scripts are offered above,
+and the relinked object files may be obtained from the project maintainers
+by request.
