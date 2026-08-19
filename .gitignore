@@ -11,11 +11,7 @@ xcuserdata/
 iosApp/*.xcodeproj/project.xcworkspace/xcuserdata/
 
 # Vendored FFmpeg binaries (regenerate via scripts/build-ffmpeg.sh)
-iosApp/vendor/ffmpeg/lib/
-iosApp/vendor/ffmpeg/include/
-iosApp/vendor/ffmpeg/pkgconfig/
-iosApp/vendor/ffmpeg/current/
-iosApp/vendor/ffmpeg-device/
+iosApp/vendor/
 
 # Generated test fixtures (regenerate via scripts/gen-fixtures.sh)
 RigelTests/Fixtures/
