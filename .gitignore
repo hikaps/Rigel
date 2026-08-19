@@ -1,0 +1,24 @@
+# Gradle / Kotlin
+.gradle/
+build/
+.kotlin/
+local.properties
+
+# Xcode
+DerivedData/
+xcuserdata/
+*.xcuserstate
+iosApp/*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Vendored FFmpeg binaries (regenerate via scripts/build-ffmpeg.sh)
+iosApp/vendor/ffmpeg/lib/
+iosApp/vendor/ffmpeg/include/
+iosApp/vendor/ffmpeg/pkgconfig/
+iosApp/vendor/ffmpeg/current/
+iosApp/vendor/ffmpeg-device/
+
+# Generated test fixtures (regenerate via scripts/gen-fixtures.sh)
+RigelTests/Fixtures/
+
+# macOS
+.DS_Store
