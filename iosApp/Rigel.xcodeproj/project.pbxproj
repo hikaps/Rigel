@@ -1,0 +1,711 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0BE6DF8A62C7BBEE7CAA154B /* SsdpTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE0321510248BF0799D87C8 /* SsdpTest.swift */; };
+		20FD37328E9554A8C5741BFE /* RigelApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13A2B46286CE87F507945849 /* RigelApp.swift */; };
+		225140C160FEDE45435E883B /* ProbeTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91F18B7AB127264E9DFA96DE /* ProbeTest.swift */; };
+		40B3EF448EF526D2F4365B11 /* RigelShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = FD75F9EC70ED2AC5CF7CE1EC /* RigelShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		50E863DAF61D44CB9B2F2939 /* Bridges.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28078C8B475E60D15BD05567 /* Bridges.swift */; };
+		60A1BB0A2115E62590F4FB9B /* UpnpRendererService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFB95112E586DE9EC94C62B3 /* UpnpRendererService.swift */; };
+		6686A053136C02E7BD1AAE6F /* fixture.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 9328E2A88E645C3CDEFE6333 /* fixture.mp4 */; };
+		84B9EABEF1D89C82D0281168 /* index.m3u8 in Resources */ = {isa = PBXBuildFile; fileRef = 4FE045ED66611FA432704DCB /* index.m3u8 */; };
+		A04E9CEFED593B372300DB64 /* fixture_dts.mkv in Resources */ = {isa = PBXBuildFile; fileRef = EE880448AC0C82EE4BF860D7 /* fixture_dts.mkv */; };
+		ACBF9AA17ACE1E56209F3575 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F823D52CD5E1D2C627415B3 /* ContentView.swift */; };
+		BAF01E05DB2AD82665E3568D /* seg000.ts in Resources */ = {isa = PBXBuildFile; fileRef = D948D87745471993ABFFD51D /* seg000.ts */; };
+		C7AC8CC829298F13F5B42E31 /* RigelPlayerViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43A80DAD29CA264E11AE1E2A /* RigelPlayerViewController.swift */; };
+		CEF57BDA41A823F25B6532D3 /* HttpServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 878B4928504043449C4FF196 /* HttpServer.swift */; };
+		D617BD2E1E30E4FA4CB44CF1 /* HlsExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7068FB32C0275BE2242AD70 /* HlsExporter.swift */; };
+		E01707E07427611A2F42A0EF /* HttpServerTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A620F48242D327688F867016 /* HttpServerTest.swift */; };
+		E0784072F4F3A2C9B610467F /* Probe.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8CE17963A2289F4B9263B94 /* Probe.swift */; };
+		F9254DF13AA8D1E8B8F12B26 /* Ssdp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0A77D73BD53FB477190213 /* Ssdp.swift */; };
+		FEFAD4FE14DF390979D2DED1 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 523A8D7C5525838C63DC0274 /* ShareViewController.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5C9513DDDC5F3ACBE2B72323 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7C5559907686F918164C77E8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2CFE07C6A3AC72F7F435F4EC;
+			remoteInfo = RigelShare;
+		};
+		87F4C4A9A0130EDFC7D4E2D3 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7C5559907686F918164C77E8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 459E6C4A49D670774E68737C;
+			remoteInfo = Rigel;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		25A7A640B25228817C0F3263 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				40B3EF448EF526D2F4365B11 /* RigelShare.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		0A0A77D73BD53FB477190213 /* Ssdp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ssdp.swift; sourceTree = "<group>"; };
+		0AE0321510248BF0799D87C8 /* SsdpTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SsdpTest.swift; sourceTree = "<group>"; };
+		13A2B46286CE87F507945849 /* RigelApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigelApp.swift; sourceTree = "<group>"; };
+		1B5E4D4358F621D7071B678A /* RigelTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = RigelTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1F823D52CD5E1D2C627415B3 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		28078C8B475E60D15BD05567 /* Bridges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bridges.swift; sourceTree = "<group>"; };
+		43A80DAD29CA264E11AE1E2A /* RigelPlayerViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigelPlayerViewController.swift; sourceTree = "<group>"; };
+		4FE045ED66611FA432704DCB /* index.m3u8 */ = {isa = PBXFileReference; path = index.m3u8; sourceTree = "<group>"; };
+		500AD4648B5224FBCEF6AB40 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		523A8D7C5525838C63DC0274 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		878B4928504043449C4FF196 /* HttpServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HttpServer.swift; sourceTree = "<group>"; };
+		8CD86059649C881D0505229A /* Rigel.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Rigel.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		91F18B7AB127264E9DFA96DE /* ProbeTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProbeTest.swift; sourceTree = "<group>"; };
+		9328E2A88E645C3CDEFE6333 /* fixture.mp4 */ = {isa = PBXFileReference; path = fixture.mp4; sourceTree = "<group>"; };
+		A620F48242D327688F867016 /* HttpServerTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HttpServerTest.swift; sourceTree = "<group>"; };
+		AE601FA4AE0C0908D4745F69 /* RigelFfmpeg.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RigelFfmpeg.h; sourceTree = "<group>"; };
+		C8CE17963A2289F4B9263B94 /* Probe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Probe.swift; sourceTree = "<group>"; };
+		D948D87745471993ABFFD51D /* seg000.ts */ = {isa = PBXFileReference; path = seg000.ts; sourceTree = "<group>"; };
+		EE880448AC0C82EE4BF860D7 /* fixture_dts.mkv */ = {isa = PBXFileReference; path = fixture_dts.mkv; sourceTree = "<group>"; };
+		EFB95112E586DE9EC94C62B3 /* UpnpRendererService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpnpRendererService.swift; sourceTree = "<group>"; };
+		F7068FB32C0275BE2242AD70 /* HlsExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HlsExporter.swift; sourceTree = "<group>"; };
+		FD75F9EC70ED2AC5CF7CE1EC /* RigelShare.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = RigelShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		FF3357516386402A9A76D43E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		09227488A7AC723922D57628 /* iosApp */ = {
+			isa = PBXGroup;
+			children = (
+				1F823D52CD5E1D2C627415B3 /* ContentView.swift */,
+				FF3357516386402A9A76D43E /* Info.plist */,
+				13A2B46286CE87F507945849 /* RigelApp.swift */,
+				49291E73FEB8EA51F03A4F78 /* Bridge */,
+			);
+			path = iosApp;
+			sourceTree = "<group>";
+		};
+		135EE4CB7FEBAB9B54444423 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8CD86059649C881D0505229A /* Rigel.app */,
+				FD75F9EC70ED2AC5CF7CE1EC /* RigelShare.appex */,
+				1B5E4D4358F621D7071B678A /* RigelTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		396A3D1AA33910C3BCC534E3 = {
+			isa = PBXGroup;
+			children = (
+				09227488A7AC723922D57628 /* iosApp */,
+				8C544925F8ADFBDECD8C6ECF /* Rigel */,
+				C10DF0B81F118DE425D1BE43 /* ShareExtension */,
+				135EE4CB7FEBAB9B54444423 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		49291E73FEB8EA51F03A4F78 /* Bridge */ = {
+			isa = PBXGroup;
+			children = (
+				28078C8B475E60D15BD05567 /* Bridges.swift */,
+				F7068FB32C0275BE2242AD70 /* HlsExporter.swift */,
+				878B4928504043449C4FF196 /* HttpServer.swift */,
+				C8CE17963A2289F4B9263B94 /* Probe.swift */,
+				AE601FA4AE0C0908D4745F69 /* RigelFfmpeg.h */,
+				43A80DAD29CA264E11AE1E2A /* RigelPlayerViewController.swift */,
+				0A0A77D73BD53FB477190213 /* Ssdp.swift */,
+				EFB95112E586DE9EC94C62B3 /* UpnpRendererService.swift */,
+			);
+			path = Bridge;
+			sourceTree = "<group>";
+		};
+		51EED59E081BEA2CDCF945D1 /* fixture_hls */ = {
+			isa = PBXGroup;
+			children = (
+				4FE045ED66611FA432704DCB /* index.m3u8 */,
+				D948D87745471993ABFFD51D /* seg000.ts */,
+			);
+			path = fixture_hls;
+			sourceTree = "<group>";
+		};
+		60134AB62DD9047F823407A2 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				EE880448AC0C82EE4BF860D7 /* fixture_dts.mkv */,
+				9328E2A88E645C3CDEFE6333 /* fixture.mp4 */,
+				51EED59E081BEA2CDCF945D1 /* fixture_hls */,
+			);
+			path = Fixtures;
+			sourceTree = "<group>";
+		};
+		7D0B6BEC4BC86681450E38C9 /* RigelTests */ = {
+			isa = PBXGroup;
+			children = (
+				A620F48242D327688F867016 /* HttpServerTest.swift */,
+				91F18B7AB127264E9DFA96DE /* ProbeTest.swift */,
+				0AE0321510248BF0799D87C8 /* SsdpTest.swift */,
+				60134AB62DD9047F823407A2 /* Fixtures */,
+			);
+			path = RigelTests;
+			sourceTree = "<group>";
+		};
+		8C544925F8ADFBDECD8C6ECF /* Rigel */ = {
+			isa = PBXGroup;
+			children = (
+				7D0B6BEC4BC86681450E38C9 /* RigelTests */,
+			);
+			name = Rigel;
+			path = ..;
+			sourceTree = "<group>";
+		};
+		C10DF0B81F118DE425D1BE43 /* ShareExtension */ = {
+			isa = PBXGroup;
+			children = (
+				500AD4648B5224FBCEF6AB40 /* Info.plist */,
+				523A8D7C5525838C63DC0274 /* ShareViewController.swift */,
+			);
+			path = ShareExtension;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		2CFE07C6A3AC72F7F435F4EC /* RigelShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 867F68E50E18F3A834FFB51C /* Build configuration list for PBXNativeTarget "RigelShare" */;
+			buildPhases = (
+				C755126FC698808DBD1A0DB9 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RigelShare;
+			packageProductDependencies = (
+			);
+			productName = RigelShare;
+			productReference = FD75F9EC70ED2AC5CF7CE1EC /* RigelShare.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		459E6C4A49D670774E68737C /* Rigel */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AD00C440894B7B1AB0C162CE /* Build configuration list for PBXNativeTarget "Rigel" */;
+			buildPhases = (
+				3943CE9DF63A33055AD6D00B /* Stage FFmpeg libs for SDK */,
+				CA942E500610D1BDCF882F61 /* Build ComposeApp framework */,
+				57FE26D15E4A3EF3A42CD6EB /* Sources */,
+				25A7A640B25228817C0F3263 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FB31FE356BDF6152D495F184 /* PBXTargetDependency */,
+			);
+			name = Rigel;
+			packageProductDependencies = (
+			);
+			productName = Rigel;
+			productReference = 8CD86059649C881D0505229A /* Rigel.app */;
+			productType = "com.apple.product-type.application";
+		};
+		EB416464170670DE0F37A6C0 /* RigelTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 59E32206118ACD92B8D22F5A /* Build configuration list for PBXNativeTarget "RigelTests" */;
+			buildPhases = (
+				32665C26BB0189A08EE3DD3B /* Sources */,
+				07F0D637D4FFDB5F47DC6E03 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B2BA5591DB82A42B4FDCF5A8 /* PBXTargetDependency */,
+			);
+			name = RigelTests;
+			packageProductDependencies = (
+			);
+			productName = RigelTests;
+			productReference = 1B5E4D4358F621D7071B678A /* RigelTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		7C5559907686F918164C77E8 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					2CFE07C6A3AC72F7F435F4EC = {
+						DevelopmentTeam = 9SAXN99TCU;
+						ProvisioningStyle = Automatic;
+					};
+					459E6C4A49D670774E68737C = {
+						DevelopmentTeam = 9SAXN99TCU;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 45EF8C9F85708CC72D72989B /* Build configuration list for PBXProject "Rigel" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 396A3D1AA33910C3BCC534E3;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 135EE4CB7FEBAB9B54444423 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				459E6C4A49D670774E68737C /* Rigel */,
+				2CFE07C6A3AC72F7F435F4EC /* RigelShare */,
+				EB416464170670DE0F37A6C0 /* RigelTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		07F0D637D4FFDB5F47DC6E03 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6686A053136C02E7BD1AAE6F /* fixture.mp4 in Resources */,
+				A04E9CEFED593B372300DB64 /* fixture_dts.mkv in Resources */,
+				84B9EABEF1D89C82D0281168 /* index.m3u8 in Resources */,
+				BAF01E05DB2AD82665E3568D /* seg000.ts in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		3943CE9DF63A33055AD6D00B /* Stage FFmpeg libs for SDK */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Stage FFmpeg libs for SDK";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "case \"$SDK_NAME\" in\n  iphoneos*) SRC=ffmpeg-device ;;\n  *) SRC=ffmpeg ;;\nesac\nrm -rf \"$SRCROOT/vendor/ffmpeg/current\"\nmkdir -p \"$SRCROOT/vendor/ffmpeg/current\"\ncp -R \"$SRCROOT/vendor/$SRC/lib\" \"$SRCROOT/vendor/ffmpeg/current/\"\n";
+		};
+		CA942E500610D1BDCF882F61 /* Build ComposeApp framework */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build ComposeApp framework";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "cd \"$SRCROOT/..\"\nexport JAVA_HOME=$(brew --prefix openjdk@21)\n./gradlew :composeApp:embedAndSignAppleFrameworkForXcode\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		32665C26BB0189A08EE3DD3B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E01707E07427611A2F42A0EF /* HttpServerTest.swift in Sources */,
+				225140C160FEDE45435E883B /* ProbeTest.swift in Sources */,
+				0BE6DF8A62C7BBEE7CAA154B /* SsdpTest.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57FE26D15E4A3EF3A42CD6EB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				50E863DAF61D44CB9B2F2939 /* Bridges.swift in Sources */,
+				ACBF9AA17ACE1E56209F3575 /* ContentView.swift in Sources */,
+				D617BD2E1E30E4FA4CB44CF1 /* HlsExporter.swift in Sources */,
+				CEF57BDA41A823F25B6532D3 /* HttpServer.swift in Sources */,
+				E0784072F4F3A2C9B610467F /* Probe.swift in Sources */,
+				20FD37328E9554A8C5741BFE /* RigelApp.swift in Sources */,
+				C7AC8CC829298F13F5B42E31 /* RigelPlayerViewController.swift in Sources */,
+				F9254DF13AA8D1E8B8F12B26 /* Ssdp.swift in Sources */,
+				60A1BB0A2115E62590F4FB9B /* UpnpRendererService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C755126FC698808DBD1A0DB9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FEFAD4FE14DF390979D2DED1 /* ShareViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B2BA5591DB82A42B4FDCF5A8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 459E6C4A49D670774E68737C /* Rigel */;
+			targetProxy = 87F4C4A9A0130EDFC7D4E2D3 /* PBXContainerItemProxy */;
+		};
+		FB31FE356BDF6152D495F184 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2CFE07C6A3AC72F7F435F4EC /* RigelShare */;
+			targetProxy = 5C9513DDDC5F3ACBE2B72323 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		09DFDD389903A5F01C1B876D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 9SAXN99TCU;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/vendor/ffmpeg/include",
+				);
+				INFOPLIST_FILE = iosApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/vendor/ffmpeg/current/lib",
+				);
+				OTHER_LDFLAGS = (
+					"-lavformat",
+					"-lavcodec",
+					"-lavutil",
+					"-lswresample",
+					"-lswscale",
+					"-liconv",
+					"-lz",
+					"-framework",
+					VideoToolbox,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rigel.player;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = iosApp/Bridge/RigelFfmpeg.h;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		0D3846E0E0EAD5B776483EE1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 9SAXN99TCU;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rigel.player.share;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		25F8E1DBD7A8F241D977E46D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 9SAXN99TCU;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/vendor/ffmpeg/include",
+				);
+				INFOPLIST_FILE = iosApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/vendor/ffmpeg/current/lib",
+				);
+				OTHER_LDFLAGS = (
+					"-lavformat",
+					"-lavcodec",
+					"-lavutil",
+					"-lswresample",
+					"-lswscale",
+					"-liconv",
+					"-lz",
+					"-framework",
+					VideoToolbox,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rigel.player;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = iosApp/Bridge/RigelFfmpeg.h;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		482FF2D2E5DA63A7E9235141 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/vendor/ffmpeg/include",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/vendor/ffmpeg/lib",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rigel.RigelTests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Rigel.app/Rigel";
+			};
+			name = Release;
+		};
+		7D7FD7808006A79D9FB4D336 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		BAF5D9A69E8587A6D1F3F5E7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/vendor/ffmpeg/include",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/vendor/ffmpeg/lib",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rigel.RigelTests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Rigel.app/Rigel";
+			};
+			name = Debug;
+		};
+		C9FC1AF5D54B79531CD67F18 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		D246A1554FCE963C77EF1602 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 9SAXN99TCU;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rigel.player.share;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		45EF8C9F85708CC72D72989B /* Build configuration list for PBXProject "Rigel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C9FC1AF5D54B79531CD67F18 /* Debug */,
+				7D7FD7808006A79D9FB4D336 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		59E32206118ACD92B8D22F5A /* Build configuration list for PBXNativeTarget "RigelTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BAF5D9A69E8587A6D1F3F5E7 /* Debug */,
+				482FF2D2E5DA63A7E9235141 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		867F68E50E18F3A834FFB51C /* Build configuration list for PBXNativeTarget "RigelShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0D3846E0E0EAD5B776483EE1 /* Debug */,
+				D246A1554FCE963C77EF1602 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		AD00C440894B7B1AB0C162CE /* Build configuration list for PBXNativeTarget "Rigel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				25F8E1DBD7A8F241D977E46D /* Debug */,
+				09DFDD389903A5F01C1B876D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 7C5559907686F918164C77E8 /* Project object */;
+}

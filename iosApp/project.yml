@@ -1,0 +1,165 @@
+name: Rigel
+options:
+  bundleIdPrefix: com.rigel
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+targets:
+  Rigel:
+    type: application
+    platform: iOS
+    sources:
+      - path: iosApp
+    dependencies:
+      - target: RigelShare
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rigel.player
+        SWIFT_VERSION: "5.0"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        DEVELOPMENT_TEAM: 9SAXN99TCU
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGNING_ALLOWED: YES
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/vendor/ffmpeg/include"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/vendor/ffmpeg/current/lib"
+        OTHER_LDFLAGS:
+          - "-lavformat"
+          - "-lavcodec"
+          - "-lavutil"
+          - "-lswresample"
+          - "-lswscale"
+          - "-liconv"
+          - "-lz"
+          - "-framework"
+          - "VideoToolbox"
+        SWIFT_OBJC_BRIDGING_HEADER: "iosApp/Bridge/RigelFfmpeg.h"
+    preBuildScripts:
+      - name: Stage FFmpeg libs for SDK
+        basedOnDependencyAnalysis: false
+        script: |
+          case "$SDK_NAME" in
+            iphoneos*) SRC=ffmpeg-device ;;
+            *) SRC=ffmpeg ;;
+          esac
+          rm -rf "$SRCROOT/vendor/ffmpeg/current"
+          mkdir -p "$SRCROOT/vendor/ffmpeg/current"
+          cp -R "$SRCROOT/vendor/$SRC/lib" "$SRCROOT/vendor/ffmpeg/current/"
+      - name: Build ComposeApp framework
+        basedOnDependencyAnalysis: false
+        script: |
+          cd "$SRCROOT/.."
+          export JAVA_HOME=$(brew --prefix openjdk@21)
+          ./gradlew :composeApp:embedAndSignAppleFrameworkForXcode
+    info:
+      path: iosApp/Info.plist
+      properties:
+        CFBundleDisplayName: Rigel
+        CADisableMinimumFrameDurationOnPhone: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: "Rigel discovers TVs on your local network (DLNA, Roku)."
+        UIBackgroundModes:
+          - audio
+        CFBundleURLTypes:
+          - CFBundleURLName: rigel
+            CFBundleURLSchemes:
+              - rigel
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Media
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.movie
+              - public.audiovisual-content
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.rigel.mkv
+            UTTypeConformsTo: [public.movie]
+            UTTypeDescription: Matroska video
+            UTTypeTagSpecification:
+              public.filename-extension: [mkv]
+          - UTTypeIdentifier: com.rigel.webm
+            UTTypeConformsTo: [public.movie]
+            UTTypeDescription: WebM video
+            UTTypeTagSpecification:
+              public.filename-extension: [webm]
+          - UTTypeIdentifier: com.rigel.avi
+            UTTypeConformsTo: [public.movie]
+            UTTypeDescription: AVI video
+            UTTypeTagSpecification:
+              public.filename-extension: [avi]
+          - UTTypeIdentifier: com.rigel.mpegts
+            UTTypeConformsTo: [public.movie]
+            UTTypeDescription: MPEG transport stream
+            UTTypeTagSpecification:
+              public.filename-extension: [ts, m2ts]
+          - UTTypeIdentifier: com.rigel.hls
+            UTTypeConformsTo: [public.movie]
+            UTTypeDescription: HLS playlist
+            UTTypeTagSpecification:
+              public.filename-extension: [m3u8]
+          - UTTypeIdentifier: com.rigel.flv
+            UTTypeConformsTo: [public.movie]
+            UTTypeDescription: Flash video
+            UTTypeTagSpecification:
+              public.filename-extension: [flv]
+          - UTTypeIdentifier: com.rigel.m4v
+            UTTypeConformsTo: [public.movie]
+            UTTypeDescription: M4V video
+            UTTypeTagSpecification:
+              public.filename-extension: [m4v]
+  RigelShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ShareExtension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rigel.player.share
+        SWIFT_VERSION: "5.0"
+        DEVELOPMENT_TEAM: 9SAXN99TCU
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: ShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Rigel
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule: TRUEPREDICATE
+  RigelTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ../RigelTests
+    dependencies:
+      - target: Rigel
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/vendor/ffmpeg/include"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/vendor/ffmpeg/lib"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Rigel.app/Rigel"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+schemes:
+  Rigel:
+    build:
+      targets:
+        Rigel: all
+        RigelTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - RigelTests
