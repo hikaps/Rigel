@@ -38,6 +38,7 @@ class PlayerControllerTest {
     private var hlsError: String? = null
     private var serverPort: Long = 8090
     private var serverError: String? = null
+    private var lanBase: String? = null
     private val stoppedSessions = mutableListOf<String>()
     private var serverStopped = false
     private val hlsModes = mutableListOf<String>()
@@ -72,7 +73,7 @@ class PlayerControllerTest {
                     serverStopped = true
                 }
 
-                override fun lanBaseUrl(): String? = null
+                override fun lanBaseUrl(): String? = lanBase
             },
         )
         return PlayerController(settings)
@@ -136,6 +137,20 @@ class PlayerControllerTest {
         assertEquals(PlayerPhase.PLAYING, state.phase)
         assertEquals("http://127.0.0.1:8090/hls/s1/out.m3u8", state.proxyUrl)
         assertEquals(listOf("remux"), hlsModes)
+    }
+
+    @Test
+    fun proxyUrlUsesLanBaseWhenAvailable() = runTest(dispatcher.scheduler) {
+        lanBase = "http://192.168.1.50:8090"
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        c.loadRequest(request)
+        advanceUntilIdle()
+        val state = c.uiState.value
+        assertEquals(PlayerPhase.PLAYING, state.phase)
+        // AirPlay remote playback: the TV fetches the playlist itself, so the
+        // proxy URL must be LAN-reachable, not loopback.
+        assertEquals("http://192.168.1.50:8090/hls/s1/out.m3u8", state.proxyUrl)
     }
 
     @Test
