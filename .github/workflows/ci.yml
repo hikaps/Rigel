@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
   workflow_dispatch:
 
@@ -60,6 +60,17 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/cache@v4
+        with:
+          path: iosApp/vendor/ffmpeg
+          key: ffmpeg-sim-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+          restore-keys: |
+            ffmpeg-sim-
       - name: Install JDK 21 (Xcode prebuild hardcodes brew prefix)
         run: brew install openjdk@21
       - name: Install ffmpeg CLI (fixture generation)
