@@ -37,10 +37,14 @@ object RokuEcp {
         val sb = StringBuilder(s.length)
         for (byte in s.encodeToByteArray()) {
             val c = byte.toInt() and 0xFF
-            val ch = c.toChar()
-            when {
-                ch.isLetterOrDigit() || ch == '-' || ch == '_' || ch == '.' || ch == '~' -> sb.append(ch)
-                else -> sb.append('%').append((c ushr 4).toString(16).uppercase())
+            val keep = (c in 'a'.code..'z'.code) ||
+                (c in 'A'.code..'Z'.code) ||
+                (c in '0'.code..'9'.code) ||
+                c == '-'.code || c == '_'.code || c == '.'.code || c == '~'.code
+            if (keep) {
+                sb.append(c.toChar())
+            } else {
+                sb.append('%').append((c ushr 4).toString(16).uppercase())
                     .append((c and 0x0F).toString(16).uppercase())
             }
         }
