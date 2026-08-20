@@ -10,6 +10,7 @@
 		0BE6DF8A62C7BBEE7CAA154B /* SsdpTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE0321510248BF0799D87C8 /* SsdpTest.swift */; };
 		20FD37328E9554A8C5741BFE /* RigelApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13A2B46286CE87F507945849 /* RigelApp.swift */; };
 		225140C160FEDE45435E883B /* ProbeTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91F18B7AB127264E9DFA96DE /* ProbeTest.swift */; };
+		23CDE6D097E80AA6F91AD064 /* PlayerModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 891915EB9EED8B4E11F8BE84 /* PlayerModelTests.swift */; };
 		249C1FBDC464C9205176311D /* PlayerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09F3E4E0C6B00EC13043EECB /* PlayerModel.swift */; };
 		2B8BCEB796154BC4C5A95576 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02AA606C3552F247DEBCFFBF /* RootView.swift */; };
 		40B3EF448EF526D2F4365B11 /* RigelShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = FD75F9EC70ED2AC5CF7CE1EC /* RigelShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -83,6 +84,7 @@
 		7D2C3DF9AED964A2AFFDC299 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		7F2484E659E698D4A86294E7 /* DevicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesView.swift; sourceTree = "<group>"; };
 		878B4928504043449C4FF196 /* HttpServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HttpServer.swift; sourceTree = "<group>"; };
+		891915EB9EED8B4E11F8BE84 /* PlayerModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerModelTests.swift; sourceTree = "<group>"; };
 		8CD86059649C881D0505229A /* Rigel.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Rigel.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		91F18B7AB127264E9DFA96DE /* ProbeTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProbeTest.swift; sourceTree = "<group>"; };
 		9328E2A88E645C3CDEFE6333 /* fixture.mp4 */ = {isa = PBXFileReference; path = fixture.mp4; sourceTree = "<group>"; };
@@ -175,6 +177,7 @@
 			isa = PBXGroup;
 			children = (
 				A620F48242D327688F867016 /* HttpServerTest.swift */,
+				891915EB9EED8B4E11F8BE84 /* PlayerModelTests.swift */,
 				91F18B7AB127264E9DFA96DE /* ProbeTest.swift */,
 				0AE0321510248BF0799D87C8 /* SsdpTest.swift */,
 				60134AB62DD9047F823407A2 /* Fixtures */,
@@ -361,6 +364,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E01707E07427611A2F42A0EF /* HttpServerTest.swift in Sources */,
+				23CDE6D097E80AA6F91AD064 /* PlayerModelTests.swift in Sources */,
 				225140C160FEDE45435E883B /* ProbeTest.swift in Sources */,
 				0BE6DF8A62C7BBEE7CAA154B /* SsdpTest.swift in Sources */,
 			);

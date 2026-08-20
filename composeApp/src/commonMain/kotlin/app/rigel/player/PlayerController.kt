@@ -205,6 +205,12 @@ object RigelIntake {
         }
         return ok
     }
+
+    /** Test-only: clear attach state and the pending queue. */
+    internal fun resetForTest() {
+        controller = null
+        pending.clear()
+    }
 }
 
 /** DLNA-renderer receive mode: control-point pushes map onto the same pipeline. */

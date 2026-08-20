@@ -14,6 +14,7 @@ final class PlayerModel: ObservableObject {
     @Published var proxyUrl: String?
     @Published var error: String?
     @Published var sender: String?
+    @Published var castActive = false
     @Published var showPlayer = false
 
     init() {
@@ -39,6 +40,7 @@ final class PlayerModel: ObservableObject {
         proxyUrl = state.proxyUrl
         error = state.error
         sender = state.sender
+        castActive = state.castActive
         showPlayer = state.phase != .idle
     }
 

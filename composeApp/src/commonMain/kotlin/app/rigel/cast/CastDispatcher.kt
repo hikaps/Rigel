@@ -6,6 +6,7 @@ import app.rigel.cast.dlna.DlnaRenderer
 import app.rigel.cast.kodi.KodiRenderer
 import app.rigel.cast.roku.RokuRenderer
 import app.rigel.player.PlayerPhase
+import app.rigel.player.PlayerUiState
 
 /**
  * Send-flow entry point shared by every host UI. Resolves the URL a remote
@@ -17,8 +18,9 @@ object CastDispatcher {
 
     fun capabilities(target: CastTarget): CastCapabilities = session.capabilities(target)
 
-    fun remoteCastUrl(): String? {
-        val state = RigelCore.controller.uiState.value
+    fun remoteCastUrl(): String? = remoteCastUrl(RigelCore.controller.uiState.value)
+
+    fun remoteCastUrl(state: PlayerUiState): String? {
         if (state.phase != PlayerPhase.PLAYING) return null
         state.proxyUrl?.let { proxy ->
             val lan = Bridges.lanBaseUrl() ?: return null
@@ -29,9 +31,11 @@ object CastDispatcher {
         return state.sourceUrl
     }
 
-    fun remoteCastTitle(): String =
-        RigelCore.controller.uiState.value.filename
-            ?: RigelCore.controller.uiState.value.sourceUrl?.substringAfterLast('/')
+    fun remoteCastTitle(): String = remoteCastTitle(RigelCore.controller.uiState.value)
+
+    fun remoteCastTitle(state: PlayerUiState): String =
+        state.filename
+            ?: state.sourceUrl?.substringAfterLast('/')
             ?: "Stream"
 
     /** Returns a human-readable result/error string. */
