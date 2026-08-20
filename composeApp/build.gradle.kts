@@ -29,6 +29,13 @@ kotlin {
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)
         }
+        jvmMain.dependencies {
+            // The JVM target exists to run tests: a real engine makes the shared
+            // HttpClient() (RigelCore) initialize, coroutines-swing provides
+            // Dispatchers.Main (PlayerController's scope) without a UI.
+            implementation(libs.ktor.client.okhttp)
+            implementation(libs.kotlinx.coroutines.swing)
+        }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
             implementation(libs.ktor.client.mock)

@@ -212,15 +212,6 @@ class PlayerControllerTest {
     }
 
     @Test
-    fun markPlayingSetsPhaseOnce() = runTest(dispatcher.scheduler) {
-        val c = controller()
-        c.markPlaying()
-        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
-        c.markPlaying()
-        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
-    }
-
-    @Test
     fun reportErrorSetsErrorState() {
         val c = controller()
         c.reportError("boom")

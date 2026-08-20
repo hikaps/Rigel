@@ -56,7 +56,8 @@ class SettingsStore(private val settings: Settings) {
             is CastTarget.Kodi -> "kodi" to target.device.usn
             is CastTarget.JellyfinSessionTarget -> "jellyfin" to ""
         }
-        val prefix = "$kind|$usn|"
+        // Jellyfin session targets have no usn; match the whole kind.
+        val prefix = if (usn.isEmpty()) "$kind|" else "$kind|$usn|"
         settings.putString(
             devicesKey,
             manualDevices()
