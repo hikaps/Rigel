@@ -52,8 +52,14 @@ jobs:
 
   # Full native suite: Swift unit tests (SSDP / HTTP server / FFmpeg probe).
   # Needs the gitignored FFmpeg vendor libs + generated media fixtures.
+  # Non-blocking: the app currently fails to link with Xcode 26 SDK + Compose
+  # 1.11.1 — Compose references the private UIKit symbol UIViewLayoutRegion,
+  # absent from the SDK's public stubs. Fixed upstream in Compose 1.12.0-rc01
+  # (JetBrains/compose-multiplatform-core#3278). Make required once the app's
+  # Compose version is bumped (or ui-ux lands and drops Compose).
   test-ios-swift:
     runs-on: macos-15
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
