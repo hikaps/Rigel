@@ -3,9 +3,14 @@ import ComposeApp
 
 @main
 struct RigelApp: App {
-    @StateObject private var player = PlayerModel()
+    @StateObject private var player: PlayerModel
 
     init() {
+        // PlayerModel() touches RigelCore (Kermit "app start" logs), so build it
+        // here, after the launch marker — a property default value would run
+        // before init()'s body and reverse the intended log order.
+        NSLog("[RigelApp] launch pid=%d", getpid())
+        _player = StateObject(wrappedValue: PlayerModel())
         BridgeRegistry.register()
         RigelIntake.shared.attach(controller: RigelCore.shared.controller)
         // Test/automation hook: accept a rigel:// URL as a launch argument
