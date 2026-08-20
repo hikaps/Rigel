@@ -18,6 +18,13 @@ struct PlayerHostView: View {
             content
         }
         .statusBarHidden()
+        .onDisappear {
+            // Belt-and-braces: if the cover is dismissed by any path other than
+            // the back/close buttons, make sure the native player stops.
+            if player.phase != .idle {
+                player.stop()
+            }
+        }
     }
 
     @ViewBuilder
@@ -85,7 +92,8 @@ struct PlayerHostView: View {
 
 /// Hosts RigelPlayerViewController (AVPlayerViewController + native top bar).
 /// Load is called only when the URL/title/sender signature actually changes,
-/// so SwiftUI state updates never reload the player.
+/// so SwiftUI state updates never reload the player. The guard lives in the
+/// Coordinator (never mutate @State during view updates).
 struct PlayerView: UIViewControllerRepresentable {
     let url: String
     let title: String?
@@ -94,11 +102,26 @@ struct PlayerView: UIViewControllerRepresentable {
     let onError: (String) -> Void
     let onBack: () -> Void
 
-    @State private var loaded: (url: String, title: String?, sender: String?)?
+    final class Coordinator {
+        var loaded: (url: String, title: String?, sender: String?)?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIViewController(context: Context) -> UIViewController {
         guard let bridge = PlayerBridgeFactory.shared.create() else {
-            return UIViewController()
+            let vc = UIViewController()
+            let label = UILabel()
+            label.text = "Player bridge not registered"
+            label.textColor = .white
+            label.textAlignment = .center
+            vc.view.addSubview(label)
+            label.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                label.centerXAnchor.constraint(equalTo: vc.view.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: vc.view.centerYAnchor),
+            ])
+            return vc
         }
         let events = PlayerEventsImpl(
             onReady: onReady,
@@ -110,9 +133,10 @@ struct PlayerView: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         guard let bridge = PlayerBridgeFactory.shared.create() else { return }
+        let loaded = context.coordinator.loaded
         if loaded?.url != url || loaded?.title != title || loaded?.sender != sender {
             bridge.load(url: url, title: title, sender: sender)
-            loaded = (url, title, sender)
+            context.coordinator.loaded = (url, title, sender)
         }
     }
 }

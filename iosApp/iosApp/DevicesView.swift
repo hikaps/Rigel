@@ -44,12 +44,12 @@ struct DevicesView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    ForEach(devices, id: \.target.name) { device in
+                    ForEach(devices, id: \.stableId) { device in
                         DeviceRow(device: device) {
                             castTarget = device.target
                         } onRemove: {
                             RigelCore.shared.devices.removeManualDevice(target: device.target)
-                            devices.removeAll { $0.target.name == device.target.name }
+                            devices.removeAll { $0.stableId == device.stableId }
                         }
                     }
                 } header: {
@@ -115,8 +115,10 @@ struct DevicesView: View {
     private func scan() {
         scanning = true
         RigelCore.shared.devices.scan(timeoutMs: 5000) { found, _ in
-            devices = found ?? []
-            scanning = false
+            Task { @MainActor in
+                self.devices = found ?? []
+                self.scanning = false
+            }
         }
     }
 
@@ -124,13 +126,29 @@ struct DevicesView: View {
         let ip = ipText.trimmingCharacters(in: .whitespaces)
         guard !ip.isEmpty else { return }
         RigelCore.shared.devices.addManualByIp(ip: ip) { target, _ in
-            if let target {
-                notice = "Added \(target.name)"
-                ipText = ""
-                scan()
-            } else {
-                notice = "No renderer found at \(ip)"
+            Task { @MainActor in
+                if let target {
+                    self.notice = "Added \(target.name)"
+                    self.ipText = ""
+                    self.scan()
+                } else {
+                    self.notice = "No renderer found at \(ip)"
+                }
             }
+        }
+    }
+}
+
+/// Stable identity per renderer (usn-based), independent of display name —
+/// multiple manual Kodis legitimately share the name "Kodi".
+private extension DiscoveredDevice {
+    var stableId: String {
+        switch target {
+        case let d as CastTargetDlna: return d.device.usn
+        case let r as CastTargetRoku: return r.device.usn
+        case let k as CastTargetKodi: return k.device.usn
+        case let j as CastTargetJellyfinSessionTarget: return j.session.id
+        default: return target.name
         }
     }
 }

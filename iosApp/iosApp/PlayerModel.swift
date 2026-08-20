@@ -17,13 +17,19 @@ final class PlayerModel: ObservableObject {
     @Published var castActive = false
     @Published var showPlayer = false
 
+    private var observeJob: Kotlinx_coroutines_coreJob?
+
     init() {
-        SwiftPlayer.shared.observe { [weak self] state in
+        observeJob = SwiftPlayer.shared.observe { [weak self] state in
             Task { @MainActor [weak self] in
                 self?.apply(state)
             }
         }
         apply(SwiftPlayer.shared.snapshot())
+    }
+
+    deinit {
+        observeJob?.cancel(cause: nil)
     }
 
     var playableURL: String? { proxyUrl ?? sourceUrl }
@@ -50,6 +56,9 @@ final class PlayerModel: ObservableObject {
     }
 
     func stop() {
+        // Native AVPlayer must stop too, or playback (and its poll timer)
+        // keeps running after the player UI is dismissed.
+        PlayerBridgeFactory.shared.create()?.stop()
         SwiftPlayer.shared.stop()
     }
 

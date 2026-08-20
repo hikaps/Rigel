@@ -47,15 +47,18 @@ class SettingsStore(private val settings: Settings) {
     }
 
     fun removeManualDevice(target: CastTarget) {
-        val marker = when (target) {
-            is CastTarget.Dlna -> "dlna|"
-            is CastTarget.Roku -> "roku|"
-            is CastTarget.Kodi -> "kodi|"
-            is CastTarget.JellyfinSessionTarget -> "jellyfin|"
+        val (kind, usn) = when (target) {
+            is CastTarget.Dlna -> "dlna" to target.device.usn
+            is CastTarget.Roku -> "roku" to target.device.usn
+            is CastTarget.Kodi -> "kodi" to target.device.usn
+            is CastTarget.JellyfinSessionTarget -> "jellyfin" to ""
         }
+        val prefix = "$kind|$usn|"
         settings.putString(
             devicesKey,
-            manualDevices().filterNot { it.startsWith(marker) }.joinToString("\n"),
+            manualDevices()
+                .filterNot { it.startsWith(prefix) }
+                .joinToString("\n"),
         )
     }
 }

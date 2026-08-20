@@ -170,11 +170,6 @@ class PlayerController(
         _uiState.value = PlayerUiState()
     }
 
-    fun markPlaying() {
-        if (_uiState.value.phase == PlayerPhase.PLAYING) return
-        _uiState.value = _uiState.value.copy(phase = PlayerPhase.PLAYING)
-    }
-
     fun reportError(message: String) {
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = message)
     }

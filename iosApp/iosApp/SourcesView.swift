@@ -240,20 +240,22 @@ struct SourcesView: View {
             password: password,
             deviceId: "rigel-ios"
         ) { auth, _ in
-            busy = false
-            if let auth {
-                settings.setJellyfinServer(v: server.trimmingCharacters(in: .whitespaces))
-                settings.setJellyfinUsername(v: username.trimmingCharacters(in: .whitespaces))
-                settings.setJellyfinToken(v: auth.token)
-                settings.setJellyfinUserId(v: auth.userId)
-                password = ""
-                loadedOnce = false
-                items = []
-                sessions = []
-                loadLibrary()
-            } else {
-                notice = "Authentication failed — check the server URL and credentials"
-                noticeIsError = true
+            Task { @MainActor in
+                self.busy = false
+                if let auth {
+                    self.settings.setJellyfinServer(v: self.server.trimmingCharacters(in: .whitespaces))
+                    self.settings.setJellyfinUsername(v: self.username.trimmingCharacters(in: .whitespaces))
+                    self.settings.setJellyfinToken(v: auth.token)
+                    self.settings.setJellyfinUserId(v: auth.userId)
+                    self.password = ""
+                    self.loadedOnce = false
+                    self.items = []
+                    self.sessions = []
+                    self.loadLibrary()
+                } else {
+                    self.notice = "Authentication failed — check the server URL and credentials"
+                    self.noticeIsError = true
+                }
             }
         }
     }
@@ -271,12 +273,16 @@ struct SourcesView: View {
     private func loadLibrary() {
         busy = true
         jellyfin.browse(base: base, token: token, userId: userId, parentId: parentId) { found, _ in
-            items = found ?? []
-            busy = false
-            loadedOnce = true
-            if sessions.isEmpty {
-                jellyfin.sessions(base: base, token: token) { list, _ in
-                    sessions = list ?? []
+            Task { @MainActor in
+                self.items = found ?? []
+                self.busy = false
+                self.loadedOnce = true
+                if self.sessions.isEmpty {
+                    self.jellyfin.sessions(base: self.base, token: self.token) { list, _ in
+                        Task { @MainActor in
+                            self.sessions = list ?? []
+                        }
+                    }
                 }
             }
         }
@@ -295,9 +301,11 @@ struct SourcesView: View {
             sessionId: session.id,
             itemIds: [firstItem.id]
         ) { ok, _ in
-            busy = false
-            notice = ok?.boolValue == true ? "Sent to \(session.deviceName)" : "Cast failed"
-            noticeIsError = ok?.boolValue != true
+            Task { @MainActor in
+                self.busy = false
+                self.notice = ok?.boolValue == true ? "Sent to \(session.deviceName)" : "Cast failed"
+                self.noticeIsError = ok?.boolValue != true
+            }
         }
     }
 }

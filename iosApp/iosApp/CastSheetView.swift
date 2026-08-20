@@ -104,9 +104,11 @@ struct CastSheetView: View {
             url: trimmed,
             title: CastDispatcher.shared.remoteCastTitle()
         ) { result, _ in
-            busy = false
-            onResult(result ?? "Cast failed")
-            dismiss()
+            Task { @MainActor in
+                self.busy = false
+                self.onResult(result ?? "Cast failed")
+                self.dismiss()
+            }
         }
     }
 }

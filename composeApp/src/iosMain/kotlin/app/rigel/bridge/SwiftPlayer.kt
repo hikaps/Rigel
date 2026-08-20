@@ -4,6 +4,7 @@ import app.rigel.RigelCore
 import app.rigel.player.PlayerUiState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -17,10 +18,9 @@ object SwiftPlayer {
 
     fun snapshot(): PlayerUiState = RigelCore.controller.uiState.value
 
-    /** Fires on the main thread on every state change. */
-    fun observe(onChange: (PlayerUiState) -> Unit) {
+    /** Fires on the main thread on every state change; cancel the Job to stop observing. */
+    fun observe(onChange: (PlayerUiState) -> Unit): Job =
         scope.launch { RigelCore.controller.uiState.collect { onChange(it) } }
-    }
 
     fun loadRaw(url: String): Boolean = RigelCore.controller.loadRaw(url)
 

@@ -13,6 +13,14 @@ import app.rigel.cast.roku.RokuDevice
 import app.rigel.player.PlayerPhase
 import app.rigel.player.PlayerUiState
 import app.rigel.source.jellyfin.JellyfinSession
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.TextContent
+import io.ktor.http.headersOf
 import kotlinx.coroutines.runBlocking
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -119,5 +127,72 @@ class CastDispatcherTest {
         val session = CastTarget.JellyfinSessionTarget(JellyfinSession("s1", "Living Room", "Jellyfin Web"))
         val result = runBlocking { CastDispatcher.cast(session, "http://x/v.mkv", "Movie") }
         assertTrue(result.contains("library items"))
+    }
+
+    // --- Adapter dispatch (mock HTTP engine) ---
+
+    @Test
+    fun dlnaCastFiresSetAvTransportUriThenPlayWithLanUrl() {
+        val lanUrl = "http://192.168.1.5:8080/session-abc/index.m3u8"
+        val engine = MockEngine { request ->
+            respond(
+                content = """<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:SetAVTransportURIResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/></s:Body></s:Envelope>""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/xml"),
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(DlnaDevice("u1", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
+
+        val result = runBlocking { CastDispatcher.cast(target, lanUrl, "Movie", client) }
+
+        assertEquals("Sent to TV", result)
+        assertEquals(2, engine.requestHistory.size)
+        val setUri = engine.requestHistory[0]
+        val play = engine.requestHistory[1]
+        assertEquals(HttpMethod.Post, setUri.method)
+        assertEquals("http://10.0.0.9/ctl", setUri.url.toString())
+        assertTrue(setUri.headers["SOAPACTION"]!!.contains("SetAVTransportURI"))
+        val setUriBody = (setUri.body as? TextContent)?.text ?: ""
+        assertTrue(setUriBody.contains(lanUrl))
+        assertTrue(play.headers["SOAPACTION"]!!.contains("#Play"))
+    }
+
+    @Test
+    fun kodiCastPostsPlayerOpenAndReportsSuccess() {
+        val engine = MockEngine { request ->
+            respond(
+                content = """{"jsonrpc":"2.0","id":1,"result":["OK"]}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Kodi(KodiDevice("k1", "http://10.0.0.7:8080", "Kodi"))
+
+        val result = runBlocking { CastDispatcher.cast(target, "http://192.168.1.5:8080/session-x/index.m3u8", "Movie", client) }
+
+        assertEquals("Sent to Kodi", result)
+        val req = engine.requestHistory.single()
+        assertEquals("http://10.0.0.7:8080/jsonrpc", req.url.toString())
+        val body = (req.body as? TextContent)?.text ?: ""
+        assertTrue(body.contains("\"Player.Open\""))
+    }
+
+    @Test
+    fun kodiCastReportsRejectionWhenResponseContainsError() {
+        val engine = MockEngine { request ->
+            respond(
+                content = """{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid params"}}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Kodi(KodiDevice("k1", "http://10.0.0.7:8080", "Kodi"))
+
+        val result = runBlocking { CastDispatcher.cast(target, "http://x/v.mkv", "Movie", client) }
+
+        assertEquals("Kodi rejected the URL", result)
     }
 }

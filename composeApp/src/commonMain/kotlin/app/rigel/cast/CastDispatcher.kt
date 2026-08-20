@@ -7,6 +7,7 @@ import app.rigel.cast.kodi.KodiRenderer
 import app.rigel.cast.roku.RokuRenderer
 import app.rigel.player.PlayerPhase
 import app.rigel.player.PlayerUiState
+import io.ktor.client.HttpClient
 
 /**
  * Send-flow entry point shared by every host UI. Resolves the URL a remote
@@ -39,22 +40,27 @@ object CastDispatcher {
             ?: "Stream"
 
     /** Returns a human-readable result/error string. */
-    suspend fun cast(target: CastTarget, url: String, title: String): String = when (target) {
-        is CastTarget.Dlna -> {
-            val dlna = DlnaRenderer(RigelCore.client)
-            dlna.setAvTransportUri(target.device, url, title)
-            dlna.play(target.device)
-            "Sent to ${target.name}"
+    suspend fun cast(target: CastTarget, url: String, title: String): String =
+        cast(target, url, title, RigelCore.client)
+
+    /** Same dispatch with an injectable HTTP client (tests use a mock engine). */
+    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): String =
+        when (target) {
+            is CastTarget.Dlna -> {
+                val dlna = DlnaRenderer(client)
+                dlna.setAvTransportUri(target.device, url, title)
+                dlna.play(target.device)
+                "Sent to ${target.name}"
+            }
+            is CastTarget.Kodi -> {
+                val ok = KodiRenderer(client).launch(target.device.endpoint, url)
+                if (ok) "Sent to ${target.name}" else "Kodi rejected the URL"
+            }
+            is CastTarget.Roku -> {
+                val ok = RokuRenderer(client).launchPlayOnRoku(target.device, url)
+                if (ok) "Sent to ${target.name}" else "Roku launch failed (Play on Roku channel required)"
+            }
+            is CastTarget.JellyfinSessionTarget ->
+                "Jellyfin clients accept library items only — cast from the Sources tab"
         }
-        is CastTarget.Kodi -> {
-            val ok = KodiRenderer(RigelCore.client).launch(target.device.endpoint, url)
-            if (ok) "Sent to ${target.name}" else "Kodi rejected the URL"
-        }
-        is CastTarget.Roku -> {
-            val ok = RokuRenderer(RigelCore.client).launchPlayOnRoku(target.device, url)
-            if (ok) "Sent to ${target.name}" else "Roku launch failed (Play on Roku channel required)"
-        }
-        is CastTarget.JellyfinSessionTarget ->
-            "Jellyfin clients accept library items only — cast from the Sources tab"
-    }
 }
