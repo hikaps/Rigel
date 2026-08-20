@@ -34,6 +34,9 @@ jobs:
           if-no-files-found: error
 
   # Same Kotlin suites on the real iOS target (catches platform issues JVM can't).
+  # Note: ~/.konan is intentionally NOT cached via actions/cache — restoring it
+  # deterministically breaks the Kotlin/Native build (config-phase failure, seen
+  # twice). Fresh toolchain download costs ~2 min; gradle caches cover the rest.
   test-ios-kotlin:
     runs-on: macos-15
     steps:
@@ -42,10 +45,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: actions/cache@v4
-        with:
-          path: ~/.konan
-          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
       - uses: gradle/actions/setup-gradle@v4
       - name: Run Kotlin tests on iOS simulator
         run: ./gradlew :composeApp:iosSimulatorArm64Test --console=plain
@@ -66,10 +65,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: actions/cache@v4
-        with:
-          path: ~/.konan
-          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
       - uses: gradle/actions/setup-gradle@v4
       - uses: actions/cache@v4
         with:
