@@ -48,4 +48,34 @@ class JellyfinApiTest {
         )
         assertTrue(JellyfinApi.playCommand(listOf("x")).contains("\"PlayCommand\":\"PlayNow\""))
     }
+
+    @Test
+    fun jsonEscapeEscapesQuotesAndBackslashes() {
+        assertEquals("""a\"b\\c""", JellyfinApi.jsonEscape("""a"b\c"""))
+    }
+
+    @Test
+    fun playCommandInterpolatesIdsVerbatim() {
+        // ItemIds are server-assigned GUIDs; the builder does not JSON-escape them.
+        assertEquals(
+            """{"ItemIds":["a"b"],"PlayCommand":"PlayNow","StartPositionTicks":0}""",
+            JellyfinApi.playCommand(listOf("""a"b""")),
+        )
+    }
+
+    @Test
+    fun browseUrlSkipsBlankParentId() {
+        assertEquals(
+            "http://jf:8096/Users/u1/Items?Recursive=false&Fields=Path",
+            JellyfinApi.browseUrl("http://jf:8096", "u1", ""),
+        )
+    }
+
+    @Test
+    fun embyAuthHeaderCustomValues() {
+        assertEquals(
+            """MediaBrowser Client="C", Device="D", DeviceId="dev", Version="9.9"""",
+            JellyfinApi.embyAuthHeader("dev", client = "C", device = "D", version = "9.9"),
+        )
+    }
 }

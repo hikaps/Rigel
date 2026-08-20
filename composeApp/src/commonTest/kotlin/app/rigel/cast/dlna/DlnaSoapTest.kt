@@ -69,4 +69,31 @@ class DlnaSoapTest {
             DlnaSoap.parseTransportState("<CurrentTransportState>\n NO_MEDIA_PRESENT \n</CurrentTransportState>"),
         )
     }
+
+    @Test
+    fun parsePositionInfoNullWhenRelTimeMissing() {
+        val xml = """<s:Body><u:GetPositionInfoResponse><TrackDuration>01:00:00</TrackDuration></u:GetPositionInfoResponse></s:Body>"""
+        assertEquals(null, DlnaSoap.parsePositionInfo(xml))
+    }
+
+    @Test
+    fun pauseStopAndSeekBodiesCarryActions() {
+        assertEquals(true, DlnaSoap.pauseBody().contains("<u:Pause"))
+        assertEquals(true, DlnaSoap.stopBody().contains("<u:Stop"))
+        assertEquals(true, DlnaSoap.seekBody(90_000).contains("<Target>00:01:30</Target>"))
+        assertEquals(true, DlnaSoap.getTransportStateBody().contains("GetTransportInfo"))
+    }
+
+    @Test
+    fun formatTimeHandlesZeroAndOverflow() {
+        assertEquals("00:00:00", DlnaSoap.formatTime(0))
+        assertEquals("01:01:01", DlnaSoap.formatTime(3_661_000))
+    }
+
+    @Test
+    fun parseRelTimeRejectsGarbage() {
+        assertEquals(null, DlnaSoap.parseRelTime(""))
+        assertEquals(null, DlnaSoap.parseRelTime("abc"))
+        assertEquals(null, DlnaSoap.parseRelTime("1:2:3:4"))
+    }
 }

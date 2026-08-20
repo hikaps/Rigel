@@ -42,7 +42,10 @@ class SettingsStore(private val settings: Settings) {
 
     fun addManualDevice(row: String) {
         val current = manualDevices().toMutableList()
-        if (current.none { it.startsWith(row.substringBefore('|')) }) current += row
+        // Dedupe by device location (kind|usn|location|name), not by kind:
+        // two manual devices of the same type (e.g. two Kodi boxes) must both survive.
+        val location = row.split('|').getOrNull(2)
+        if (location != null && current.none { it.split('|').getOrNull(2) == location }) current += row
         settings.putString(devicesKey, current.joinToString("\n"))
     }
 
@@ -53,7 +56,8 @@ class SettingsStore(private val settings: Settings) {
             is CastTarget.Kodi -> "kodi" to target.device.usn
             is CastTarget.JellyfinSessionTarget -> "jellyfin" to ""
         }
-        val prefix = "$kind|$usn|"
+        // Jellyfin session targets have no usn; match the whole kind.
+        val prefix = if (usn.isEmpty()) "$kind|" else "$kind|$usn|"
         settings.putString(
             devicesKey,
             manualDevices()

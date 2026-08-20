@@ -45,4 +45,20 @@ class KodiJsonRpcTest {
         assertEquals(250_000L, KodiJsonRpc.parseTimeObject(json, "totaltime"))
         assertEquals(null, KodiJsonRpc.parseTimeObject("""{"result":{}}""", "time"))
     }
+
+    @Test
+    fun requestWithoutParamsOmitsParamsKey() {
+        val body = KodiJsonRpc.request("Player.GetActivePlayers")
+        assertEquals("""{"jsonrpc":"2.0","id":1,"method":"Player.GetActivePlayers"}""", body)
+    }
+
+    @Test
+    fun seekZeroRendersExactly() {
+        assertEquals(true, KodiJsonRpc.playerSeekPercentage(0.0).contains("\"percentage\":0.0"))
+    }
+
+    @Test
+    fun jsonEscapeEscapesBackslashAndQuote() {
+        assertEquals("""a\\b\"c""", KodiJsonRpc.jsonEscape("""a\b"c"""))
+    }
 }

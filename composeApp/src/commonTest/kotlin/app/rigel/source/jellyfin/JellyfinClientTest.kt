@@ -1,0 +1,103 @@
+package app.rigel.source.jellyfin
+
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.TextContent
+import io.ktor.http.headersOf
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class JellyfinClientTest {
+
+    private val base = "http://jf:8096"
+
+    @Test
+    fun authenticateParsesTokenAndUser() = kotlinx.coroutines.test.runTest {
+        val requests = mutableListOf<Pair<String, String>>()
+        val json = """{"AccessToken":"tok123","User":{"Id":"u456","Name":"alice"}}"""
+        val engine = MockEngine { request ->
+            requests += request.url.toString() to ((request.body as? TextContent)?.text ?: "")
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val auth = JellyfinClient(HttpClient(engine)).authenticate(base, "alice", "pw", "dev-1")
+        assertNotNull(auth)
+        assertEquals("tok123", auth.token)
+        assertEquals("u456", auth.userId)
+        assertEquals("$base/Users/AuthenticateByName", requests[0].first)
+        assertTrue(requests[0].second.contains("\"Username\":\"alice\""))
+        assertTrue(requests[0].second.contains("\"Pw\":\"pw\""))
+    }
+
+    @Test
+    fun authenticateNullWithoutToken() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { respond("""{"User":{"Id":"u"}}""", HttpStatusCode.OK) }
+        assertNull(JellyfinClient(HttpClient(engine)).authenticate(base, "a", "p", "d"))
+    }
+
+    @Test
+    fun authenticateNullOnNetworkError() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { throw RuntimeException("unreachable") }
+        assertNull(JellyfinClient(HttpClient(engine)).authenticate(base, "a", "p", "d"))
+    }
+
+    @Test
+    fun browseParsesItemsAndFolderFlag() = kotlinx.coroutines.test.runTest {
+        val json = """[
+            {"Id":"i1","Name":"Movies","Type":"Folder"},
+            {"Id":"i2","Name":"File.mp4","Type":"Video"}
+        ]"""
+        val engine = MockEngine { respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", "root")
+        assertEquals(2, items.size)
+        assertEquals(JellyfinItem("i1", "Movies", isFolder = true), items[0])
+        assertEquals(JellyfinItem("i2", "File.mp4", isFolder = false), items[1])
+    }
+
+    @Test
+    fun browseEmptyOnNetworkError() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { throw RuntimeException("unreachable") }
+        assertTrue(JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null).isEmpty())
+    }
+
+    @Test
+    fun sessionsParseDeviceAndClient() = kotlinx.coroutines.test.runTest {
+        val json = """[
+            {"Id":"s1","DeviceName":"iPhone","Client":"Jellyfin Mobile"},
+            {"Id":"s2","DeviceName":"Living Room","Client":"Jellyfin for Roku"}
+        ]"""
+        val engine = MockEngine { respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
+        val sessions = JellyfinClient(HttpClient(engine)).sessions(base, "tok")
+        assertEquals(2, sessions.size)
+        assertEquals(JellyfinSession("s1", "iPhone", "Jellyfin Mobile"), sessions[0])
+        assertEquals(JellyfinSession("s2", "Living Room", "Jellyfin for Roku"), sessions[1])
+    }
+
+    @Test
+    fun playToSessionPostsPlayCommand() = kotlinx.coroutines.test.runTest {
+        val posted = mutableListOf<Pair<String, String>>()
+        val engine = MockEngine { request ->
+            if (request.method == HttpMethod.Post) {
+                posted += request.url.toString() to ((request.body as? TextContent)?.text ?: "")
+            }
+            respond("", HttpStatusCode.OK)
+        }
+        val ok = JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("a", "b"))
+        assertTrue(ok)
+        assertEquals("$base/Sessions/s1/Playing", posted[0].first)
+        assertTrue(posted[0].second.contains("\"ItemIds\":[\"a\",\"b\"]"))
+    }
+
+    @Test
+    fun playToSessionFalseOnNon2xx() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { respond("", HttpStatusCode.InternalServerError) }
+        assertFalse(JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("a")))
+    }
+}
