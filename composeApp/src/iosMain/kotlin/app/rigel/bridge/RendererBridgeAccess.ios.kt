@@ -30,6 +30,6 @@ object RendererEventsImpl : RendererEvents {
     }
 
     override fun onStop() {
-        app.rigel.ui.AppState.screen.value = app.rigel.ui.Screen.HOME
+        app.rigel.RigelCore.controller.stopPlayback()
     }
 }

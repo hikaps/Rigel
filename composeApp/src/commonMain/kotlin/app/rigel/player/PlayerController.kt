@@ -188,6 +188,8 @@ object RigelIntake {
     private var controller: PlayerController? = null
     private val pending = mutableListOf<String>()
 
+    private fun current(): PlayerController = controller ?: app.rigel.RigelCore.controller
+
     fun attach(controller: PlayerController) {
         this.controller = controller
         val queued = pending.toList()
@@ -196,14 +198,10 @@ object RigelIntake {
     }
 
     fun handle(url: String): Boolean {
-        val c = controller
-        if (c == null) {
+        val ok = current().loadRaw(url)
+        if (!ok && controller == null) {
             pending += url
             return true
-        }
-        val ok = c.loadRaw(url)
-        if (ok) {
-            app.rigel.ui.AppState.screen.value = app.rigel.ui.Screen.PLAYER
         }
         return ok
     }

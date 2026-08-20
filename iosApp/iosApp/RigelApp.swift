@@ -3,8 +3,11 @@ import ComposeApp
 
 @main
 struct RigelApp: App {
+    @StateObject private var player = PlayerModel()
+
     init() {
         BridgeRegistry.register()
+        RigelIntake.shared.attach(controller: RigelCore.shared.controller)
         // Test/automation hook: accept a rigel:// URL as a launch argument
         // (avoids the system scheme-confirmation dialog in headless e2e runs).
         for arg in ProcessInfo.processInfo.arguments {
@@ -22,7 +25,8 @@ struct RigelApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environmentObject(player)
                 .onOpenURL { url in
                     NSLog("[RigelApp] openURL %@", url.absoluteString)
                     let handled = RigelIntake.shared.handle(url: url.absoluteString)
