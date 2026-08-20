@@ -73,11 +73,22 @@ class SettingsStoreTest {
     }
 
     @Test
-    fun manualDevicesDeduplicatedByHostPrefix() {
+    fun manualDevicesDeduplicatedByLocation() {
         val s = store()
         s.addManualDevice("kodi|k1|http://h:8080|Kodi")
         s.addManualDevice("kodi|k2|http://h:8080|Kodi Again")
         assertEquals(listOf("kodi|k1|http://h:8080|Kodi"), s.manualDevices())
+    }
+
+    @Test
+    fun manualDevicesKeepDifferentLocationsOfSameKind() {
+        val s = store()
+        s.addManualDevice("kodi|k1|http://h1:8080|Kodi")
+        s.addManualDevice("kodi|k2|http://h2:8080|Kodi")
+        assertEquals(
+            listOf("kodi|k1|http://h1:8080|Kodi", "kodi|k2|http://h2:8080|Kodi"),
+            s.manualDevices(),
+        )
     }
 
     @Test
