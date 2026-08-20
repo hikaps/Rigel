@@ -12,9 +12,16 @@ import io.ktor.client.HttpClient
  * any host UI (SwiftUI on iOS today, Compose/Android later).
  */
 object RigelCore {
+    init {
+        setupLogging()
+    }
+
     val client: HttpClient = HttpClient()
     val settings: SettingsStore = SettingsStore(Settings())
     val controller: PlayerController = PlayerController(settings)
     val devices: DevicesRepository = DevicesRepository(client, settings)
     val jellyfin: JellyfinClient = JellyfinClient(client)
 }
+
+/** Platform log writer wiring — iOS actual sends Kermit output to NSLog. */
+internal expect fun setupLogging()

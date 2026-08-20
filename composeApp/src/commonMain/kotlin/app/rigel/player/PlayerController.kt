@@ -140,7 +140,11 @@ class PlayerController(
             )
             return
         }
-        val proxyUrl = "http://127.0.0.1:$port/$relPath"
+        // AirPlay video is remote playback: the TV fetches the HLS playlist and
+        // segments itself, so the URL must be reachable from the LAN, not loopback.
+        // Loopback is the fallback when no Wi-Fi address is available (still plays locally).
+        val host = Bridges.lanBaseUrl() ?: "http://127.0.0.1:$port"
+        val proxyUrl = "$host/$relPath"
         Logger.i(tag) { "proxy ready: $proxyUrl" }
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.PLAYING, proxyUrl = proxyUrl)
     }

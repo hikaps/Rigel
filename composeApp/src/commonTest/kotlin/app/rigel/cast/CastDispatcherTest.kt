@@ -82,6 +82,19 @@ class CastDispatcherTest {
     }
 
     @Test
+    fun remoteUrlRehostsLanFormattedProxyPathAtLanBase() {
+        // Regression: since the AirPlay fix the proxy URL is LAN-formatted;
+        // the path must be re-hosted at the current LAN base without the old
+        // 127.0.0.1 delimiter (which would mangle it into //host:port/…).
+        RigelBridgeFactory.register(null, null, null, FakeBridges(lan = "http://10.0.0.5:8090"))
+        val state = playing(proxyUrl = "http://192.168.1.5:8080/session-abc/index.m3u8")
+        assertEquals(
+            "http://10.0.0.5:8090/session-abc/index.m3u8",
+            CastDispatcher.remoteCastUrl(state),
+        )
+    }
+
+    @Test
     fun remoteUrlIsSourceWhenPlayingDirect() {
         assertEquals("http://origin/v.mkv", CastDispatcher.remoteCastUrl(playing()))
     }
