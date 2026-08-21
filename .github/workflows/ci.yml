@@ -80,11 +80,14 @@ jobs:
         run: ./scripts/gen-fixtures.sh
       - name: Run Swift unit tests
         run: |
-          DEVICE="$(xcrun simctl list devices available | grep -m1 -o 'iPhone [^(]*' | sed 's/[[:space:]]*$//')"
+          # Pin by UDID: name+OS:latest fails on runners with mixed simulator
+          # runtimes (e.g. iPhone 16 Pro only on iOS 18.2 while Xcode's latest
+          # runtime is 26.x). First available iPhone simulator wins.
+          DEVICE_UDID="$(xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(x['udid'] for v in d['devices'].values() for x in v if x.get('isAvailable') and x['name'].startswith('iPhone')))")"
           xcodebuild test \
             -project iosApp/Rigel.xcodeproj \
             -scheme Rigel \
-            -destination "platform=iOS Simulator,name=$DEVICE" \
+            -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
             -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
