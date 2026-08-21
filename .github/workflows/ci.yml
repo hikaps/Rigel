@@ -75,7 +75,11 @@ jobs:
       - name: Install ffmpeg CLI (fixture generation)
         run: brew install ffmpeg
       - name: Build FFmpeg simulator libs
-        run: ./scripts/build-ffmpeg.sh
+        run: |
+          # Pin parallelism (parallel make races on generated headers) and
+          # retry once — the race is flaky, not deterministic.
+          JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh \
+            || JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh
       - name: Generate media fixtures
         run: ./scripts/gen-fixtures.sh
       - name: Run Swift unit tests
