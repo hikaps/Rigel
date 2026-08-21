@@ -17,10 +17,14 @@ final class RigelPlayerViewController: UIViewController {
     private var audioSessionActivated = false
     private var notifiedPlaying = false
 
-    /// Configure AVAudioSession for long-form video so AirPlay routes the
-    /// video item, not only its audio track, to the selected receiver.
-    static func configureAudioSession(_ audioSession: AVAudioSession = .sharedInstance()) throws {
-        try audioSession.setCategory(.playback, mode: .moviePlayback, policy: .longFormVideo)
+    /// Configure AVAudioSession for the current media so only eligible
+    /// long-form video selects the shared video AirPlay route.
+    static func configureAudioSession(
+        _ audioSession: AVAudioSession = .sharedInstance(),
+        longFormVideoAirPlayEligible: Bool
+    ) throws {
+        let policy: AVAudioSession.RouteSharingPolicy = longFormVideoAirPlayEligible ? .longFormVideo : .default
+        try audioSession.setCategory(.playback, mode: .moviePlayback, policy: policy)
         try audioSession.setActive(true)
     }
 
@@ -105,8 +109,8 @@ final class RigelPlayerViewController: UIViewController {
         events.onBack()
     }
 
-    func load(url: String, title: String?, sender: String?) {
-        NSLog("[RigelPlayer] load %@", url)
+    func load(url: String, title: String?, sender: String?, longFormVideoAirPlayEligible: Bool) {
+        NSLog("[RigelPlayer] load %@ longFormVideo=%d", url, longFormVideoAirPlayEligible ? 1 : 0)
         titleLabel.text = title ?? url.components(separatedBy: "/").last
         senderLabel.text = sender.map { "via \($0)" }
         guard let avURL = URL(string: url) else {
@@ -115,7 +119,9 @@ final class RigelPlayerViewController: UIViewController {
         }
         tearDownPlayer()
         do {
-            try Self.configureAudioSession()
+            try Self.configureAudioSession(
+                longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
+            )
             audioSessionActivated = true
         } catch {
             NSLog("[RigelPlayer] audio session setup failed: %@", error.localizedDescription)
@@ -149,7 +155,6 @@ final class RigelPlayerViewController: UIViewController {
         player?.pause()
         tearDownPlayer()
         deactivateAudioSession()
-
     }
 
     private func tearDownPlayer() {
@@ -212,8 +217,18 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         return v
     }
 
-    func load(url: String, title: String?, sender: String?) {
-        vc?.load(url: url, title: title, sender: sender)
+    func load(
+        url: String,
+        title: String?,
+        sender: String?,
+        longFormVideoAirPlayEligible: Bool
+    ) {
+        vc?.load(
+            url: url,
+            title: title,
+            sender: sender,
+            longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
+        )
     }
 
     func stop() {

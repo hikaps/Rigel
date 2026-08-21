@@ -91,15 +91,109 @@ final class PlayerModelTests: XCTestCase {
     }
 
     @MainActor
-    func testPlayerUsesLongFormVideoAirPlayPolicy() throws {
+    func testLongFormEligibilityForKnownDirectVideo() {
+        let model = PlayerModel()
+        model.apply(state(probe: probe(durationMs: 600_000)))
+
+        XCTAssertTrue(model.longFormVideoAirPlayEligible)
+    }
+
+    @MainActor
+    func testShortVideoDoesNotUseLongFormAirPlayPolicy() {
+        let model = PlayerModel()
+        model.apply(state(probe: probe(durationMs: 30_000)))
+
+        XCTAssertFalse(model.longFormVideoAirPlayEligible)
+    }
+
+    @MainActor
+    func testAudioOnlyDoesNotUseLongFormAirPlayPolicy() {
+        let model = PlayerModel()
+        model.apply(state(probe: probe(videoCodec: nil)))
+
+        XCTAssertFalse(model.longFormVideoAirPlayEligible)
+    }
+
+    @MainActor
+    func testHlsAndProxyPlaybackDoNotUseLongFormAirPlayPolicy() {
+        let model = PlayerModel()
+        model.apply(state(probe: probe(container: "m3u8")))
+        XCTAssertFalse(model.longFormVideoAirPlayEligible)
+
+        model.apply(state(
+            route: .remux,
+            proxyUrl: "http://192.168.1.50:8090/session-x/index.m3u8",
+            probe: probe()
+        ))
+        XCTAssertFalse(model.longFormVideoAirPlayEligible)
+    }
+
+    @MainActor
+    func testUnknownDurationAndFailedPlaybackDoNotUseLongFormAirPlayPolicy() {
+        let model = PlayerModel()
+        model.apply(state(probe: probe(durationMs: nil)))
+        XCTAssertFalse(model.longFormVideoAirPlayEligible)
+
+        model.apply(state(probe: probe(isLive: true)))
+        XCTAssertFalse(model.longFormVideoAirPlayEligible)
+
+        model.apply(state(phase: .error, probe: probe(durationMs: 600_000)))
+        XCTAssertFalse(model.longFormVideoAirPlayEligible)
+    }
+
+    @MainActor
+    func testPlayerUsesLongFormVideoOnlyWhenEligible() throws {
         let audioSession = AVAudioSession.sharedInstance()
-        try RigelPlayerViewController.configureAudioSession(audioSession)
         defer {
             try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
         }
 
-        XCTAssertEqual(audioSession.category, .playback)
-        XCTAssertEqual(audioSession.mode, .moviePlayback)
+        try RigelPlayerViewController.configureAudioSession(
+            audioSession,
+            longFormVideoAirPlayEligible: true
+        )
         XCTAssertEqual(audioSession.routeSharingPolicy, .longFormVideo)
+
+        try RigelPlayerViewController.configureAudioSession(
+            audioSession,
+            longFormVideoAirPlayEligible: false
+        )
+        XCTAssertEqual(audioSession.routeSharingPolicy, .default)
+    }
+
+    private func probe(
+        container: String = "mp4",
+        videoCodec: String? = "h264",
+        durationMs: Int64? = 600_000,
+        isLive: Bool = false
+    ) -> ProbeResult {
+        ProbeResult(
+            container: container,
+            videoCodec: videoCodec,
+            audioCodecs: ["aac"],
+            subtitleCodecs: [],
+            durationMs: durationMs.map { KotlinLong(longLong: $0) },
+            isLive: isLive
+        )
+    }
+
+    private func state(
+        phase: PlayerPhase = .playing,
+        route: PlaybackRoute = .direct,
+        proxyUrl: String? = nil,
+        probe: ProbeResult
+    ) -> PlayerUiState {
+        PlayerUiState(
+            phase: phase,
+            sourceUrl: "http://origin/video",
+            filename: "video.mp4",
+            subtitleUrls: [],
+            route: route,
+            proxyUrl: proxyUrl,
+            probe: probe,
+            error: nil,
+            castActive: false,
+            sender: nil
+        )
     }
 }
