@@ -9,7 +9,7 @@ name: Beta IPA
 #   IOS_CERTIFICATE_PASSWORD password of the .p12
 #   IOS_PROVISIONING_PROFILE base64 of an ad-hoc .mobileprovision covering BOTH
 #                            bundle IDs (com.rigel.player and com.rigel.player.share);
-#                            a wildcard com.rigel.player.* profile is simplest.
+#                            a wildcard com.rigel.* profile covers both.
 #   Test device UDIDs must be registered in the ad-hoc profile.
 #
 # The job is skipped (not failed) until the secrets are set, so develop merges
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: beta-ipa-${{ github.ref }}
+  group: beta-ipa
   cancel-in-progress: true
 
 permissions:
@@ -30,21 +30,39 @@ permissions:
 jobs:
   build-beta-ipa:
     runs-on: macos-15
-    if: secrets.IOS_CERTIFICATE != '' && secrets.IOS_PROVISIONING_PROFILE != ''
     steps:
-      - uses: actions/checkout@v4
+      - name: Check signing configuration
+        id: signing
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        shell: bash
+        run: |
+          if [[ -z "$IOS_CERTIFICATE" || -z "$IOS_CERTIFICATE_PASSWORD" || -z "$IOS_PROVISIONING_PROFILE" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Beta IPA skipped: signing secrets are not configured."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.signing.outputs.configured == 'true'
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - if: steps.signing.outputs.configured == 'true'
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - if: steps.signing.outputs.configured == 'true'
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Install JDK 21 (Xcode prebuild hardcodes brew prefix)
+        if: steps.signing.outputs.configured == 'true'
         run: brew install openjdk@21
 
-      - uses: actions/cache@v4
+      - if: steps.signing.outputs.configured == 'true'
+        uses: actions/cache@v4
         with:
           path: iosApp/vendor/ffmpeg-device
           key: ffmpeg-device-${{ hashFiles('scripts/build-ffmpeg.sh') }}
@@ -52,9 +70,11 @@ jobs:
             ffmpeg-device-
 
       - name: Build FFmpeg device libs
+        if: steps.signing.outputs.configured == 'true'
         run: SDK=iphoneos ./scripts/build-ffmpeg.sh
 
       - name: Install signing certificate
+        if: steps.signing.outputs.configured == 'true'
         env:
           IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
@@ -75,6 +95,7 @@ jobs:
           security default-keychain -s "$KEYCHAIN_PATH"
 
       - name: Install provisioning profile
+        if: steps.signing.outputs.configured == 'true'
         env:
           IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
         run: |
@@ -84,6 +105,7 @@ jobs:
             > "$HOME/Library/MobileDevice/Provisioning Profiles/Rigel.mobileprovision"
 
       - name: Archive app for device
+        if: steps.signing.outputs.configured == 'true'
         run: |
           xcodebuild archive \
             -project iosApp/Rigel.xcodeproj \
@@ -95,6 +117,7 @@ jobs:
             DEVELOPMENT_TEAM=9SAXN99TCU
 
       - name: Export IPA (ad-hoc)
+        if: steps.signing.outputs.configured == 'true'
         run: |
           cat > build/export-options.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -118,6 +141,7 @@ jobs:
             -exportOptionsPlist build/export-options.plist
 
       - name: Publish rolling beta release
+        if: steps.signing.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -127,6 +151,7 @@ jobs:
           mv build/export/Rigel.ipa "$NAMED"
           gh release delete beta --yes --cleanup-tag || true
           gh release create beta "$NAMED" \
+            --target "$SHA" \
             --title "Rigel Beta ($(date -u +%Y-%m-%d))" \
             --notes "Rolling ad-hoc beta from develop @ ${SHA:0:7}. Install requires the device UDID to be registered in the ad-hoc provisioning profile." \
             --latest=false
