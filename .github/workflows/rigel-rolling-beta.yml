@@ -1,4 +1,4 @@
-name: Beta IPA
+name: Rigel Rolling Beta Release
 
 # Rolling beta: every merge to develop archives the app for device, exports a
 # development-signed IPA, and publishes it to a single "beta" GitHub release
