@@ -64,22 +64,34 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
-      - uses: actions/cache@v4
-        with:
-          path: iosApp/vendor/ffmpeg
-          key: ffmpeg-sim-${{ hashFiles('scripts/build-ffmpeg.sh') }}
-          restore-keys: |
-            ffmpeg-sim-
       - name: Install JDK 21 (Xcode prebuild hardcodes brew prefix)
-        run: brew install openjdk@21
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew list --versions openjdk@21 >/dev/null 2>&1 || brew install openjdk@21
       - name: Install ffmpeg CLI (fixture generation)
-        run: brew install ffmpeg
-      - name: Build FFmpeg simulator libs
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew list --versions ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Restore or build FFmpeg simulator libs
         run: |
-          # Pin parallelism (parallel make races on generated headers) and
-          # retry once — the race is flaky, not deterministic.
-          JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh \
-            || JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh
+          # FFmpeg is a vendored dependency, not a test subject: build once into
+          # a persistent runner store, then copy it in. checkout cleans the
+          # gitignored vendor dir every run, so rebuilding unconditionally was
+          # pure waste (~5 min/run).
+          set -euo pipefail
+          if [ -d "$HOME/rigel-vendor/ffmpeg-sim/lib" ]; then
+            mkdir -p iosApp/vendor/ffmpeg
+            cp -R "$HOME/rigel-vendor/ffmpeg-sim/." iosApp/vendor/ffmpeg/
+            echo "restored FFmpeg simulator libs from persistent store"
+          else
+            mkdir -p "$HOME/rigel-vendor"
+            # Pin parallelism (parallel make races on generated headers) and
+            # retry once — the race is flaky, not deterministic.
+            JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh \
+              || JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh
+            cp -R iosApp/vendor/ffmpeg "$HOME/rigel-vendor/ffmpeg-sim"
+            echo "built and stored FFmpeg simulator libs"
+          fi
       - name: Generate media fixtures
         run: ./scripts/gen-fixtures.sh
       - name: Run Swift unit tests
@@ -92,6 +104,6 @@ jobs:
             -project iosApp/Rigel.xcodeproj \
             -scheme Rigel \
             -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
-            -derivedDataPath build/DerivedData \
+            -derivedDataPath "$HOME/rigel-deriveddata" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
