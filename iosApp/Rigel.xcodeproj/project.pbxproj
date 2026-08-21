@@ -335,7 +335,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "case \"$SDK_NAME\" in\n  iphoneos*) SRC=ffmpeg-device ;;\n  *) SRC=ffmpeg ;;\nesac\nrm -rf \"$SRCROOT/vendor/ffmpeg/current\"\nmkdir -p \"$SRCROOT/vendor/ffmpeg/current\"\ncp -R \"$SRCROOT/vendor/$SRC/lib\" \"$SRCROOT/vendor/ffmpeg/current/\"\n";
+			shellScript = "case \"$SDK_NAME\" in\n  iphoneos*) SRC=ffmpeg-device ;;\n  *) SRC=ffmpeg ;;\nesac\nrm -rf \"$SRCROOT/vendor/ffmpeg/current\"\nmkdir -p \"$SRCROOT/vendor/ffmpeg/current\"\ncp -R \"$SRCROOT/vendor/$SRC/lib\" \"$SRCROOT/vendor/ffmpeg/current/\"\ncp -R \"$SRCROOT/vendor/$SRC/include\" \"$SRCROOT/vendor/ffmpeg/current/\"\n";
 		};
 		CA942E500610D1BDCF882F61 /* Build ComposeApp framework */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -427,7 +427,7 @@
 				DEVELOPMENT_TEAM = 9SAXN99TCU;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/vendor/ffmpeg/include",
+					"$(SRCROOT)/vendor/ffmpeg/current/include",
 				);
 				INFOPLIST_FILE = iosApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -484,7 +484,7 @@
 				DEVELOPMENT_TEAM = 9SAXN99TCU;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				HEADER_SEARCH_PATHS = (
-					"$(SRCROOT)/vendor/ffmpeg/include",
+					"$(SRCROOT)/vendor/ffmpeg/current/include",
 				);
 				INFOPLIST_FILE = iosApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

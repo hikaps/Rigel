@@ -1,0 +1,132 @@
+name: Beta IPA
+
+# Rolling beta: every merge to develop archives the app for device, exports an
+# ad-hoc IPA, and publishes it to a single "beta" GitHub release that is
+# replaced on each run (previous beta + tag are deleted first).
+#
+# Prerequisites (repo secrets):
+#   IOS_CERTIFICATE          base64 of a signing cert .p12 valid for team 9SAXN99TCU
+#   IOS_CERTIFICATE_PASSWORD password of the .p12
+#   IOS_PROVISIONING_PROFILE base64 of an ad-hoc .mobileprovision covering BOTH
+#                            bundle IDs (com.rigel.player and com.rigel.player.share);
+#                            a wildcard com.rigel.player.* profile is simplest.
+#   Test device UDIDs must be registered in the ad-hoc profile.
+#
+# The job is skipped (not failed) until the secrets are set, so develop merges
+# stay unblocked. Trigger manually with workflow_dispatch once secrets exist.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: beta-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-beta-ipa:
+    runs-on: macos-15
+    if: secrets.IOS_CERTIFICATE != '' && secrets.IOS_PROVISIONING_PROFILE != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install JDK 21 (Xcode prebuild hardcodes brew prefix)
+        run: brew install openjdk@21
+
+      - uses: actions/cache@v4
+        with:
+          path: iosApp/vendor/ffmpeg-device
+          key: ffmpeg-device-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+          restore-keys: |
+            ffmpeg-device-
+
+      - name: Build FFmpeg device libs
+        run: SDK=iphoneos ./scripts/build-ffmpeg.sh
+
+      - name: Install signing certificate
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/rigel.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$IOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/cert.p12" -P "$IOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+      - name: Install provisioning profile
+        env:
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$IOS_PROVISIONING_PROFILE" | base64 --decode \
+            > "$HOME/Library/MobileDevice/Provisioning Profiles/Rigel.mobileprovision"
+
+      - name: Archive app for device
+        run: |
+          xcodebuild archive \
+            -project iosApp/Rigel.xcodeproj \
+            -scheme Rigel \
+            -configuration Release \
+            -archivePath build/Rigel.xcarchive \
+            -destination "generic/platform=iOS" \
+            -allowProvisioningUpdates \
+            DEVELOPMENT_TEAM=9SAXN99TCU
+
+      - name: Export IPA (ad-hoc)
+        run: |
+          cat > build/export-options.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>ad-hoc</string>
+              <key>signingStyle</key>
+              <string>automatic</string>
+              <key>stripSwiftSymbols</key>
+              <true/>
+              <key>uploadSymbols</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath build/Rigel.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist build/export-options.plist
+
+      - name: Publish rolling beta release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA="${{ github.sha }}"
+          NAMED="build/Rigel-beta-${SHA:0:7}.ipa"
+          mv build/export/Rigel.ipa "$NAMED"
+          gh release delete beta --yes --cleanup-tag || true
+          gh release create beta "$NAMED" \
+            --title "Rigel Beta ($(date -u +%Y-%m-%d))" \
+            --notes "Rolling ad-hoc beta from develop @ ${SHA:0:7}. Install requires the device UDID to be registered in the ad-hoc provisioning profile." \
+            --latest=false
