@@ -129,4 +129,19 @@ class FormatRouterTest {
     fun unknownPixFmtStaysDirect() {
         assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mp4", "h264", listOf("aac"), pixFmt = null), false))
     }
+
+    @Test
+    fun nv12DirectPlayable() {
+        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mp4", "h264", listOf("aac"), pixFmt = "nv12"), false))
+    }
+
+    @Test
+    fun nineBitTranscodes() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "hevc", listOf("aac"), pixFmt = "yuv420p9le"), false))
+    }
+
+    @Test
+    fun sixteenBitTranscodes() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "hevc", listOf("aac"), pixFmt = "yuv420p16le"), false))
+    }
 }

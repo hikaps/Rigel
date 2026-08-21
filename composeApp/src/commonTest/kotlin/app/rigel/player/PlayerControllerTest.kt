@@ -42,6 +42,8 @@ class PlayerControllerTest {
     private val stoppedSessions = mutableListOf<String>()
     private var serverStopped = false
     private val hlsModes = mutableListOf<String>()
+    /** When non-null, startHlsSession defers its onReady until fired here. */
+    private var pendingReady: ((String?, String?) -> Unit)? = null
 
     private fun controller(settings: SettingsStore = SettingsStore(MapSettings(mutableMapOf()))): PlayerController {
         RigelBridgeFactory.register(
@@ -60,7 +62,11 @@ class PlayerControllerTest {
                     onReady: (String?, String?) -> Unit,
                 ) {
                     hlsModes += mode
-                    onReady(hlsPath, hlsError)
+                    if (pendingReady != null) {
+                        pendingReady = onReady
+                    } else {
+                        onReady(hlsPath, hlsError)
+                    }
                 }
 
                 override fun stopHlsSession(sessionId: String) {
@@ -282,5 +288,75 @@ class PlayerControllerTest {
         c.reportError("boom")
         assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
         assertEquals("boom", c.uiState.value.error)
+    }
+
+    @Test
+    fun assSubtitleForcesTranscode() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/subs.ass")))
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertNotNull(c.uiState.value.proxyUrl)
+        assertEquals(listOf("transcode"), hlsModes)
+    }
+
+    @Test
+    fun assSubtitleWithQueryAndFragmentForcesTranscode() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/subs.ass?token=abc#track1")))
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+    }
+
+    @Test
+    fun assSubtitlePercentEncodedForcesTranscode() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/sub%2Eass")))
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+    }
+
+    @Test
+    fun assSubtitleMixedCaseForcesTranscode() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/SUBS.ASS")))
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+    }
+
+    @Test
+    fun srtSubtitleUnderAssetsPathStaysDirect() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/assets/subtitles.srt")))
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertNull(c.uiState.value.proxyUrl)
+    }
+
+    @Test
+    fun errorDuringProxyPrepIsSwallowed() = runTest(dispatcher.scheduler) {
+        pendingReady = { _, _ -> }
+        val c = controller()
+        c.loadRequest(request)
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.reportError("first failure")
+        advanceUntilIdle()
+        // Fallback in flight; proxy onReady not yet fired.
+        assertEquals(PlayerPhase.PREPARING_PROXY, c.uiState.value.phase)
+
+        // Native player's duplicate `.failed` poll races the proxy build.
+        c.reportError("duplicate failure from dying player")
+        assertEquals(PlayerPhase.PREPARING_PROXY, c.uiState.value.phase)
+        assertNull(c.uiState.value.error)
+
+        pendingReady?.invoke(hlsPath, hlsError)
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertNotNull(c.uiState.value.proxyUrl)
+        pendingReady = null
     }
 }

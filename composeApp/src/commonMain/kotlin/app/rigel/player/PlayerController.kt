@@ -89,6 +89,36 @@ class PlayerController(
         scope.launch { probeAndRoute(request) }
     }
 
+    /**
+     * True when a subtitle URL points at an Advanced SubStation file. Only
+     * ASS forces the transcode route — HLS cannot carry it without burn-in.
+     * Query, fragment, and percent-encoding are stripped so "subs.ass?x=1",
+     * "subs.ass#track" and "sub%2Eass" all classify correctly, while
+     * "assets/subs.srt" does not.
+     */
+    private fun isAssSubtitle(url: String): Boolean {
+        val path = url.substringBefore('?').substringBefore('#').substringAfterLast('/')
+        return percentDecode(path).endsWith(".ass", ignoreCase = true)
+    }
+
+    private fun percentDecode(s: String): String = buildString {
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '%' && i + 2 < s.length) {
+                val hi = s[i + 1].digitToIntOrNull(16)
+                val lo = s[i + 2].digitToIntOrNull(16)
+                if (hi != null && lo != null) {
+                    append((hi * 16 + lo).toChar())
+                    i += 3
+                    continue
+                }
+            }
+            append(c)
+            i += 1
+        }
+    }
+
     private suspend fun probeAndRoute(request: IntakeRequest) {
         val (probe, probeError) = Bridges.probe(request.sourceUrl, emptyMap())
         if (probe == null) {
@@ -103,7 +133,7 @@ class PlayerController(
         val route = when (override) {
             RouteOverride.DIRECT -> PlaybackRoute.DIRECT
             RouteOverride.ALWAYS_PROXY -> PlaybackRoute.REMUX
-            RouteOverride.AUTO -> FormatRouter.decide(probe, hasExternalAssSubs = request.subtitleUrls.any { it.substringBeforeLast('?').substringAfterLast('/').endsWith(".ass", ignoreCase = true) })
+            RouteOverride.AUTO -> FormatRouter.decide(probe, hasExternalAssSubs = request.subtitleUrls.any { isAssSubtitle(it) })
         }
         Logger.i(tag) { "route=$route container=${probe.container} video=${probe.videoCodec} audio=${probe.audioCodecs}" }
         when (route) {
@@ -198,6 +228,11 @@ class PlayerController(
      */
     fun reportError(message: String) {
         val current = _uiState.value
+        // The native player polls item.status and can deliver a second
+        // `.failed` after the first one already triggered the fallback.
+        // Swallow errors while the proxy is being built — prepareProxy reports
+        // its own outcome.
+        if (current.phase == PlayerPhase.PREPARING_PROXY) return
         if (!directFallbackUsed && current.phase == PlayerPhase.PLAYING &&
             current.route == PlaybackRoute.DIRECT && current.proxyUrl == null && current.probe != null
         ) {

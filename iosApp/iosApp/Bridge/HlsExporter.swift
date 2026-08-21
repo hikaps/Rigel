@@ -97,7 +97,11 @@ final class RigelHlsExporter {
 
             switch codecpar.pointee.codec_type {
             case AVMEDIA_TYPE_VIDEO:
-                if mode == "remux" || codecpar.pointee.codec_id == AV_CODEC_ID_H264 || codecpar.pointee.codec_id == AV_CODEC_ID_HEVC {
+                // remux: verbatim stream copy. transcode: always re-encode —
+                // FormatRouter sends Hi10P/4:2:2 here precisely because the
+                // original bitstream cannot be decoded by AVPlayer, so copying
+                // it into HLS would fail identically.
+                if mode == "remux" {
                     if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
                         outStream.pointee.codecpar.pointee.codec_tag = 0
                         outStream.pointee.time_base = inStream.pointee.time_base
@@ -342,6 +346,13 @@ final class RigelHlsExporter {
             NSLog("[RigelHlsExporter] downscaling %dx%d -> %dx%d", decCtx.pointee.width, decCtx.pointee.height, outW, outH)
         }
 
+        // VideoToolbox's H.264 encoder consumes NV12. Convert whenever the
+        // decoder output isn't already NV12 (planar yuv420p is the norm; Hi10P
+        // decodes to yuv420p10le) or when downscaling. Decided up front —
+        // sw_format must be final before av_hwframe_ctx_init.
+        let inputPixFmt = decCtx.pointee.pix_fmt
+        let needScale = outW != decCtx.pointee.width || outH != decCtx.pointee.height || inputPixFmt != AV_PIX_FMT_NV12
+
         var hwCtx: UnsafeMutablePointer<AVBufferRef>? = nil
         guard av_hwdevice_ctx_create(&hwCtx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nil, nil, 0) >= 0,
               let hwCtx else { return nil }
@@ -349,46 +360,17 @@ final class RigelHlsExporter {
         let framesRef = UnsafeMutableRawPointer(raw).assumingMemoryBound(to: AVBufferRef.self)
         let framesPtr = UnsafeMutableRawPointer(raw).assumingMemoryBound(to: AVHWFramesContext.self)
         framesPtr.pointee.format = AV_PIX_FMT_VIDEOTOOLBOX
-        // sw_format is finalized below once the scaler decision is made.
-        framesPtr.pointee.sw_format = decCtx.pointee.pix_fmt
+        framesPtr.pointee.sw_format = AV_PIX_FMT_NV12
         framesPtr.pointee.width = outW
         framesPtr.pointee.height = outH
         framesPtr.pointee.initial_pool_size = 8
         guard av_hwframe_ctx_init(framesRef) >= 0 else { return nil }
 
-        encCtx.pointee.hw_frames_ctx = av_buffer_ref(framesRef)
-        encCtx.pointee.width = outW
-        encCtx.pointee.height = outH
-        encCtx.pointee.time_base = AVRational(num: 1, den: 30)
-        // AirPlay smoothness over fidelity: realtime-priority VideoToolbox
-        // session, bitrate scaled to output size so the encoder never falls
-        // behind the renderer's consumption rate.
-        encCtx.pointee.bit_rate = transcodedBitrate(width: Int(outW), height: Int(outH))
-        // Keyframe every segment (4s): each HLS chunk starts on an IDR, so a
-        // seek/AirPlay join lands on an instantly decodable frame and the
-        // playlist never references across segment boundaries.
-        encCtx.pointee.gop_size = fpsHint(inputStream: inputStream) * 4
-        encCtx.pointee.keyint_min = encCtx.pointee.gop_size
-        encCtx.pointee.max_b_frames = 0
-        encCtx.pointee.pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX
-        av_opt_set(encCtx, "profile", "main", 0)
-        // realtime: VideoToolbox schedules encode at capture priority —
-        // the difference between keeping up with playback and falling
-        // behind on AirPlay. allow_hw: keeps frames on GPU end to end.
-        av_opt_set(encCtx, "realtime", "1", 0)
-        av_opt_set(encCtx, "allow_hw", "1", 0)
-        var encoderOptions: OpaquePointer? = nil
-        defer { av_dict_free(&encoderOptions) }
         var scaler: OpaquePointer? = nil
         var scaledFrame: UnsafeMutablePointer<AVFrame>? = nil
-        let needsScale = outW != decCtx.pointee.width || outH != decCtx.pointee.height
-        if needsScale {
-            // Scale into NV12: VideoToolbox's native encode format. Also
-            // normalizes high-bit-depth decode output (10/12-bit YUV) into
-            // 8-bit NV12 so the hw encoder accepts it.
-            framesPtr.pointee.sw_format = AV_PIX_FMT_NV12
+        if needScale {
             scaler = sws_getContext(
-                decCtx.pointee.width, decCtx.pointee.height, decCtx.pointee.pix_fmt,
+                decCtx.pointee.width, decCtx.pointee.height, inputPixFmt,
                 Int32(outW), Int32(outH), AV_PIX_FMT_NV12,
                 SWS_BILINEAR, nil, nil, nil)
             guard let scaler else { return nil }
@@ -400,6 +382,36 @@ final class RigelHlsExporter {
             f.pointee.height = Int32(outH)
             if av_frame_get_buffer(f, 0) < 0 { return nil }
         }
+
+        encCtx.pointee.hw_frames_ctx = av_buffer_ref(framesRef)
+        encCtx.pointee.width = outW
+        encCtx.pointee.height = outH
+        encCtx.pointee.time_base = AVRational(num: 1, den: 30)
+        // AirPlay smoothness over fidelity: realtime-priority VideoToolbox
+        // session, bitrate scaled to output size so the encoder never falls
+        // behind the renderer's consumption rate.
+        encCtx.pointee.bit_rate = transcodedBitrate(width: Int(outW), height: Int(outH))
+        // Keyframe every segment (4s): each HLS chunk starts on an IDR, so a
+        // seek/AirPlay join lands on an instantly decodable frame and the
+        // playlist never references across segment boundaries. fps * 4 is
+        // rounded once, not truncated: 23.976fps gives 96 frames (4.0s) rather
+        // than 92 (3.84s — the muxer would wait for the next IDR and emit
+        // ~7.7s segments, stalling AirPlay joins).
+        let fps = fpsHint(inputStream: inputStream)
+        encCtx.pointee.gop_size = Int32((fps * 4).rounded())
+        encCtx.pointee.keyint_min = encCtx.pointee.gop_size
+        encCtx.pointee.max_b_frames = 0
+        encCtx.pointee.pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX
+        av_opt_set(encCtx, "profile", "main", 0)
+        // realtime is a codec-private VideoToolbox option; it must travel in
+        // the dict handed to avcodec_open2, not av_opt_set on the context.
+        var encoderOptions: OpaquePointer? = nil
+        av_dict_set(&encoderOptions, "realtime", "1", 0)
+        defer { av_dict_free(&encoderOptions) }
+        guard avcodec_open2(encCtx, encoder, &encoderOptions) >= 0 else { return nil }
+
+        avcodec_parameters_from_context(outputStream.pointee.codecpar, encCtx)
+        outputStream.pointee.time_base = encCtx.pointee.time_base
 
         return VideoChain(
             inputIndex: inputStream.pointee.index,
@@ -422,13 +434,12 @@ final class RigelHlsExporter {
     }
 
     /// Source fps from the stream's avg_frame_rate, clamped to [15, 60].
-    /// gop_size must be an integer frame count; guessing 30 for 24fps media
-    /// drifts keyframes off segment boundaries.
-    private static func fpsHint(inputStream: UnsafeMutablePointer<AVStream>) -> Int32 {
+    /// Kept as Double so callers can round fps * segmentSeconds once.
+    private static func fpsHint(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
         let rate = inputStream.pointee.avg_frame_rate
         if rate.den > 0 {
             let fps = Double(rate.num) / Double(rate.den)
-            if fps.isFinite && fps > 0 { return Int32(min(max(fps, 15), 60)) }
+            if fps.isFinite && fps > 0 { return min(max(fps, 15), 60) }
         }
         return 30
     }

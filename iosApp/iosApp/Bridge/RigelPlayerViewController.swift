@@ -204,6 +204,11 @@ final class RigelPlayerViewController: UIViewController {
             let nsErr = item.error as NSError?
             let detail = nsErr?.localizedDescription ?? "Playback failed"
             NSLog("[RigelPlayer] item failed: %@ (domain=%@ code=%ld)", detail, nsErr?.domain ?? "?", nsErr?.code ?? -1)
+            // One-shot: stop polling so a `.failed` is delivered exactly once.
+            // PlayerController may be auto-falling back to the proxy; repeated
+            // delivery would race the proxy build and force an error screen.
+            pollTimer?.invalidate()
+            pollTimer = nil
             events.onError(message: detail)
         case .readyToPlay:
             if player.timeControlStatus == .playing, !notifiedPlaying {
