@@ -101,8 +101,11 @@ jobs:
             -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
-          security default-keychain -s "$KEYCHAIN_PATH"
+          # Never touch the user's default keychain (breaks the host session on
+          # self-hosted runners); prepend the temp keychain to the search list
+          # and remember the original list for the restore step below.
+          security list-keychains -d user | sed 's/^[[:space:]]*//; s/"//g' > "$RUNNER_TEMP/orig-search.txt"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(cat "$RUNNER_TEMP/orig-search.txt")
 
       - name: Install provisioning profiles
         if: steps.signing.outputs.configured == 'true'
@@ -174,3 +177,16 @@ jobs:
             --title "Rigel Beta ($(date -u +%Y-%m-%d))" \
             --notes "Rolling development beta from develop @ ${SHA:0:7}. Installs only on devices registered in the development profiles; expires ~7 days after signing." \
             --latest=false
+
+      - name: Restore keychain search list
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "$RUNNER_TEMP/orig-search.txt" ]; then
+            security list-keychains -d user -s $(cat "$RUNNER_TEMP/orig-search.txt") || true
+          else
+            security list-keychains -d user -s \
+              "$HOME/Library/Keychains/login.keychain-db" \
+              /Library/Keychains/System.keychain || true
+          fi
