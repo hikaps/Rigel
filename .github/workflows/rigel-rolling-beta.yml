@@ -79,9 +79,23 @@ jobs:
           restore-keys: |
             ffmpeg-device-
 
-      - name: Build FFmpeg device libs
+      - name: Restore or build FFmpeg device libs
         if: steps.signing.outputs.configured == 'true'
-        run: SDK=iphoneos ./scripts/build-ffmpeg.sh
+        run: |
+          # Vendored dependency: build once into a persistent runner store,
+          # copy on later runs (checkout cleans the gitignored vendor dir).
+          set -euo pipefail
+          if [ -d "$HOME/rigel-vendor/ffmpeg-device/lib" ]; then
+            mkdir -p iosApp/vendor/ffmpeg-device
+            cp -R "$HOME/rigel-vendor/ffmpeg-device/." iosApp/vendor/ffmpeg-device/
+            echo "restored FFmpeg device libs from persistent store"
+          else
+            mkdir -p "$HOME/rigel-vendor"
+            SDK=iphoneos JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-dev" ./scripts/build-ffmpeg.sh \
+              || SDK=iphoneos JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-dev" ./scripts/build-ffmpeg.sh
+            cp -R iosApp/vendor/ffmpeg-device "$HOME/rigel-vendor/ffmpeg-device"
+            echo "built and stored FFmpeg device libs"
+          fi
 
       - name: Install signing certificate
         if: steps.signing.outputs.configured == 'true'
