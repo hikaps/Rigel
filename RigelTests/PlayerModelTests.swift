@@ -1,5 +1,6 @@
 import XCTest
 import ComposeApp
+import AVFoundation
 @testable import Rigel
 
 /// Guards the Kotlin→SwiftUI state mapping: PlayerModel must mirror
@@ -87,5 +88,18 @@ final class PlayerModelTests: XCTestCase {
         ))
         XCTAssertTrue(model.showPlayer, "error phase must keep the full-screen host up for retry/close")
         XCTAssertEqual(model.error, "probe failed")
+    }
+
+    @MainActor
+    func testPlayerUsesLongFormVideoAirPlayPolicy() throws {
+        let audioSession = AVAudioSession.sharedInstance()
+        try RigelPlayerViewController.configureAudioSession(audioSession)
+        defer {
+            try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+        }
+
+        XCTAssertEqual(audioSession.category, .playback)
+        XCTAssertEqual(audioSession.mode, .moviePlayback)
+        XCTAssertEqual(audioSession.routeSharingPolicy, .longFormVideo)
     }
 }

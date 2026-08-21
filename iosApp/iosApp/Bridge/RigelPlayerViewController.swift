@@ -14,7 +14,15 @@ final class RigelPlayerViewController: UIViewController {
     private var playerVC: AVPlayerViewController?
     private var pollTimer: Timer?
     private var disposed = false
+    private var audioSessionActivated = false
     private var notifiedPlaying = false
+
+    /// Configure AVAudioSession for long-form video so AirPlay routes the
+    /// video item, not only its audio track, to the selected receiver.
+    static func configureAudioSession(_ audioSession: AVAudioSession = .sharedInstance()) throws {
+        try audioSession.setCategory(.playback, mode: .moviePlayback, policy: .longFormVideo)
+        try audioSession.setActive(true)
+    }
 
     private let titleLabel = UILabel()
     private let senderLabel = UILabel()
@@ -106,6 +114,13 @@ final class RigelPlayerViewController: UIViewController {
             return
         }
         tearDownPlayer()
+        do {
+            try Self.configureAudioSession()
+            audioSessionActivated = true
+        } catch {
+            NSLog("[RigelPlayer] audio session setup failed: %@", error.localizedDescription)
+        }
+
         notifiedPlaying = false
 
         let item = AVPlayerItem(url: avURL)
@@ -133,6 +148,8 @@ final class RigelPlayerViewController: UIViewController {
         pollTimer = nil
         player?.pause()
         tearDownPlayer()
+        deactivateAudioSession()
+
     }
 
     private func tearDownPlayer() {
@@ -141,6 +158,16 @@ final class RigelPlayerViewController: UIViewController {
         playerVC?.removeFromParent()
         playerVC = nil
         player = nil
+    }
+
+    private func deactivateAudioSession() {
+        guard audioSessionActivated else { return }
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            NSLog("[RigelPlayer] audio session deactivation failed: %@", error.localizedDescription)
+        }
+        audioSessionActivated = false
     }
 
     private func startPolling() {
