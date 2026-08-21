@@ -32,6 +32,20 @@ data class PlayerUiState(
     val castActive: Boolean = false,
     val sender: String? = null,
 ) {
+    /**
+     * Long-form video routing is deliberately narrower than "has a video
+     * track": short clips, live/unknown-duration media, HLS, and proxy output
+     * must keep the default route-sharing policy.
+     */
+    val longFormVideoAirPlayEligible: Boolean
+        get() {
+            if (phase != PlayerPhase.PLAYING || route != PlaybackRoute.DIRECT || proxyUrl != null) return false
+            val mediaProbe = probe ?: return false
+            if (mediaProbe.isLive || mediaProbe.videoCodec == null) return false
+            if (mediaProbe.container.lowercase() in setOf("m3u8", "hls")) return false
+            val durationMs = mediaProbe.durationMs ?: return false
+            return durationMs >= 60_000L
+        }
     val isPlaying: Boolean get() = phase == PlayerPhase.PLAYING
 }
 

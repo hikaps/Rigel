@@ -65,6 +65,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSLocalNetworkUsageDescription: "Rigel discovers TVs on your local network (DLNA, Roku)."
+        AVInitialRouteSharingPolicy: LongFormVideo
         UIBackgroundModes:
           - audio
         CFBundleURLTypes:

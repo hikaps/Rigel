@@ -61,6 +61,7 @@ struct PlayerHostView: View {
                     url: url,
                     title: player.filename,
                     sender: player.sender,
+                    longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
                     onReady: {},
                     onError: { player.reportError($0) },
                     onBack: { player.stop() }
@@ -98,12 +99,13 @@ struct PlayerView: UIViewControllerRepresentable {
     let url: String
     let title: String?
     let sender: String?
+    let longFormVideoAirPlayEligible: Bool
     let onReady: () -> Void
     let onError: (String) -> Void
     let onBack: () -> Void
 
     final class Coordinator {
-        var loaded: (url: String, title: String?, sender: String?)?
+        var loaded: (url: String, title: String?, sender: String?, longFormVideoAirPlayEligible: Bool)?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -134,9 +136,17 @@ struct PlayerView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         guard let bridge = PlayerBridgeFactory.shared.create() else { return }
         let loaded = context.coordinator.loaded
-        if loaded?.url != url || loaded?.title != title || loaded?.sender != sender {
-            bridge.load(url: url, title: title, sender: sender)
-            context.coordinator.loaded = (url, title, sender)
+        if loaded?.url != url ||
+            loaded?.title != title ||
+            loaded?.sender != sender ||
+            loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible {
+            bridge.load(
+                url: url,
+                title: title,
+                sender: sender,
+                longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
+            )
+            context.coordinator.loaded = (url, title, sender, longFormVideoAirPlayEligible)
         }
     }
 }

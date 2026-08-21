@@ -15,6 +15,7 @@ final class PlayerModel: ObservableObject {
     @Published var error: String?
     @Published var sender: String?
     @Published var castActive = false
+    @Published var longFormVideoAirPlayEligible = false
     @Published var showPlayer = false
 
     private var observeJob: Kotlinx_coroutines_coreJob?
@@ -47,6 +48,7 @@ final class PlayerModel: ObservableObject {
         error = state.error
         sender = state.sender
         castActive = state.castActive
+        longFormVideoAirPlayEligible = state.longFormVideoAirPlayEligible
         showPlayer = state.phase != .idle
     }
 
