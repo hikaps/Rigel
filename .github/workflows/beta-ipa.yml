@@ -37,7 +37,7 @@ permissions:
 
 jobs:
   build-beta-ipa:
-    runs-on: [self-hosted, macOS, arm64]
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - name: Check signing configuration
         id: signing
