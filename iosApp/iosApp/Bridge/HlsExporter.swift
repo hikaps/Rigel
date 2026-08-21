@@ -311,6 +311,10 @@ final class RigelHlsExporter {
         let decCtx: UnsafeMutablePointer<AVCodecContext>
         let encCtx: UnsafeMutablePointer<AVCodecContext>
         let hwFramesCtx: UnsafeMutablePointer<AVBufferRef>?
+        // Non-nil only when the 1080p cap changes dimensions: decoded frames
+        // are rescaled before hw upload. Cached context; freed in cleanup().
+        let scaler: OpaquePointer?
+        let scaledFrame: UnsafeMutablePointer<AVFrame>?
     }
 
     private static func makeVideoChain(
@@ -326,6 +330,18 @@ final class RigelHlsExporter {
         guard let encoder = avcodec_find_encoder(AV_CODEC_ID_H264),
               let encCtx = avcodec_alloc_context3(encoder) else { return nil }
 
+        // Cap output at 1080p, preserving aspect ratio. AirPlay targets are
+        // 1080p-class; feeding them 4K transcodes burns CPU and stalls
+        // realtime. Even dimensions required by H.264 yuv420p.
+        var outW = decCtx.pointee.width
+        var outH = decCtx.pointee.height
+        if outW > 0 && outH > 0 && (outW > 1920 || outH > 1080) {
+            let scale = min(Double(1920) / Double(outW), Double(1080) / Double(outH))
+            outW = (Int32((Double(outW) * scale).rounded() / 2) * 2)
+            outH = (Int32((Double(outH) * scale).rounded() / 2) * 2)
+            NSLog("[RigelHlsExporter] downscaling %dx%d -> %dx%d", decCtx.pointee.width, decCtx.pointee.height, outW, outH)
+        }
+
         var hwCtx: UnsafeMutablePointer<AVBufferRef>? = nil
         guard av_hwdevice_ctx_create(&hwCtx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nil, nil, 0) >= 0,
               let hwCtx else { return nil }
@@ -333,31 +349,88 @@ final class RigelHlsExporter {
         let framesRef = UnsafeMutableRawPointer(raw).assumingMemoryBound(to: AVBufferRef.self)
         let framesPtr = UnsafeMutableRawPointer(raw).assumingMemoryBound(to: AVHWFramesContext.self)
         framesPtr.pointee.format = AV_PIX_FMT_VIDEOTOOLBOX
+        // sw_format is finalized below once the scaler decision is made.
         framesPtr.pointee.sw_format = decCtx.pointee.pix_fmt
-        framesPtr.pointee.width = decCtx.pointee.width
-        framesPtr.pointee.height = decCtx.pointee.height
+        framesPtr.pointee.width = outW
+        framesPtr.pointee.height = outH
         framesPtr.pointee.initial_pool_size = 8
         guard av_hwframe_ctx_init(framesRef) >= 0 else { return nil }
 
         encCtx.pointee.hw_frames_ctx = av_buffer_ref(framesRef)
-        encCtx.pointee.width = decCtx.pointee.width
-        encCtx.pointee.height = decCtx.pointee.height
+        encCtx.pointee.width = outW
+        encCtx.pointee.height = outH
         encCtx.pointee.time_base = AVRational(num: 1, den: 30)
-        encCtx.pointee.bit_rate = 8_000_000
-        encCtx.pointee.gop_size = 60
+        // AirPlay smoothness over fidelity: realtime-priority VideoToolbox
+        // session, bitrate scaled to output size so the encoder never falls
+        // behind the renderer's consumption rate.
+        encCtx.pointee.bit_rate = transcodedBitrate(width: Int(outW), height: Int(outH))
+        // Keyframe every segment (4s): each HLS chunk starts on an IDR, so a
+        // seek/AirPlay join lands on an instantly decodable frame and the
+        // playlist never references across segment boundaries.
+        encCtx.pointee.gop_size = fpsHint(inputStream: inputStream) * 4
+        encCtx.pointee.keyint_min = encCtx.pointee.gop_size
+        encCtx.pointee.max_b_frames = 0
         encCtx.pointee.pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX
         av_opt_set(encCtx, "profile", "main", 0)
-        guard avcodec_open2(encCtx, encoder, nil) >= 0 else { return nil }
-
-        avcodec_parameters_from_context(outputStream.pointee.codecpar, encCtx)
-        outputStream.pointee.time_base = encCtx.pointee.time_base
+        // realtime: VideoToolbox schedules encode at capture priority —
+        // the difference between keeping up with playback and falling
+        // behind on AirPlay. allow_hw: keeps frames on GPU end to end.
+        av_opt_set(encCtx, "realtime", "1", 0)
+        av_opt_set(encCtx, "allow_hw", "1", 0)
+        var encoderOptions: OpaquePointer? = nil
+        defer { av_dict_free(&encoderOptions) }
+        var scaler: OpaquePointer? = nil
+        var scaledFrame: UnsafeMutablePointer<AVFrame>? = nil
+        let needsScale = outW != decCtx.pointee.width || outH != decCtx.pointee.height
+        if needsScale {
+            // Scale into NV12: VideoToolbox's native encode format. Also
+            // normalizes high-bit-depth decode output (10/12-bit YUV) into
+            // 8-bit NV12 so the hw encoder accepts it.
+            framesPtr.pointee.sw_format = AV_PIX_FMT_NV12
+            scaler = sws_getContext(
+                decCtx.pointee.width, decCtx.pointee.height, decCtx.pointee.pix_fmt,
+                Int32(outW), Int32(outH), AV_PIX_FMT_NV12,
+                SWS_BILINEAR, nil, nil, nil)
+            guard let scaler else { return nil }
+            scaledFrame = av_frame_alloc()
+            guard let scaledFrame else { return nil }
+            let f = scaledFrame
+            f.pointee.format = Int32(AV_PIX_FMT_NV12.rawValue)
+            f.pointee.width = Int32(outW)
+            f.pointee.height = Int32(outH)
+            if av_frame_get_buffer(f, 0) < 0 { return nil }
+        }
 
         return VideoChain(
             inputIndex: inputStream.pointee.index,
             decCtx: decCtx,
             encCtx: encCtx,
-            hwFramesCtx: framesRef
+            hwFramesCtx: framesRef,
+            scaler: scaler,
+            scaledFrame: scaledFrame
         )
+    }
+
+    /// Output bitrate by resolution class. Generous but bounded: AirPlay
+    /// renderers buffer ~3 segments; a steady bitrate avoids VBV spikes that
+    /// stall segment fetches.
+    private static func transcodedBitrate(width: Int, height: Int) -> Int64 {
+        if width <= 640 && height <= 360 { return 800_000 }
+        if width <= 1280 && height <= 720 { return 3_500_000 }
+        if width <= 1920 && height <= 1080 { return 7_000_000 }
+        return 10_000_000
+    }
+
+    /// Source fps from the stream's avg_frame_rate, clamped to [15, 60].
+    /// gop_size must be an integer frame count; guessing 30 for 24fps media
+    /// drifts keyframes off segment boundaries.
+    private static func fpsHint(inputStream: UnsafeMutablePointer<AVStream>) -> Int32 {
+        let rate = inputStream.pointee.avg_frame_rate
+        if rate.den > 0 {
+            let fps = Double(rate.num) / Double(rate.den)
+            if fps.isFinite && fps > 0 { return Int32(min(max(fps, 15), 60)) }
+        }
+        return 30
     }
 
     private static func writeTranscodedVideo(
@@ -370,11 +443,18 @@ final class RigelHlsExporter {
         var swFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
         defer { av_frame_free(&swFrame) }
         while let decoded = swFrame, avcodec_receive_frame(chain.decCtx, decoded) >= 0 {
+            let uploadFrame: UnsafeMutablePointer<AVFrame>
+            if let scaler = chain.scaler, let scaled = chain.scaledFrame {
+                guard sws_scale_frame(scaler, scaled, decoded) == 0 else { continue }
+                uploadFrame = scaled
+            } else {
+                uploadFrame = decoded
+            }
             var hwFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
             defer { av_frame_free(&hwFrame) }
             guard let hw = hwFrame,
                   av_hwframe_get_buffer(chain.hwFramesCtx, hw, 0) >= 0,
-                  av_hwframe_transfer_data(hw, decoded, 0) >= 0 else { continue }
+                  av_hwframe_transfer_data(hw, uploadFrame, 0) >= 0 else { continue }
             hw.pointee.pts = decoded.pointee.pts
             if avcodec_send_frame(chain.encCtx, hw) >= 0 {
                 drainEncodedVideo(chain: chain, out: out, outStream: outStream)
@@ -397,8 +477,6 @@ final class RigelHlsExporter {
             av_interleaved_write_frame(out, &encPkt)
         }
     }
-
-    // MARK: - Helpers
 
     private static func openInput(url: String, headers: [String: String], fmt: inout UnsafeMutablePointer<AVFormatContext>?) -> Bool {
         var opened = false
@@ -436,6 +514,7 @@ final class RigelHlsExporter {
             var swr: OpaquePointer? = audio.swr
             swr_free(&swr)
         }
+
         if let video {
             var dec: UnsafeMutablePointer<AVCodecContext>? = video.decCtx
             avcodec_free_context(&dec)
@@ -443,6 +522,13 @@ final class RigelHlsExporter {
             avcodec_free_context(&enc)
             var ref: UnsafeMutablePointer<AVBufferRef>? = video.encCtx.pointee.hw_frames_ctx
             av_buffer_unref(&ref)
+            if video.scaledFrame != nil {
+                var f: UnsafeMutablePointer<AVFrame>? = video.scaledFrame
+                av_frame_free(&f)
+            }
+            if let sws = video.scaler {
+                sws_freeContext(sws)
+            }
         }
     }
 

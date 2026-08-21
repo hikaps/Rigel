@@ -39,6 +39,9 @@ final class RigelProbe {
             var videoCodec: String? = nil
             var audioCodecs: [String] = []
             var subtitleCodecs: [String] = []
+            var videoPixFmt: String? = nil
+            var videoWidth: Int32 = 0
+            var videoHeight: Int32 = 0
             let streamCount = Int(ctx.pointee.nb_streams)
             if streamCount > 0 {
                 for i in 0..<streamCount {
@@ -47,9 +50,18 @@ final class RigelProbe {
                     let codecName = codecNameString(codecpar.pointee.codec_id)
                     switch codecpar.pointee.codec_type {
                     case AVMEDIA_TYPE_VIDEO:
-                        if videoCodec == nil { videoCodec = codecName }
+                        if videoCodec == nil {
+                            videoCodec = codecName
+                            let pf = AVPixelFormat(rawValue: codecpar.pointee.format)
+                            if let name = av_get_pix_fmt_name(pf) {
+                                videoPixFmt = String(cString: name)
+                            }
+                            videoWidth = codecpar.pointee.width
+                            videoHeight = codecpar.pointee.height
+                        }
                     case AVMEDIA_TYPE_AUDIO:
                         audioCodecs.append(codecName)
+                        break
                     case AVMEDIA_TYPE_SUBTITLE:
                         subtitleCodecs.append(codecName)
                     default:
@@ -68,7 +80,10 @@ final class RigelProbe {
                 audioCodecs: audioCodecs.map { normalizeCodec($0) ?? "unknown" },
                 subtitleCodecs: subtitleCodecs.map { normalizeCodec($0) ?? "unknown" },
                 durationMs: durationMs.map { KotlinLong(longLong: $0) },
-                isLive: isLive
+                isLive: isLive,
+                pixFmt: videoPixFmt.flatMap { normalizePixelFormat($0) },
+                width: videoWidth,
+                height: videoHeight
             )
             avformat_close_input(&fmt)
         }
@@ -105,5 +120,15 @@ final class RigelProbe {
         case "hevc": return "hevc"
         default: return raw.lowercased()
         }
+    }
+
+    /// Collapse FFmpeg's many yuv420 variants (yuv420p10le, yuvj420p,
+    /// yuv420p10be, ...) to the bit-depth + chroma shape FormatRouter gates on.
+    static func normalizePixelFormat(_ raw: String) -> String {
+        let lower = raw.lowercased()
+        if lower.contains("420") { return lower.contains("10") ? "yuv420p10le" : "yuv420p" }
+        if lower.contains("422") { return lower.contains("10") ? "yuv422p10le" : "yuv422p" }
+        if lower.contains("444") { return lower.contains("10") ? "yuv444p10le" : "yuv444p" }
+        return lower
     }
 }

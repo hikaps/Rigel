@@ -20,6 +20,9 @@ data class ProbeResult(
     val subtitleCodecs: List<String>,
     val durationMs: Long?,
     val isLive: Boolean,
+    val pixFmt: String? = null,
+    val width: Int = 0,
+    val height: Int = 0,
 )
 
 interface DiscoveryBridge {

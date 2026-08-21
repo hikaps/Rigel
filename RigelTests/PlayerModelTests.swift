@@ -173,7 +173,10 @@ final class PlayerModelTests: XCTestCase {
             audioCodecs: ["aac"],
             subtitleCodecs: [],
             durationMs: durationMs.map { KotlinLong(longLong: $0) },
-            isLive: isLive
+            isLive: isLive,
+            pixFmt: "yuv420p",
+            width: 1920,
+            height: 1080
         )
     }
 

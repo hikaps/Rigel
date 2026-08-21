@@ -10,5 +10,6 @@
 #include <libavutil/time.h>
 #include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
 
 #endif

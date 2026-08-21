@@ -227,6 +227,56 @@ class PlayerControllerTest {
     }
 
     @Test
+    fun directFailureAutoFallsBackToRemuxOnce() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request)
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.reportError("decoder failure")
+        advanceUntilIdle()
+        val state = c.uiState.value
+        assertEquals(PlayerPhase.PLAYING, state.phase)
+        assertEquals(PlaybackRoute.REMUX, state.route)
+        assertEquals("http://127.0.0.1:8090/hls/s1/out.m3u8", state.proxyUrl)
+        assertEquals(listOf("remux"), hlsModes)
+    }
+
+    @Test
+    fun noSecondDemotionAfterFallback() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request)
+        advanceUntilIdle()
+        c.reportError("first failure")
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+
+        c.reportError("second failure")
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertEquals("second failure", c.uiState.value.error)
+    }
+
+    @Test
+    fun fallbackBudgetResetsOnNewLoad() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request)
+        advanceUntilIdle()
+        c.reportError("first media failure")
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+
+        c.stopPlayback()
+        c.loadRequest(request)
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.reportError("fresh failure")
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+    }
+
+    @Test
     fun reportErrorSetsErrorState() {
         val c = controller()
         c.reportError("boom")

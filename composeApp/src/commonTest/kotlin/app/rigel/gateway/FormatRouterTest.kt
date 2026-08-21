@@ -11,6 +11,7 @@ class FormatRouterTest {
         video: String?,
         audio: List<String> = emptyList(),
         isLive: Boolean = false,
+        pixFmt: String? = "yuv420p",
     ) = ProbeResult(
         container = container,
         videoCodec = video,
@@ -18,6 +19,7 @@ class FormatRouterTest {
         subtitleCodecs = emptyList(),
         durationMs = 60_000,
         isLive = isLive,
+        pixFmt = pixFmt,
     )
 
     @Test
@@ -93,5 +95,38 @@ class FormatRouterTest {
     @Test
     fun hevcMkvWithOpusRemux() {
         assertEquals(PlaybackRoute.REMUX, FormatRouter.decide(probe("matroska", "hevc", listOf("opus")), false))
+    }
+
+    @Test
+    fun hi10pMkvTranscodes() {
+        // Remux copies the bitstream verbatim; AVPlayer still cannot decode
+        // it. Only a full transcode normalizes 10-bit H.264.
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("matroska", "h264", listOf("aac"), pixFmt = "yuv420p10le"), false))
+    }
+
+    @Test
+    fun hi10pMp4Transcodes() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "h264", listOf("aac"), pixFmt = "yuv420p10le"), false))
+    }
+
+    @Test
+    fun hevcMain10StaysDirect() {
+        // Hardware-decodes on every supported device.
+        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mp4", "hevc", listOf("aac"), pixFmt = "yuv420p10le"), false))
+    }
+
+    @Test
+    fun twelveBitTranscodes() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "h264", listOf("aac"), pixFmt = "yuv420p12le"), false))
+    }
+
+    @Test
+    fun fourTwoTwoTranscodes() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mov", "h264", listOf("aac"), pixFmt = "yuv422p"), false))
+    }
+
+    @Test
+    fun unknownPixFmtStaysDirect() {
+        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mp4", "h264", listOf("aac"), pixFmt = null), false))
     }
 }

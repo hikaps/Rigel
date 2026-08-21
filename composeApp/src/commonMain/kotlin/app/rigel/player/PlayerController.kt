@@ -59,6 +59,7 @@ class PlayerController(
 ) {
     private val tag = "PlayerController"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var directFallbackUsed = false
 
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
@@ -77,6 +78,7 @@ class PlayerController(
 
     fun loadRequest(request: IntakeRequest) {
         successCallbackUrl = request.successCallbackUrl
+        directFallbackUsed = false
         _uiState.value = PlayerUiState(
             phase = PlayerPhase.PROBING,
             sourceUrl = request.sourceUrl,
@@ -101,7 +103,7 @@ class PlayerController(
         val route = when (override) {
             RouteOverride.DIRECT -> PlaybackRoute.DIRECT
             RouteOverride.ALWAYS_PROXY -> PlaybackRoute.REMUX
-            RouteOverride.AUTO -> FormatRouter.decide(probe, hasExternalAssSubs = request.subtitleUrls.any { it.endsWith(".ass") || it.contains("ass") })
+            RouteOverride.AUTO -> FormatRouter.decide(probe, hasExternalAssSubs = request.subtitleUrls.any { it.substringBeforeLast('?').substringAfterLast('/').endsWith(".ass", ignoreCase = true) })
         }
         Logger.i(tag) { "route=$route container=${probe.container} video=${probe.videoCodec} audio=${probe.audioCodecs}" }
         when (route) {
@@ -188,7 +190,24 @@ class PlayerController(
         _uiState.value = PlayerUiState()
     }
 
+    /**
+     * Native playback failure seam. A DIRECT failure gets exactly one
+     * automatic demotion to the REMUX proxy — probe-based routing can miss
+     * profile/level/bit-depth quirks, and a silent auto-recover beats an
+     * error screen. Proxy failures surface as errors (no infinite loop).
+     */
     fun reportError(message: String) {
+        val current = _uiState.value
+        if (!directFallbackUsed && current.phase == PlayerPhase.PLAYING &&
+            current.route == PlaybackRoute.DIRECT && current.proxyUrl == null && current.probe != null
+        ) {
+            directFallbackUsed = true
+            _uiState.value = current.copy(phase = PlayerPhase.PREPARING_PROXY, route = PlaybackRoute.REMUX, error = null)
+            scope.launch {
+                prepareProxy(current.probe!!, PlaybackRoute.REMUX)
+            }
+            return
+        }
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = message)
     }
 
