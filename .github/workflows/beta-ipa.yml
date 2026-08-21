@@ -1,16 +1,24 @@
 name: Beta IPA
 
-# Rolling beta: every merge to develop archives the app for device, exports an
-# ad-hoc IPA, and publishes it to a single "beta" GitHub release that is
-# replaced on each run (previous beta + tag are deleted first).
+# Rolling beta: every merge to develop archives the app for device, exports a
+# development-signed IPA, and publishes it to a single "beta" GitHub release
+# that is replaced on each run (previous beta + tag are deleted first).
 #
-# Prerequisites (repo secrets):
-#   IOS_CERTIFICATE          base64 of a signing cert .p12 valid for team 9SAXN99TCU
-#   IOS_CERTIFICATE_PASSWORD password of the .p12
-#   IOS_PROVISIONING_PROFILE base64 of an ad-hoc .mobileprovision covering BOTH
-#                            bundle IDs (com.rigel.player and com.rigel.player.share);
-#                            a wildcard com.rigel.* profile covers both.
-#   Test device UDIDs must be registered in the ad-hoc profile.
+# Free personal-team signing (no Apple Developer Program enrollment):
+#   - Export the Xcode-managed "Apple Development" cert as a p12 and the two
+#     device development profiles Xcode generated for com.rigel.player and
+#     com.rigel.player.share (Personal Teams cannot use wildcard App IDs).
+#   - Cert and profiles expire after 7 days: re-export and re-set the secrets
+#     weekly, or the job fails loudly instead of producing a stale IPA.
+#   - Installs only on devices registered in the development profiles (the
+#     devices used locally in Xcode). No TestFlight/App Store distribution.
+#
+# Required repository secrets:
+#   IOS_CERTIFICATE                  base64 of the personal-team .p12
+#   IOS_CERTIFICATE_PASSWORD         password of the .p12
+#   IOS_PROVISIONING_PROFILE         base64 of the com.rigel.player dev profile
+#   IOS_PROVISIONING_PROFILE_SHARE   base64 of the com.rigel.player.share dev profile
+#   IOS_TEAM_ID                      10-char personal team ID (from the cert)
 #
 # The job is skipped (not failed) until the secrets are set, so develop merges
 # stay unblocked. Trigger manually with workflow_dispatch once secrets exist.
@@ -37,9 +45,11 @@ jobs:
           IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
           IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_PROVISIONING_PROFILE_SHARE: ${{ secrets.IOS_PROVISIONING_PROFILE_SHARE }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
         shell: bash
         run: |
-          if [[ -z "$IOS_CERTIFICATE" || -z "$IOS_CERTIFICATE_PASSWORD" || -z "$IOS_PROVISIONING_PROFILE" ]]; then
+          if [[ -z "$IOS_CERTIFICATE" || -z "$IOS_CERTIFICATE_PASSWORD" || -z "$IOS_PROVISIONING_PROFILE" || -z "$IOS_PROVISIONING_PROFILE_SHARE" || -z "$IOS_TEAM_ID" ]]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Beta IPA skipped: signing secrets are not configured."
           else
@@ -94,18 +104,23 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
 
-      - name: Install provisioning profile
+      - name: Install provisioning profiles
         if: steps.signing.outputs.configured == 'true'
         env:
           IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_PROVISIONING_PROFILE_SHARE: ${{ secrets.IOS_PROVISIONING_PROFILE_SHARE }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           echo "$IOS_PROVISIONING_PROFILE" | base64 --decode \
             > "$HOME/Library/MobileDevice/Provisioning Profiles/Rigel.mobileprovision"
+          echo "$IOS_PROVISIONING_PROFILE_SHARE" | base64 --decode \
+            > "$HOME/Library/MobileDevice/Provisioning Profiles/RigelShare.mobileprovision"
 
       - name: Archive app for device
         if: steps.signing.outputs.configured == 'true'
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
         run: |
           xcodebuild archive \
             -project iosApp/Rigel.xcodeproj \
@@ -114,18 +129,22 @@ jobs:
             -archivePath build/Rigel.xcarchive \
             -destination "generic/platform=iOS" \
             -allowProvisioningUpdates \
-            DEVELOPMENT_TEAM=9SAXN99TCU
+            DEVELOPMENT_TEAM="$IOS_TEAM_ID"
 
-      - name: Export IPA (ad-hoc)
+      - name: Export IPA (development)
         if: steps.signing.outputs.configured == 'true'
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
         run: |
-          cat > build/export-options.plist <<'PLIST'
+          cat > build/export-options.plist <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
               <key>method</key>
-              <string>ad-hoc</string>
+              <string>development</string>
+              <key>teamID</key>
+              <string>$IOS_TEAM_ID</string>
               <key>signingStyle</key>
               <string>automatic</string>
               <key>stripSwiftSymbols</key>
@@ -153,5 +172,5 @@ jobs:
           gh release create beta "$NAMED" \
             --target "$SHA" \
             --title "Rigel Beta ($(date -u +%Y-%m-%d))" \
-            --notes "Rolling ad-hoc beta from develop @ ${SHA:0:7}. Install requires the device UDID to be registered in the ad-hoc provisioning profile." \
+            --notes "Rolling development beta from develop @ ${SHA:0:7}. Installs only on devices registered in the development profiles; expires ~7 days after signing." \
             --latest=false
