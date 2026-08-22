@@ -308,6 +308,52 @@ class PlayerControllerTest {
         advanceUntilIdle()
         assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
     }
+    @Test
+    fun stoppingDuringProxyPreparationInvalidatesLateCallback() = runTest(dispatcher.scheduler) {
+        pendingReady = { _, _ -> }
+        val c = controller()
+        c.loadRequest(request.copy(sourceUrl = "http://h/slow.mkv"))
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.reportError("decoder failure")
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PREPARING_PROXY, c.uiState.value.phase)
+        assertTrue(stoppedSessions.isEmpty())
+
+        c.stopPlayback()
+        assertEquals(PlayerUiState(), c.uiState.value)
+        assertTrue(stoppedSessions.isNotEmpty(), "pending HLS session must be stopped")
+
+        pendingReady?.invoke(hlsPath, hlsError)
+        advanceUntilIdle()
+        assertEquals(PlayerUiState(), c.uiState.value)
+        pendingReady = null
+    }
+
+    @Test
+    fun oldProxyCallbackCannotOverwriteNewLoad() = runTest(dispatcher.scheduler) {
+        pendingReady = { _, _ -> }
+        val c = controller()
+        c.loadRequest(request.copy(sourceUrl = "http://h/old.mkv"))
+        advanceUntilIdle()
+        c.reportError("old direct failure")
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PREPARING_PROXY, c.uiState.value.phase)
+
+        c.loadRequest(request.copy(sourceUrl = "http://h/new.mp4"))
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals("http://h/new.mp4", c.uiState.value.sourceUrl)
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        pendingReady?.invoke(hlsPath, hlsError)
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals("http://h/new.mp4", c.uiState.value.sourceUrl)
+        assertNull(c.uiState.value.proxyUrl)
+        pendingReady = null
+    }
 
     @Test
     fun assSubtitlePercentEncodedForcesTranscode() = runTest(dispatcher.scheduler) {

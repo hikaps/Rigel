@@ -144,4 +144,9 @@ class FormatRouterTest {
     fun sixteenBitTranscodes() {
         assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "hevc", listOf("aac"), pixFmt = "yuv420p16le"), false))
     }
+
+    @Test
+    fun unknownGrayPixFmtTranscodes() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "hevc", listOf("aac"), pixFmt = "gray10le"), false))
+    }
 }

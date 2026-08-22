@@ -11,6 +11,7 @@ import app.rigel.settings.SettingsStore
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,7 +61,9 @@ class PlayerController(
     private val tag = "PlayerController"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var directFallbackUsed = false
-
+    private var loadGeneration = 0L
+    private var pendingJob: Job? = null
+    private var pendingSessionId: String? = null
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
@@ -69,6 +72,7 @@ class PlayerController(
     fun loadRaw(rawUrl: String): Boolean {
         val request = UrlIntake.parse(rawUrl)
         if (request == null) {
+            invalidatePendingWork()
             _uiState.value = PlayerUiState(phase = PlayerPhase.ERROR, error = "Unrecognized URL: $rawUrl")
             return false
         }
@@ -77,8 +81,10 @@ class PlayerController(
     }
 
     fun loadRequest(request: IntakeRequest) {
+        invalidatePendingWork()
         successCallbackUrl = request.successCallbackUrl
         directFallbackUsed = false
+        val generation = loadGeneration
         _uiState.value = PlayerUiState(
             phase = PlayerPhase.PROBING,
             sourceUrl = request.sourceUrl,
@@ -86,8 +92,22 @@ class PlayerController(
             subtitleUrls = request.subtitleUrls,
             sender = request.xSource,
         )
-        scope.launch { probeAndRoute(request) }
+        pendingJob = scope.launch { probeAndRoute(request, generation) }
     }
+
+    private fun invalidatePendingWork() {
+        val sessionId = pendingSessionId ?: _uiState.value.proxyUrl?.let(::extractSessionId)
+        loadGeneration += 1
+        pendingJob?.cancel()
+        pendingJob = null
+        if (sessionId != null) {
+            Bridges.stopHlsSession(sessionId)
+            Bridges.stopHttpServer()
+        }
+        pendingSessionId = null
+    }
+
+    private fun isCurrent(generation: Long): Boolean = generation == loadGeneration
 
     /**
      * True when a subtitle URL points at an Advanced SubStation file. Only
@@ -119,8 +139,9 @@ class PlayerController(
         }
     }
 
-    private suspend fun probeAndRoute(request: IntakeRequest) {
+    private suspend fun probeAndRoute(request: IntakeRequest, generation: Long) {
         val (probe, probeError) = Bridges.probe(request.sourceUrl, emptyMap())
+        if (!isCurrent(generation)) return
         if (probe == null) {
             Logger.w(tag) { "probe failed: $probeError" }
             _uiState.value = _uiState.value.copy(
@@ -135,6 +156,7 @@ class PlayerController(
             RouteOverride.ALWAYS_PROXY -> PlaybackRoute.REMUX
             RouteOverride.AUTO -> FormatRouter.decide(probe, hasExternalAssSubs = request.subtitleUrls.any { isAssSubtitle(it) })
         }
+        if (!isCurrent(generation)) return
         Logger.i(tag) { "route=$route container=${probe.container} video=${probe.videoCodec} audio=${probe.audioCodecs}" }
         when (route) {
             PlaybackRoute.DIRECT -> {
@@ -151,24 +173,32 @@ class PlayerController(
                     route = route,
                     probe = probe,
                 )
-                prepareProxy(probe, route)
+                prepareProxy(probe, route, generation)
             }
         }
     }
 
-    private suspend fun prepareProxy(probe: ProbeResult, route: PlaybackRoute) {
+    private suspend fun prepareProxy(probe: ProbeResult, route: PlaybackRoute, generation: Long) {
+        if (!isCurrent(generation)) return
         val sourceUrl = _uiState.value.sourceUrl ?: run {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "No source URL")
             return
         }
         val sessionId = "session-${Random.nextLong().toString(16)}${Random.nextInt(0xFFFF).toString(16)}"
+        pendingSessionId = sessionId
         val (relPath, transcodeError) = Bridges.startHlsSession(
             sessionId = sessionId,
             sourceUrl = sourceUrl,
             headers = emptyMap(),
             mode = route.name.lowercase(),
         )
+        if (!isCurrent(generation)) {
+            Bridges.stopHlsSession(sessionId)
+            if (pendingSessionId == sessionId) pendingSessionId = null
+            return
+        }
         if (relPath == null) {
+            if (pendingSessionId == sessionId) pendingSessionId = null
             Logger.w(tag) { "HLS session failed: $transcodeError" }
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
@@ -177,9 +207,17 @@ class PlayerController(
             return
         }
         val (port, serverError) = Bridges.startHttpServer()
+        if (!isCurrent(generation)) {
+            Bridges.stopHlsSession(sessionId)
+            if (pendingSessionId == null || pendingSessionId == sessionId) Bridges.stopHttpServer()
+            if (pendingSessionId == sessionId) pendingSessionId = null
+            return
+        }
         if (port < 0) {
+            if (pendingSessionId == sessionId) pendingSessionId = null
             Logger.w(tag) { "HTTP server failed: $serverError" }
             Bridges.stopHlsSession(sessionId)
+            Bridges.stopHttpServer()
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
                 error = serverError ?: "Local server failed",
@@ -191,6 +229,13 @@ class PlayerController(
         // Loopback is the fallback when no Wi-Fi address is available (still plays locally).
         val host = Bridges.lanBaseUrl() ?: "http://127.0.0.1:$port"
         val proxyUrl = "$host/$relPath"
+        if (!isCurrent(generation)) {
+            Bridges.stopHlsSession(sessionId)
+            if (pendingSessionId == null || pendingSessionId == sessionId) Bridges.stopHttpServer()
+            if (pendingSessionId == sessionId) pendingSessionId = null
+            return
+        }
+        pendingSessionId = null
         Logger.i(tag) { "proxy ready: $proxyUrl" }
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.PLAYING, proxyUrl = proxyUrl)
     }
@@ -199,21 +244,24 @@ class PlayerController(
     fun retryWithProxy() {
         val current = _uiState.value
         val sourceUrl = current.sourceUrl ?: return
-        _uiState.value = current.copy(phase = PlayerPhase.PROBING, error = null, route = PlaybackRoute.REMUX)
-        scope.launch {
+        invalidatePendingWork()
+        directFallbackUsed = true
+        val generation = loadGeneration
+        _uiState.value = current.copy(phase = PlayerPhase.PROBING, error = null, route = PlaybackRoute.REMUX, proxyUrl = null)
+        pendingJob = scope.launch {
             val (probe, _) = Bridges.probe(sourceUrl, emptyMap())
+            if (!isCurrent(generation)) return@launch
             if (probe == null) {
                 _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "Probe failed again")
                 return@launch
             }
             _uiState.value = _uiState.value.copy(probe = probe)
-            prepareProxy(probe, PlaybackRoute.REMUX)
+            prepareProxy(probe, PlaybackRoute.REMUX, generation)
         }
     }
 
     fun stopPlayback() {
-        val state = _uiState.value
-        Bridges.stopHlsSession(state.proxyUrl?.let { extractSessionId(it) } ?: "")
+        invalidatePendingWork()
         Bridges.stopHttpServer()
         UrlIntake.fireSuccess(successCallbackUrl)
         successCallbackUrl = null
@@ -228,18 +276,17 @@ class PlayerController(
      */
     fun reportError(message: String) {
         val current = _uiState.value
-        // The native player polls item.status and can deliver a second
-        // `.failed` after the first one already triggered the fallback.
-        // Swallow errors while the proxy is being built — prepareProxy reports
-        // its own outcome.
-        if (current.phase == PlayerPhase.PREPARING_PROXY) return
+        // Errors from the player being replaced must not clobber an in-flight
+        // proxy build. prepareProxy owns the eventual success/failure state.
+        if (current.phase == PlayerPhase.PREPARING_PROXY || current.phase == PlayerPhase.PROBING) return
         if (!directFallbackUsed && current.phase == PlayerPhase.PLAYING &&
             current.route == PlaybackRoute.DIRECT && current.proxyUrl == null && current.probe != null
         ) {
             directFallbackUsed = true
+            val generation = loadGeneration
             _uiState.value = current.copy(phase = PlayerPhase.PREPARING_PROXY, route = PlaybackRoute.REMUX, error = null)
-            scope.launch {
-                prepareProxy(current.probe!!, PlaybackRoute.REMUX)
+            pendingJob = scope.launch {
+                prepareProxy(current.probe!!, PlaybackRoute.REMUX, generation)
             }
             return
         }

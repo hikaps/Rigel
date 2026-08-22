@@ -159,6 +159,17 @@ struct PlayerView: UIViewControllerRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
+    static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: Coordinator) {
+        // SwiftUI removes this representable when the player phase changes to
+        // proxy preparation or error. Dispose only this concrete controller;
+        // the bridge may already retain a newer replacement.
+        if let player = uiViewController as? RigelPlayerViewController,
+           let bridge = PlayerBridgeFactory.shared.create() as? RigelPlayerBridge {
+            bridge.stop(viewController: player)
+        } else {
+            (uiViewController as? RigelPlayerViewController)?.stopPlayback()
+        }
+    }
     func makeUIViewController(context: Context) -> UIViewController {
         guard let bridge = PlayerBridgeFactory.shared.create() else {
             let vc = UIViewController()

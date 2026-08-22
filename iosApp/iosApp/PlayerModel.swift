@@ -69,6 +69,11 @@ final class PlayerModel: ObservableObject {
     }
 
     func reportError(_ message: String) {
+        // Stop the retained native controller before Kotlin changes phase to
+        // PREPARING_PROXY/ERROR. The bridge singleton otherwise keeps the
+        // failed AVPlayer and audio session alive after SwiftUI removes the
+        // representable.
+        PlayerBridgeFactory.shared.create()?.stop()
         SwiftPlayer.shared.reportError(message: message)
     }
 }

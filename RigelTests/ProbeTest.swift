@@ -31,7 +31,9 @@ final class ProbeTest: XCTestCase {
         XCTAssertEqual(RigelProbe.normalizePixelFormat("yuv420p10le"), "yuv420p10le")
         XCTAssertEqual(RigelProbe.normalizePixelFormat("yuv420p10be"), "yuv420p10le")
         XCTAssertEqual(RigelProbe.normalizePixelFormat("p010le"), "yuv420p10le")
-        // Bit depth is never collapsed: 9/12/14/16-bit must transcode.
+        // Bit depth is never collapsed: 9/12/14/16-bit must transcode, and
+        // unrelated formats remain unknown instead of becoming 4:2:0.
+        XCTAssertEqual(RigelProbe.normalizePixelFormat("gray10le"), "gray10le")
         XCTAssertEqual(RigelProbe.normalizePixelFormat("yuv420p9le"), "yuv420p9le")
         XCTAssertEqual(RigelProbe.normalizePixelFormat("yuv420p12le"), "yuv420p12le")
         XCTAssertEqual(RigelProbe.normalizePixelFormat("yuv420p14le"), "yuv420p14le")

@@ -122,24 +122,27 @@ final class RigelProbe {
         }
     }
 
-    /// Collapse FFmpeg's many planar names to the shapes FormatRouter gates
-    /// on: 8-bit 4:2:0 (yuv420p/nv12/yuvj420p) is direct-playable, HEVC 10-bit
-    /// 4:2:0 (yuv420p10le/p010) stays direct only for hevc, and everything
-    /// else (9/12/14/16-bit, 4:2:2, 4:4:4) must transcode — so those depths
-    /// are preserved, never collapsed to 8-bit.
+    /// Collapse only explicit YUV/NV12/P010 families. Unknown formats stay
+    /// unknown so FormatRouter cannot accidentally grant a direct-play route
+    /// (for example, gray10le is not HEVC Main10 4:2:0).
     static func normalizePixelFormat(_ raw: String) -> String {
         let lower = raw.lowercased()
+        if lower == "nv12" { return "yuv420p" }
+        if lower == "p010" || lower == "p010le" || lower == "p010be" {
+            return "yuv420p10le"
+        }
+        guard lower.hasPrefix("yuv") || lower.hasPrefix("yuvj") else { return lower }
         if lower.contains("444") { return "yuv444p" }
         if lower.contains("422") { return "yuv422p" }
-        // Semi-planar 4:2:0: nv12 is 8-bit, p010 is 10-bit. Check before the
-        // depth scan — "nv12" contains "12".
-        if lower.contains("p010") { return "yuv420p10le" }
-        if lower == "nv12" { return "yuv420p" }
+        // Planar 4:2:0: preserve bit depth instead of collapsing 12/14/16
+        // bit to 8-bit. Big-endian names normalize to the same shape because
+        // the router gates chroma and depth, not memory byte order.
         if lower.contains("16") { return "yuv420p16le" }
         if lower.contains("14") { return "yuv420p14le" }
         if lower.contains("12") { return "yuv420p12le" }
         if lower.contains("10") { return "yuv420p10le" }
         if lower.contains("9") { return "yuv420p9le" }
-        return "yuv420p"
+        if lower.contains("420") { return "yuv420p" }
+        return lower
     }
 }

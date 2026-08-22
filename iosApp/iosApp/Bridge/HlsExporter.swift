@@ -88,12 +88,41 @@ final class RigelHlsExporter {
         )
 
         let inCount = Int(ctx.pointee.nb_streams)
+        var selectedVideoIndex: Int32?
+        var selectedVideoIsDefault = false
+        var selectedAudioIndex: Int32?
+        var selectedAudioIsDefault = false
+        for i in 0..<inCount {
+            guard let stream = ctx.pointee.streams[i], let codecpar = stream.pointee.codecpar else { continue }
+            let inputIndex = Int32(i)
+            let isDefault = (stream.pointee.disposition & AV_DISPOSITION_DEFAULT) != 0
+            switch codecpar.pointee.codec_type {
+            case AVMEDIA_TYPE_VIDEO:
+                let isAttachedPicture = (stream.pointee.disposition & AV_DISPOSITION_ATTACHED_PIC) != 0
+                if !isAttachedPicture &&
+                    (selectedVideoIndex == nil || (isDefault && !selectedVideoIsDefault)) {
+                    selectedVideoIndex = inputIndex
+                    selectedVideoIsDefault = isDefault
+                }
+            case AVMEDIA_TYPE_AUDIO:
+                if selectedAudioIndex == nil || (isDefault && !selectedAudioIsDefault) {
+                    selectedAudioIndex = inputIndex
+                    selectedAudioIsDefault = isDefault
+                }
+            default:
+                break
+            }
+        }
+
         var streamMap: [Int32: Int32] = [:]
         for i in 0..<inCount {
-            guard let inStream = ctx.pointee.streams[i], let codecpar = inStream.pointee.codecpar else { continue }
-            guard let outStream = avformat_new_stream(out, nil) else { continue }
+            let inputIndex = Int32(i)
+            guard inputIndex == selectedVideoIndex || inputIndex == selectedAudioIndex,
+                  let inStream = ctx.pointee.streams[i],
+                  let codecpar = inStream.pointee.codecpar,
+                  let outStream = avformat_new_stream(out, nil) else { continue }
             let outIndex = outStream.pointee.index
-            streamMap[Int32(i)] = outIndex
+            streamMap[inputIndex] = outIndex
 
             switch codecpar.pointee.codec_type {
             case AVMEDIA_TYPE_VIDEO:
@@ -120,9 +149,13 @@ final class RigelHlsExporter {
                     audioChain = makeAudioChain(inputStream: inStream, outputStream: outStream)
                 }
             default:
-                outStream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_UNKNOWN
-                outStream.pointee.codecpar.pointee.codec_id = AV_CODEC_ID_NONE
+                break
             }
+        }
+
+        if mode != "remux", selectedVideoIndex != nil, videoChain == nil {
+            DispatchQueue.main.async { onReady(nil, "failed to initialize video transcoder") }
+            return
         }
 
         let headerRet = avformat_write_header(out, nil)
@@ -314,9 +347,10 @@ final class RigelHlsExporter {
         let inputIndex: Int32
         let decCtx: UnsafeMutablePointer<AVCodecContext>
         let encCtx: UnsafeMutablePointer<AVCodecContext>
+        let inputTimeBase: AVRational
         let hwFramesCtx: UnsafeMutablePointer<AVBufferRef>?
-        // Non-nil only when the 1080p cap changes dimensions: decoded frames
-        // are rescaled before hw upload. Cached context; freed in cleanup().
+        // Non-nil when decoded frames must be converted to NV12 or resized
+        // before hw upload. Cached context; freed in cleanup().
         let scaler: OpaquePointer?
         let scaledFrame: UnsafeMutablePointer<AVFrame>?
     }
@@ -328,8 +362,13 @@ final class RigelHlsExporter {
         guard let codecpar = inputStream.pointee.codecpar,
               let decoder = avcodec_find_decoder(codecpar.pointee.codec_id),
               let decCtx = avcodec_alloc_context3(decoder) else { return nil }
-        guard avcodec_parameters_to_context(decCtx, codecpar) >= 0,
-              avcodec_open2(decCtx, decoder, nil) >= 0 else { return nil }
+        let sourceTimeBase = inputStream.pointee.time_base
+        let encoderTimeBase = sourceTimeBase.num != 0 && sourceTimeBase.den != 0
+            ? sourceTimeBase
+            : AVRational(num: 1, den: 90_000)
+        guard avcodec_parameters_to_context(decCtx, codecpar) >= 0 else { return nil }
+        decCtx.pointee.time_base = encoderTimeBase
+        guard avcodec_open2(decCtx, decoder, nil) >= 0 else { return nil }
 
         guard let encoder = avcodec_find_encoder(AV_CODEC_ID_H264),
               let encCtx = avcodec_alloc_context3(encoder) else { return nil }
@@ -386,11 +425,10 @@ final class RigelHlsExporter {
         encCtx.pointee.hw_frames_ctx = av_buffer_ref(framesRef)
         encCtx.pointee.width = outW
         encCtx.pointee.height = outH
-        encCtx.pointee.time_base = AVRational(num: 1, den: 30)
+        encCtx.pointee.time_base = encoderTimeBase
         // AirPlay smoothness over fidelity: realtime-priority VideoToolbox
         // session, bitrate scaled to output size so the encoder never falls
         // behind the renderer's consumption rate.
-        encCtx.pointee.bit_rate = transcodedBitrate(width: Int(outW), height: Int(outH))
         // Keyframe every segment (4s): each HLS chunk starts on an IDR, so a
         // seek/AirPlay join lands on an instantly decodable frame and the
         // playlist never references across segment boundaries. fps * 4 is
@@ -417,6 +455,7 @@ final class RigelHlsExporter {
             inputIndex: inputStream.pointee.index,
             decCtx: decCtx,
             encCtx: encCtx,
+            inputTimeBase: encoderTimeBase,
             hwFramesCtx: framesRef,
             scaler: scaler,
             scaledFrame: scaledFrame
@@ -466,7 +505,15 @@ final class RigelHlsExporter {
             guard let hw = hwFrame,
                   av_hwframe_get_buffer(chain.hwFramesCtx, hw, 0) >= 0,
                   av_hwframe_transfer_data(hw, uploadFrame, 0) >= 0 else { continue }
-            hw.pointee.pts = decoded.pointee.pts
+            if decoded.pointee.pts == Int64.min {
+                hw.pointee.pts = Int64.min
+            } else {
+                hw.pointee.pts = av_rescale_q(
+                    decoded.pointee.pts,
+                    chain.inputTimeBase,
+                    chain.encCtx.pointee.time_base
+                )
+            }
             if avcodec_send_frame(chain.encCtx, hw) >= 0 {
                 drainEncodedVideo(chain: chain, out: out, outStream: outStream)
             }
