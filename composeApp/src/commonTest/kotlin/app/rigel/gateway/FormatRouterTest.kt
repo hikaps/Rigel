@@ -52,8 +52,13 @@ class FormatRouterTest {
     }
 
     @Test
-    fun movHevcFlacDirect() {
-        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mov", "hevc", listOf("flac")), false))
+    fun hevcInMovTranscodesForDeviceVideoSupport() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mov", "hevc", listOf("flac")), false))
+    }
+
+    @Test
+    fun hevcMp4WithAacTranscodesForDeviceVideoSupport() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "hevc", listOf("aac")), false))
     }
 
     @Test
@@ -107,8 +112,8 @@ class FormatRouterTest {
     }
 
     @Test
-    fun hevcMkvWithOpusRemux() {
-        assertEquals(PlaybackRoute.REMUX, FormatRouter.decide(probe("matroska", "hevc", listOf("opus")), false))
+    fun hevcMkvWithOpusTranscodesForDeviceVideoSupport() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("matroska", "hevc", listOf("opus")), false))
     }
 
     @Test
@@ -124,9 +129,9 @@ class FormatRouterTest {
     }
 
     @Test
-    fun hevcMain10StaysDirect() {
-        // Hardware-decodes on every supported device.
-        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mp4", "hevc", listOf("aac"), pixFmt = "yuv420p10le"), false))
+    fun hevcMain10TranscodesForDeviceVideoSupport() {
+        // Current device support reports HEVC audio but can black-screen video.
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "hevc", listOf("aac"), pixFmt = "yuv420p10le"), false))
     }
 
     @Test

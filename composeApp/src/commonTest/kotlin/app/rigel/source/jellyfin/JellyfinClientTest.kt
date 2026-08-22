@@ -10,10 +10,12 @@ import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CancellationException
 
 class JellyfinClientTest {
 
@@ -62,9 +64,138 @@ class JellyfinClientTest {
     }
 
     @Test
-    fun browseEmptyOnNetworkError() = kotlinx.coroutines.test.runTest {
+    fun browseParsesWrappedItemsWithNestedDataAndEscapedName() = kotlinx.coroutines.test.runTest {
+        val json = """{"Items":[
+            {"Id":"folder-1","Name":"Movies","Type":"CollectionFolder","IsFolder":true,
+             "UserData":{"Played":false},
+             "MediaSources":[{"Id":"source-1","Name":"nested source","Type":"Default"}]},
+            {"Id":"movie-1","Name":"A \"quoted\" movie","Type":"Movie","IsFolder":false}
+        ],"TotalRecordCount":2}"""
+        val engine = MockEngine {
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        assertEquals(
+            listOf(
+                JellyfinItem("folder-1", "Movies", isFolder = true),
+                JellyfinItem("movie-1", "A \"quoted\" movie", isFolder = false),
+            ),
+            items,
+        )
+    }
+
+    @Test
+    fun browsePreservesNavigableSeriesSeasons() = kotlinx.coroutines.test.runTest {
+        val json = """{"Items":[
+            {"Id":"series-1","Name":"The Expanse","Type":"Series","IsFolder":true},
+            {"Id":"season-1","Name":"Season 1","Type":"Season","IsFolder":true},
+            {"Id":"episode-1","Name":"Pilot","Type":"Episode","IsFolder":false}
+        ]}"""
+        val engine = MockEngine {
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", "series-1")
+
+        assertEquals(
+            listOf(
+                JellyfinItem("series-1", "The Expanse", isFolder = true),
+                JellyfinItem("season-1", "Season 1", isFolder = true),
+                JellyfinItem("episode-1", "Pilot", isFolder = false),
+            ),
+            items,
+        )
+    }
+
+    @Test
+    fun searchCallsJellyfinItemsEndpoint() = kotlinx.coroutines.test.runTest {
+        val requested = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requested += request.url.toString()
+            respond(
+                """{"Items":[{"Id":"m1","Name":"Star Wars","Type":"Movie"},{"Id":"s1","Name":"The Expanse","Type":"Series"}]}""",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val items = JellyfinClient(HttpClient(engine)).search(base, "tok", "u1", "star wars")
+        assertEquals(
+            listOf(
+                JellyfinItem("m1", "Star Wars", isFolder = false),
+                JellyfinItem("s1", "The Expanse", isFolder = true),
+            ),
+            items,
+        )
+        assertEquals(
+            "$base/Users/u1/Items?Recursive=true&SearchTerm=star%20wars&IncludeItemTypes=Movie,Series,Episode,Video&Fields=Path",
+            requested.single(),
+        )
+    }
+
+    @Test
+    fun browsePropagatesNetworkError() = kotlinx.coroutines.test.runTest {
         val engine = MockEngine { throw RuntimeException("unreachable") }
-        assertTrue(JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null).isEmpty())
+        assertFailsWith<RuntimeException> {
+            JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        }
+    }
+
+    @Test
+    fun browsePropagatesUnauthorizedResponse() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine {
+            respond("", HttpStatusCode.Unauthorized, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        assertFailsWith<JellyfinRequestException> {
+            JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        }
+    }
+
+    @Test
+    fun browsePropagatesMalformedResponse() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine {
+            respond("{not-json", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        assertFailsWith<IllegalStateException> {
+            JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        }
+    }
+
+    @Test
+    fun browseHonorsExplicitIsFolderFalse() = kotlinx.coroutines.test.runTest {
+        val json = """{"Items":[
+            {"Id":"season-1","Name":"Season 1","Type":"Season","IsFolder":false}
+        ]}"""
+        val engine = MockEngine {
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        assertEquals(listOf(JellyfinItem("season-1", "Season 1", isFolder = false)), items)
+    }
+
+    @Test
+    fun browsePropagatesMalformedNumber() = kotlinx.coroutines.test.runTest {
+        for (payload in listOf(
+            """{"Items":[{"Id":-,"Name":"x","Type":"Movie"}]}""",
+            """{"Items":[{"Id":1+2,"Name":"x","Type":"Movie"}]}""",
+            """{"Items":[{"Id":1e,"Name":"x","Type":"Movie"}]}""",
+            """{"Items":[{"Id":1.,"Name":"x","Type":"Movie"}]}""",
+            """{"Items":[{"Id":01,"Name":"x","Type":"Movie"}]}""",
+        )) {
+            val engine = MockEngine {
+                respond(payload, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+            }
+            assertFailsWith<IllegalStateException>("payload should fail: $payload") {
+                JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+            }
+        }
+    }
+
+    @Test
+    fun browsePropagatesCancellation() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { throw CancellationException("cancelled") }
+        assertFailsWith<CancellationException> {
+            JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        }
     }
 
     @Test
