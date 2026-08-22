@@ -10,6 +10,7 @@
 #include <libavutil/opt.h>
 #include <libavutil/time.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/audio_fifo.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 

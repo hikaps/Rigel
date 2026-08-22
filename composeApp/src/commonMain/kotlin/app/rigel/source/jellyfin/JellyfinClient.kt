@@ -9,6 +9,8 @@ import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
+import io.ktor.http.isSuccess
+import kotlinx.coroutines.CancellationException
 
 data class JellyfinItem(
     val id: String,
@@ -139,10 +141,15 @@ class JellyfinClient(private val http: HttpClient) {
     }
 
     private suspend fun fetchItems(url: String, token: String): List<JellyfinItem> {
-        val resp = runCatching {
-            http.get(url) { header("X-Emby-Token", token) }.bodyAsText()
-        }.getOrNull() ?: return emptyList()
-        return parseItems(resp)
+        try {
+            val response = http.get(url) { header("X-Emby-Token", token) }
+            if (!response.status.isSuccess()) {
+                throw JellyfinRequestException("Jellyfin request failed (${response.status.value})")
+            }
+            return parseItems(response.bodyAsText())
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        }
     }
 
     /**
@@ -152,50 +159,41 @@ class JellyfinClient(private val http: HttpClient) {
      */
     private fun parseItems(response: String): List<JellyfinItem> {
         val out = mutableListOf<JellyfinItem>()
-        return runCatching {
-            JsonObjectReader(response) { fields ->
-                val id = fields["Id"] ?: return@JsonObjectReader
-                val name = fields["Name"] ?: return@JsonObjectReader
-                val type = fields["Type"] ?: return@JsonObjectReader
-                if (type !in knownItemTypes) return@JsonObjectReader
-                val isFolder = fields["IsFolder"]?.equals("true", ignoreCase = true) == true ||
-                    type == "Folder" ||
-                    type == "CollectionFolder" ||
-                    type == "Series" ||
-                    type == "BoxSet" ||
-                    type == "Playlist"
-                out += JellyfinItem(id, name, isFolder)
-            }.parse()
-            out
-        }.getOrDefault(emptyList())
+        JsonObjectReader(response) { fields ->
+            val id = fields["Id"] ?: return@JsonObjectReader
+            val name = fields["Name"] ?: return@JsonObjectReader
+            val type = fields["Type"] ?: return@JsonObjectReader
+            val isFolder = fields["IsFolder"]?.equals("true", ignoreCase = true) == true ||
+                type in folderItemTypes
+            out += JellyfinItem(id, name, isFolder)
+        }.parse()
+        return out
     }
 
     private companion object {
-        val knownItemTypes = setOf(
-            "Audio",
-            "AudioBook",
-            "Book",
+        /**
+         * IsFolder is authoritative when Jellyfin sends it. These type fallbacks
+         * keep navigation working for minimal server responses and older servers.
+         */
+        val folderItemTypes = setOf(
+            "AggregateFolder",
             "BoxSet",
-            "Channel",
             "CollectionFolder",
-            "Episode",
             "Folder",
             "Genre",
-            "Movie",
             "MusicAlbum",
             "MusicArtist",
-            "MusicVideo",
-            "Photo",
             "Playlist",
-            "Program",
-            "Recording",
             "Series",
+            "Season",
             "Studio",
-            "Trailer",
-            "Video",
+            "UserView",
         )
     }
 }
+
+class JellyfinRequestException(message: String) : Exception(message)
+
 
 /**
  * Small dependency-free JSON walker. It exposes scalar fields for every object

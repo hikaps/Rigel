@@ -10,10 +10,12 @@ import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CancellationException
 
 class JellyfinClientTest {
 
@@ -82,6 +84,29 @@ class JellyfinClientTest {
     }
 
     @Test
+    fun browsePreservesNavigableSeriesSeasons() = kotlinx.coroutines.test.runTest {
+        val json = """{"Items":[
+            {"Id":"series-1","Name":"The Expanse","Type":"Series","IsFolder":true},
+            {"Id":"season-1","Name":"Season 1","Type":"Season","IsFolder":true},
+            {"Id":"episode-1","Name":"Pilot","Type":"Episode","IsFolder":false}
+        ]}"""
+        val engine = MockEngine {
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", "series-1")
+
+        assertEquals(
+            listOf(
+                JellyfinItem("series-1", "The Expanse", isFolder = true),
+                JellyfinItem("season-1", "Season 1", isFolder = true),
+                JellyfinItem("episode-1", "Pilot", isFolder = false),
+            ),
+            items,
+        )
+    }
+
+    @Test
     fun searchCallsJellyfinItemsEndpoint() = kotlinx.coroutines.test.runTest {
         val requested = mutableListOf<String>()
         val engine = MockEngine { request ->
@@ -107,9 +132,19 @@ class JellyfinClientTest {
     }
 
     @Test
-    fun browseEmptyOnNetworkError() = kotlinx.coroutines.test.runTest {
+    fun browsePropagatesNetworkError() = kotlinx.coroutines.test.runTest {
         val engine = MockEngine { throw RuntimeException("unreachable") }
-        assertTrue(JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null).isEmpty())
+        assertFailsWith<RuntimeException> {
+            JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        }
+    }
+
+    @Test
+    fun browsePropagatesCancellation() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { throw CancellationException("cancelled") }
+        assertFailsWith<CancellationException> {
+            JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        }
     }
 
     @Test
