@@ -15,10 +15,20 @@ struct SourcesView: View {
     @State private var noticeIsError = false
 
     @State private var items: [JellyfinItem] = []
+    @State private var searchText = ""
+    @State private var searchResults: [JellyfinItem] = []
+    @State private var searchPerformed = false
+    @State private var searchBusy = false
+    @State private var searchError: String?
+    @State private var libraryError: String?
     @State private var sessions: [JellyfinSession] = []
     @State private var parentId: String?
     @State private var parentName: String?
     @State private var loadedOnce = false
+    @State private var connectionGeneration = 0
+    @State private var libraryGeneration = 0
+    @State private var searchGeneration = 0
+    @State private var sessionGeneration = 0
 
     private var settings: SettingsStore { RigelCore.shared.settings }
     private var jellyfin: JellyfinClient { RigelCore.shared.jellyfin }
@@ -144,13 +154,21 @@ struct SourcesView: View {
                         Button {
                             parentId = nil
                             parentName = nil
+                            items = []
+                            loadedOnce = false
+                            searchGeneration &+= 1
+                            searchBusy = false
+                            searchResults = []
+                            searchPerformed = false
+                            searchError = nil
+                            loadLibrary(at: nil)
                         } label: {
                             Image(systemName: "arrow.uturn.backward")
                         }
                         .buttonStyle(.borderless)
                     }
                     Button {
-                        loadLibrary()
+                        loadLibrary(at: parentId)
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
@@ -165,20 +183,69 @@ struct SourcesView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                if !loadedOnce && items.isEmpty && !busy {
-                    Button("Load library") { loadLibrary() }
+                if let libraryError {
+                    Text(libraryError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+                if !loadedOnce && items.isEmpty && !busy && libraryError == nil {
+                    Button("Load library") { loadLibrary(at: parentId) }
                         .buttonStyle(.borderedProminent)
                         .tint(Color.rigelStar)
                         .listRowBackground(Color.clear)
                 }
             }
 
+            Section("Search Jellyfin") {
+                HStack(spacing: 8) {
+                    TextField("Movies, shows, or episodes", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                        .submitLabel(.search)
+                        .onSubmit { searchLibrary() }
+                    Button {
+                        searchLibrary()
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if searchBusy {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Searching Jellyfin…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if searchPerformed {
+                Section("Search results") {
+                    if let searchError {
+                        Text(searchError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    } else if !searchBusy && searchResults.isEmpty {
+                        Text("No matches")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(searchResults, id: \.id) { item in
+                        LibraryRow(item: item) {
+                            openFolder(item)
+                        } onPlay: {
+                            let url = JellyfinApi.shared.streamUrl(base: base, itemId: item.id, token: token)
+                            _ = player.open(url: url)
+                        }
+                    }
+                }
+            }
+
             Section("Library") {
                 ForEach(items, id: \.id) { item in
                     LibraryRow(item: item) {
-                        parentId = item.id
-                        parentName = item.name
-                        loadLibrary()
+                        openFolder(item)
                     } onPlay: {
                         let url = JellyfinApi.shared.streamUrl(base: base, itemId: item.id, token: token)
                         _ = player.open(url: url)
@@ -232,8 +299,14 @@ struct SourcesView: View {
     }
 
     private func connect() {
+        connectionGeneration &+= 1
+        libraryGeneration &+= 1
+        searchGeneration &+= 1
+        sessionGeneration &+= 1
+        let requestGeneration = connectionGeneration
         busy = true
         notice = nil
+        noticeIsError = false
         jellyfin.authenticate(
             base: server.trimmingCharacters(in: .whitespaces),
             username: username.trimmingCharacters(in: .whitespaces),
@@ -241,6 +314,7 @@ struct SourcesView: View {
             deviceId: "rigel-ios"
         ) { auth, _ in
             Task { @MainActor in
+                guard self.connectionGeneration == requestGeneration else { return }
                 self.busy = false
                 if let auth {
                     self.settings.setJellyfinServer(v: self.server.trimmingCharacters(in: .whitespaces))
@@ -251,7 +325,11 @@ struct SourcesView: View {
                     self.loadedOnce = false
                     self.items = []
                     self.sessions = []
-                    self.loadLibrary()
+                    self.searchResults = []
+                    self.searchPerformed = false
+                    self.searchError = nil
+                    self.libraryError = nil
+                    self.loadLibrary(at: nil)
                 } else {
                     self.notice = "Authentication failed — check the server URL and credentials"
                     self.noticeIsError = true
@@ -261,31 +339,131 @@ struct SourcesView: View {
     }
 
     private func disconnect() {
+        connectionGeneration &+= 1
+        libraryGeneration &+= 1
+        searchGeneration &+= 1
+        sessionGeneration &+= 1
         settings.setJellyfinToken(v: "")
+        busy = false
+        searchBusy = false
         items = []
         sessions = []
         parentId = nil
         parentName = nil
         loadedOnce = false
+        searchResults = []
+        searchPerformed = false
+        searchText = ""
+        searchError = nil
+        libraryError = nil
         notice = nil
     }
 
-    private func loadLibrary() {
+    private func loadLibrary(at requestedParentId: String?) {
+        libraryGeneration &+= 1
+        let requestGeneration = libraryGeneration
+        let connection = connectionGeneration
+        let requestBase = base
+        let requestToken = token
+        let requestUserId = userId
         busy = true
-        jellyfin.browse(base: base, token: token, userId: userId, parentId: parentId) { found, _ in
+        libraryError = nil
+        jellyfin.browse(
+            base: requestBase,
+            token: requestToken,
+            userId: requestUserId,
+            parentId: requestedParentId
+        ) { found, error in
             Task { @MainActor in
-                self.items = found ?? []
+                guard self.connectionGeneration == connection,
+                      self.libraryGeneration == requestGeneration else { return }
                 self.busy = false
                 self.loadedOnce = true
+                if let error {
+                    guard !isCancellation(error) else { return }
+                    self.items = []
+                    self.libraryError = self.errorMessage(error)
+                    return
+                }
+                self.libraryError = nil
+                self.items = found ?? []
                 if self.sessions.isEmpty {
-                    self.jellyfin.sessions(base: self.base, token: self.token) { list, _ in
-                        Task { @MainActor in
-                            self.sessions = list ?? []
-                        }
-                    }
+                    self.loadSessions(connection: connection)
                 }
             }
         }
+    }
+
+    private func loadSessions(connection: Int) {
+        sessionGeneration &+= 1
+        let requestGeneration = sessionGeneration
+        let requestBase = base
+        let requestToken = token
+        jellyfin.sessions(base: requestBase, token: requestToken) { list, _ in
+            Task { @MainActor in
+                guard self.connectionGeneration == connection,
+                      self.sessionGeneration == requestGeneration else { return }
+                self.sessions = list ?? []
+            }
+        }
+    }
+
+    private func searchLibrary() {
+        let term = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return }
+        searchGeneration &+= 1
+        let requestGeneration = searchGeneration
+        let connection = connectionGeneration
+        let requestBase = base
+        let requestToken = token
+        let requestUserId = userId
+        searchBusy = true
+        searchPerformed = true
+        searchResults = []
+        searchError = nil
+        notice = nil
+        jellyfin.search(
+            base: requestBase,
+            token: requestToken,
+            userId: requestUserId,
+            term: term
+        ) { found, error in
+            Task { @MainActor in
+                guard self.connectionGeneration == connection,
+                      self.searchGeneration == requestGeneration else { return }
+                self.searchBusy = false
+                if let error {
+                    guard !isCancellation(error) else { return }
+                    self.searchResults = []
+                    self.searchError = self.errorMessage(error)
+                    return
+                }
+                self.searchError = nil
+                self.searchResults = found ?? []
+            }
+        }
+    }
+
+    private func openFolder(_ item: JellyfinItem) {
+        parentId = item.id
+        parentName = item.name
+        items = []
+        loadedOnce = false
+        searchGeneration &+= 1
+        searchBusy = false
+        searchResults = []
+        searchPerformed = false
+        searchError = nil
+        loadLibrary(at: item.id)
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        JellyfinCancellation.isCancellation(error)
+    }
+
+    private func errorMessage(_ error: Error) -> String {
+        let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return detail.isEmpty ? "Jellyfin request failed" : "Jellyfin request failed: \(detail)"
     }
 
     private func castToSession(_ session: JellyfinSession) {
@@ -307,6 +485,24 @@ struct SourcesView: View {
                 self.noticeIsError = ok?.boolValue != true
             }
         }
+    }
+}
+
+/// Classifies completion-handler errors from the annotated Kotlin/Native
+/// bridge. Kotlin exceptions surface as NSError (domain "KotlinException")
+/// with the exported KotlinThrowable in userInfo["KotlinException"]; that
+/// throwable does not conform to Swift Error, so cancellation is identified
+/// by asking Kotlin.
+enum JellyfinCancellation {
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        let ns = error as NSError
+        if ns.domain.contains("CancellationException") { return true }
+        let throwable = ns.kotlinException ?? ns.userInfo["KotlinException"]
+        guard let kotlinThrowable = throwable as? KotlinThrowable else {
+            return false
+        }
+        return JellyfinInterop.shared.isCancellation(throwable: kotlinThrowable)
     }
 }
 
