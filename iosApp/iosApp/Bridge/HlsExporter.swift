@@ -226,10 +226,22 @@ final class RigelHlsExporter {
            let videoOutIndex = streamMap[videoIndex],
            let videoInStream = ctx.pointee.streams[Int(videoIndex)],
            let videoOutStream = out.pointee.streams[Int(videoOutIndex)] {
+            let primingStartedAt = DispatchTime.now().uptimeNanoseconds
+            var primingPacketCount = 0
+            var primingByteCount: Int64 = 0
             while !chain.initialized && !isCancelled(sessionId) {
+                let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - primingStartedAt) / 1_000_000_000
+                if primingPacketCount >= 512 || primingByteCount >= 32 * 1024 * 1024 || elapsedSeconds >= 10 {
+                    reportFailure("video decoder priming limit exceeded")
+                    return
+                }
                 var primePacket = AVPacket()
                 av_init_packet(&primePacket)
                 let readRet = av_read_frame(ctx, &primePacket)
+                if readRet >= 0 {
+                    primingPacketCount += 1
+                    primingByteCount += Int64(max(0, primePacket.size))
+                }
                 if readRet < 0 {
                     av_packet_unref(&primePacket)
                     if flushPrimingVideo(chain, inputStream: videoInStream, outputStream: videoOutStream) == .fatal {
@@ -671,7 +683,7 @@ final class RigelHlsExporter {
             encCtx: encCtx,
             inputTimeBase: packetTimeBase,
             timestampOrigin90k: timestampOrigin90k,
-            frameRate: fpsHint(inputStream: inputStream)
+            frameRate: sourceFrameRate(inputStream: inputStream)
         )
 
         let codecFormat = AVPixelFormat(rawValue: codecpar.pointee.format)
@@ -843,6 +855,7 @@ final class RigelHlsExporter {
         return 10_000_000
     }
 
+    /// GOP sizing is independently capped for encoder/segment overhead.
     static func gopFrameCount(forFPS fps: Double, segmentDuration: Double = 4) -> Int32 {
         let clamped = fps.isFinite && fps > 0 ? min(max(fps, 15), 60) : 30
         return Int32((clamped * segmentDuration).rounded())
@@ -860,22 +873,40 @@ final class RigelHlsExporter {
         return av_rescale_q(max(0, commonPTS - origin90k), commonTimeBase, output)
     }
 
-    private static func fpsHint(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
+    static func repairVideoPTS(
+        candidate: Int64?,
+        previous: Int64?,
+        frameDuration: Int64
+    ) -> Int64 {
+        let minimum: Int64
+        if let previous {
+            minimum = previous + (candidate == nil ? frameDuration : 1)
+        } else {
+            minimum = 0
+        }
+        return max(candidate ?? minimum, minimum)
+    }
+
+    private static func sourceFrameRate(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
         let rate = inputStream.pointee.avg_frame_rate
         if rate.den > 0 {
             let fps = Double(rate.num) / Double(rate.den)
-            if fps.isFinite && fps > 0 { return min(max(fps, 15), 60) }
+            if fps.isFinite && fps > 0 { return fps }
         }
         return 30
+    }
+
+    private static func fpsHint(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
+        return min(max(sourceFrameRate(inputStream: inputStream), 15), 60)
     }
 
     private static func nextVideoPTS(_ decoded: UnsafeMutablePointer<AVFrame>, chain: VideoChain) -> Int64 {
         let rawPTS = decoded.pointee.best_effort_timestamp != Int64.min
             ? decoded.pointee.best_effort_timestamp
             : decoded.pointee.pts
-        let candidate: Int64
+        let candidate: Int64?
         if rawPTS == Int64.min {
-            candidate = chain.hasVideoPTS ? chain.lastVideoPTS + chain.frameDurationPTS : 0
+            candidate = nil
         } else {
             candidate = rescaleVideoPTS(
                 rawPTS,
@@ -884,8 +915,11 @@ final class RigelHlsExporter {
                 origin90k: chain.timestampOrigin90k
             )
         }
-        let minimum = chain.hasVideoPTS ? chain.lastVideoPTS + chain.frameDurationPTS : 0
-        let pts = max(candidate, minimum)
+        let pts = repairVideoPTS(
+            candidate: candidate,
+            previous: chain.hasVideoPTS ? chain.lastVideoPTS : nil,
+            frameDuration: chain.frameDurationPTS
+        )
         chain.lastVideoPTS = pts
         chain.hasVideoPTS = true
         return pts

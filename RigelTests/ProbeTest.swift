@@ -63,4 +63,14 @@ final class ProbeTest: XCTestCase {
             Int64.min
         )
     }
+
+    func testHighFrameRateTimestampRepairPreservesCadence() {
+        // 120fps at 90kHz advances 750 ticks. Valid source timestamps must
+        // not be forced to the 60fps synthetic duration of 1,500 ticks.
+        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 0, previous: nil, frameDuration: 750), 0)
+        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 750, previous: 0, frameDuration: 1_500), 750)
+        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 1_500, previous: 750, frameDuration: 1_500), 1_500)
+        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 700, previous: 1_500, frameDuration: 1_500), 1_501)
+        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: nil, previous: 1_500, frameDuration: 750), 2_250)
+    }
 }
