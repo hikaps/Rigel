@@ -15,6 +15,10 @@ struct SourcesView: View {
     @State private var noticeIsError = false
 
     @State private var items: [JellyfinItem] = []
+    @State private var searchText = ""
+    @State private var searchResults: [JellyfinItem] = []
+    @State private var searchPerformed = false
+    @State private var searchBusy = false
     @State private var sessions: [JellyfinSession] = []
     @State private var parentId: String?
     @State private var parentName: String?
@@ -173,6 +177,52 @@ struct SourcesView: View {
                 }
             }
 
+            Section("Search Jellyfin") {
+                HStack(spacing: 8) {
+                    TextField("Movies, shows, or episodes", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                        .submitLabel(.search)
+                        .onSubmit { searchLibrary() }
+                    Button {
+                        searchLibrary()
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(searchBusy || searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if searchBusy {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Searching Jellyfin…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if searchPerformed {
+                Section("Search results") {
+                    if !searchBusy && searchResults.isEmpty {
+                        Text("No matches")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(searchResults, id: \.id) { item in
+                        LibraryRow(item: item) {
+                            parentId = item.id
+                            parentName = item.name
+                            searchResults = []
+                            searchPerformed = false
+                            loadLibrary()
+                        } onPlay: {
+                            let url = JellyfinApi.shared.streamUrl(base: base, itemId: item.id, token: token)
+                            _ = player.open(url: url)
+                        }
+                    }
+                }
+            }
+
             Section("Library") {
                 ForEach(items, id: \.id) { item in
                     LibraryRow(item: item) {
@@ -251,6 +301,8 @@ struct SourcesView: View {
                     self.loadedOnce = false
                     self.items = []
                     self.sessions = []
+                    self.searchResults = []
+                    self.searchPerformed = false
                     self.loadLibrary()
                 } else {
                     self.notice = "Authentication failed — check the server URL and credentials"
@@ -267,6 +319,9 @@ struct SourcesView: View {
         parentId = nil
         parentName = nil
         loadedOnce = false
+        searchResults = []
+        searchPerformed = false
+        searchText = ""
         notice = nil
     }
 
@@ -284,6 +339,21 @@ struct SourcesView: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private func searchLibrary() {
+        let term = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return }
+        searchBusy = true
+        searchPerformed = true
+        searchResults = []
+        notice = nil
+        jellyfin.search(base: base, token: token, userId: userId, term: term) { found, _ in
+            Task { @MainActor in
+                self.searchResults = found ?? []
+                self.searchBusy = false
             }
         }
     }

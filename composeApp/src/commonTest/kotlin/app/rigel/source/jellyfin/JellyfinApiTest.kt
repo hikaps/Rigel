@@ -33,6 +33,14 @@ class JellyfinApiTest {
     }
 
     @Test
+    fun searchUrlQueriesJellyfinAndEncodesTerm() {
+        assertEquals(
+            "http://jf:8096/Users/u1/Items?Recursive=true&SearchTerm=star%20wars&IncludeItemTypes=Movie,Series,Episode,Video&Fields=Path",
+            JellyfinApi.searchUrl("http://jf:8096/", "u1", "star wars"),
+        )
+    }
+
+    @Test
     fun streamUrlFormat() {
         assertEquals(
             "http://jf:8096/Videos/i42/stream?Static=true&api_key=tok",

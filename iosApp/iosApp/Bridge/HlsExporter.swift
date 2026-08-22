@@ -2,8 +2,9 @@ import Foundation
 
 /// Local ffmpeg remux/transcode → HLS session. Writes segments + playlist into
 /// Documents/proxy/<sessionId>/ and signals readiness when the playlist exists.
-/// REMUX: video stream-copy; audio copy when AAC/MP3/FLAC/ALAC else decode→AAC.
-/// TRANSCODE: video decode→VideoToolbox H.264, audio decode→AAC.
+/// H.264 video is stream-copied; other video codecs are converted to H.264.
+/// Audio is copied when compatible with the selected mode, otherwise converted
+/// to AAC.
 final class RigelHlsExporter {
     struct Session {
         let queue: DispatchQueue
@@ -57,6 +58,7 @@ final class RigelHlsExporter {
         var ofmt: UnsafeMutablePointer<AVFormatContext>? = nil
         var audioChain: AudioChain? = nil
         var videoChain: VideoChain? = nil
+        var setupError: String?
         var notified = false
 
         defer {
@@ -97,17 +99,27 @@ final class RigelHlsExporter {
 
             switch codecpar.pointee.codec_type {
             case AVMEDIA_TYPE_VIDEO:
-                if mode == "remux" || codecpar.pointee.codec_id == AV_CODEC_ID_H264 || codecpar.pointee.codec_id == AV_CODEC_ID_HEVC {
+                // HLS output uses MPEG-TS. AVPlayer accepts H.264 there, but
+                // HEVC/other codecs can leave audio playing with no video
+                // output. Keep H.264 as a stream copy and transcode everything
+                // else to 8-bit H.264 in software.
+                if codecpar.pointee.codec_id == AV_CODEC_ID_H264 {
                     if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
                         outStream.pointee.codecpar.pointee.codec_tag = 0
                         outStream.pointee.time_base = inStream.pointee.time_base
                     }
+                } else if let chain = makeVideoChain(inputStream: inStream, outputStream: outStream) {
+                    videoChain = chain
                 } else {
-                    videoChain = makeVideoChain(inputStream: inStream, outputStream: outStream)
+                    setupError = "video transcode setup failed"
+                    break
                 }
             case AVMEDIA_TYPE_AUDIO:
-                if mode == "remux", let name = codecName(codecpar.pointee.codec_id),
-                   passthroughAudio.contains(name) {
+                // AAC/MP3 are TS-compatible; stream-copy them so we never
+                // re-encode (the AAC encoder rejects decoded frames larger
+                // than its frame size). Everything else decodes to AAC.
+                if let name = codecName(codecpar.pointee.codec_id),
+                   (name == "aac" || name == "mp3") {
                     if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
                         outStream.pointee.codecpar.pointee.codec_tag = 0
                         outStream.pointee.time_base = inStream.pointee.time_base
@@ -121,6 +133,11 @@ final class RigelHlsExporter {
             }
         }
 
+        if let setupError {
+            notified = true
+            DispatchQueue.main.async { onReady(nil, setupError) }
+            return
+        }
         let headerRet = avformat_write_header(out, nil)
         guard headerRet >= 0 else {
             DispatchQueue.main.async { onReady(nil, "HLS write header failed: \(avErrorString(headerRet))") }
@@ -156,18 +173,27 @@ final class RigelHlsExporter {
             default:
                 break
             }
-
-            if !notified && FileManager.default.fileExists(atPath: playlistPath) {
+            if !notified && playlistReady(playlistPath: playlistPath, outDir: outDir, final: false) {
                 notified = true
                 DispatchQueue.main.async { onReady("\(sessionId)/index.m3u8", nil) }
             }
         }
 
         av_write_trailer(out)
-        if !notified && FileManager.default.fileExists(atPath: playlistPath) {
+        if !notified && playlistReady(playlistPath: playlistPath, outDir: outDir, final: true) {
             notified = true
             DispatchQueue.main.async { onReady("\(sessionId)/index.m3u8", nil) }
         }
+    }
+
+    private static func playlistReady(playlistPath: String, outDir: URL, final: Bool) -> Bool {
+        guard let playlist = try? String(contentsOfFile: playlistPath, encoding: .utf8),
+              playlist.contains("#EXTINF"),
+              FileManager.default.fileExists(atPath: outDir.appendingPathComponent("seg00000.ts").path) else {
+            return false
+        }
+        if final { return true }
+        return FileManager.default.fileExists(atPath: outDir.appendingPathComponent("seg00001.ts").path)
     }
 
     private static func writeRemuxPacket(
@@ -306,13 +332,43 @@ final class RigelHlsExporter {
 
     // MARK: - Video transcode chain (VideoToolbox)
 
-    private struct VideoChain {
+    private final class VideoChain {
         let inputIndex: Int32
+        let inTimeBase: AVRational
         let decCtx: UnsafeMutablePointer<AVCodecContext>
         let encCtx: UnsafeMutablePointer<AVCodecContext>
-        let hwFramesCtx: UnsafeMutablePointer<AVBufferRef>?
-    }
+        let bsf: UnsafeMutablePointer<AVBSFContext>?
+        // Lazily built on the first decoded frame; stored in a box so the
+        // per-frame write path can cache it.
+        let scalerBox: UnsafeMutablePointer<OpaquePointer?>
 
+        init(
+            inputIndex: Int32,
+            inTimeBase: AVRational,
+            decCtx: UnsafeMutablePointer<AVCodecContext>,
+            encCtx: UnsafeMutablePointer<AVCodecContext>,
+            bsf: UnsafeMutablePointer<AVBSFContext>?
+        ) {
+            self.inputIndex = inputIndex
+            self.inTimeBase = inTimeBase
+            self.decCtx = decCtx
+            self.encCtx = encCtx
+            self.bsf = bsf
+            self.scalerBox = UnsafeMutablePointer<OpaquePointer?>.allocate(capacity: 1)
+            self.scalerBox.pointee = nil
+        }
+
+        func release() {
+            if let sws = scalerBox.pointee { sws_freeContext(sws) }
+            scalerBox.deallocate()
+            var bsf = bsf
+            av_bsf_free(&bsf)
+            var dec: UnsafeMutablePointer<AVCodecContext>? = decCtx
+            avcodec_free_context(&dec)
+            var enc: UnsafeMutablePointer<AVCodecContext>? = encCtx
+            avcodec_free_context(&enc)
+        }
+    }
     private static func makeVideoChain(
         inputStream: UnsafeMutablePointer<AVStream>,
         outputStream: UnsafeMutablePointer<AVStream>
@@ -326,37 +382,43 @@ final class RigelHlsExporter {
         guard let encoder = avcodec_find_encoder(AV_CODEC_ID_H264),
               let encCtx = avcodec_alloc_context3(encoder) else { return nil }
 
-        var hwCtx: UnsafeMutablePointer<AVBufferRef>? = nil
-        guard av_hwdevice_ctx_create(&hwCtx, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nil, nil, 0) >= 0,
-              let hwCtx else { return nil }
-        guard let raw = av_hwframe_ctx_alloc(hwCtx) else { return nil }
-        let framesRef = UnsafeMutableRawPointer(raw).assumingMemoryBound(to: AVBufferRef.self)
-        let framesPtr = UnsafeMutableRawPointer(raw).assumingMemoryBound(to: AVHWFramesContext.self)
-        framesPtr.pointee.format = AV_PIX_FMT_VIDEOTOOLBOX
-        framesPtr.pointee.sw_format = decCtx.pointee.pix_fmt
-        framesPtr.pointee.width = decCtx.pointee.width
-        framesPtr.pointee.height = decCtx.pointee.height
-        framesPtr.pointee.initial_pool_size = 8
-        guard av_hwframe_ctx_init(framesRef) >= 0 else { return nil }
-
-        encCtx.pointee.hw_frames_ctx = av_buffer_ref(framesRef)
-        encCtx.pointee.width = decCtx.pointee.width
-        encCtx.pointee.height = decCtx.pointee.height
+        // Software H.264 encode via VideoToolbox: HEVC sources decode to
+        // formats (e.g. 10-bit 4:2:0) that direct upload rejects, so frames
+        // are converted to an even 720p-class yuv420p output. Some Apple
+        // HLS paths reject unusual source dimensions such as 1800x1080.
+        let sourceWidth = max(codecpar.pointee.width, 2)
+        let sourceHeight = max(codecpar.pointee.height, 2)
+        let targetWidth = min(sourceWidth, 1280)
+        let targetHeight = max(2, (sourceHeight * targetWidth / sourceWidth) & ~1)
+        encCtx.pointee.width = targetWidth
+        encCtx.pointee.height = targetHeight
+        encCtx.pointee.pix_fmt = AV_PIX_FMT_YUV420P
         encCtx.pointee.time_base = AVRational(num: 1, den: 30)
+        encCtx.pointee.framerate = AVRational(num: 30, den: 1)
         encCtx.pointee.bit_rate = 8_000_000
         encCtx.pointee.gop_size = 60
-        encCtx.pointee.pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX
-        av_opt_set(encCtx, "profile", "main", 0)
+        encCtx.pointee.flags2 |= AV_CODEC_FLAG2_LOCAL_HEADER
         guard avcodec_open2(encCtx, encoder, nil) >= 0 else { return nil }
 
-        avcodec_parameters_from_context(outputStream.pointee.codecpar, encCtx)
-        outputStream.pointee.time_base = encCtx.pointee.time_base
+        guard let filter = av_bsf_get_by_name("h264_mp4toannexb") else { return nil }
+        var bsf: UnsafeMutablePointer<AVBSFContext>? = nil
+        guard av_bsf_alloc(filter, &bsf) >= 0, let bsf,
+              avcodec_parameters_from_context(bsf.pointee.par_in, encCtx) >= 0 else { return nil }
+        bsf.pointee.time_base_in = encCtx.pointee.time_base
+        guard av_bsf_init(bsf) >= 0 else {
+            var failedBsf: UnsafeMutablePointer<AVBSFContext>? = bsf
+            av_bsf_free(&failedBsf)
+            return nil
+        }
+        avcodec_parameters_copy(outputStream.pointee.codecpar, bsf.pointee.par_out)
+        outputStream.pointee.time_base = bsf.pointee.time_base_out
 
         return VideoChain(
             inputIndex: inputStream.pointee.index,
+            inTimeBase: inputStream.pointee.time_base,
             decCtx: decCtx,
             encCtx: encCtx,
-            hwFramesCtx: framesRef
+            bsf: bsf
         )
     }
 
@@ -367,16 +429,77 @@ final class RigelHlsExporter {
         outStream: UnsafeMutablePointer<AVStream>
     ) {
         if avcodec_send_packet(chain.decCtx, packet) < 0 { return }
-        var swFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
-        defer { av_frame_free(&swFrame) }
-        while let decoded = swFrame, avcodec_receive_frame(chain.decCtx, decoded) >= 0 {
-            var hwFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
-            defer { av_frame_free(&hwFrame) }
-            guard let hw = hwFrame,
-                  av_hwframe_get_buffer(chain.hwFramesCtx, hw, 0) >= 0,
-                  av_hwframe_transfer_data(hw, decoded, 0) >= 0 else { continue }
-            hw.pointee.pts = decoded.pointee.pts
-            if avcodec_send_frame(chain.encCtx, hw) >= 0 {
+        var decoded: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        var converted: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        defer {
+            av_frame_free(&decoded)
+            av_frame_free(&converted)
+        }
+        guard let dst = converted else { return }
+        while let src = decoded, avcodec_receive_frame(chain.decCtx, src) >= 0 {
+            let srcPixFmt = AVPixelFormat(rawValue: Int32(src.pointee.format))
+            if sws_isSupportedInput(srcPixFmt) == 0 { continue }
+
+            dst.pointee.format = AV_PIX_FMT_YUV420P.rawValue
+            dst.pointee.width = chain.encCtx.pointee.width
+            dst.pointee.height = chain.encCtx.pointee.height
+            if av_frame_get_buffer(dst, 0) < 0 { continue }
+
+            if chain.scalerBox.pointee == nil {
+                guard src.pointee.width > 0, src.pointee.height > 0,
+                      let built = sws_getContext(
+                        src.pointee.width,
+                        src.pointee.height,
+                        srcPixFmt,
+                        chain.encCtx.pointee.width,
+                        chain.encCtx.pointee.height,
+                        AV_PIX_FMT_YUV420P,
+                        SWS_BILINEAR,
+                        nil, nil, nil
+                ) else { continue }
+                chain.scalerBox.pointee = built
+            }
+            guard let activeSws = chain.scalerBox.pointee else { continue }
+
+            var srcPlanes: [UnsafePointer<UInt8>?] = [
+                UnsafePointer(src.pointee.data.0), UnsafePointer(src.pointee.data.1),
+                UnsafePointer(src.pointee.data.2), UnsafePointer(src.pointee.data.3),
+                UnsafePointer(src.pointee.data.4), UnsafePointer(src.pointee.data.5),
+                UnsafePointer(src.pointee.data.6), UnsafePointer(src.pointee.data.7),
+            ]
+            var srcStrides: [Int32] = [
+                src.pointee.linesize.0, src.pointee.linesize.1, src.pointee.linesize.2,
+                src.pointee.linesize.3, src.pointee.linesize.4, src.pointee.linesize.5,
+                src.pointee.linesize.6, src.pointee.linesize.7,
+            ]
+            var dstPlanes: [UnsafeMutablePointer<UInt8>?] = [
+                dst.pointee.data.0, dst.pointee.data.1, dst.pointee.data.2, dst.pointee.data.3,
+                dst.pointee.data.4, dst.pointee.data.5, dst.pointee.data.6, dst.pointee.data.7,
+            ]
+            var dstStrides: [Int32] = [
+                dst.pointee.linesize.0, dst.pointee.linesize.1, dst.pointee.linesize.2,
+                dst.pointee.linesize.3, dst.pointee.linesize.4, dst.pointee.linesize.5,
+                dst.pointee.linesize.6, dst.pointee.linesize.7,
+            ]
+            srcPlanes.withUnsafeBufferPointer { sp in
+                srcStrides.withUnsafeBufferPointer { sst in
+                    dstPlanes.withUnsafeBufferPointer { dp in
+                        dstStrides.withUnsafeBufferPointer { dstt in
+                            _ = sws_scale(
+                                activeSws,
+                                sp.baseAddress,
+                                sst.baseAddress,
+                                0,
+                                src.pointee.height,
+                                dp.baseAddress,
+                                dstt.baseAddress
+                            )
+                        }
+                    }
+                }
+            }
+            dst.pointee.pts = av_rescale_q(src.pointee.pts, chain.inTimeBase, chain.encCtx.pointee.time_base)
+            if avcodec_send_frame(chain.encCtx, dst) >= 0 {
                 drainEncodedVideo(chain: chain, out: out, outStream: outStream)
             }
         }
@@ -390,11 +513,27 @@ final class RigelHlsExporter {
         var encPkt = AVPacket()
         av_init_packet(&encPkt)
         while avcodec_receive_packet(chain.encCtx, &encPkt) >= 0 {
-            defer { av_packet_unref(&encPkt) }
-            encPkt.stream_index = outStream.pointee.index
-            av_packet_rescale_ts(&encPkt, chain.encCtx.pointee.time_base, outStream.pointee.time_base)
-            encPkt.pos = -1
-            av_interleaved_write_frame(out, &encPkt)
+            if let bsf = chain.bsf {
+                if av_bsf_send_packet(bsf, &encPkt) >= 0 {
+                    var filtered = AVPacket()
+                    av_init_packet(&filtered)
+                    while av_bsf_receive_packet(bsf, &filtered) >= 0 {
+                        filtered.stream_index = outStream.pointee.index
+                        if filtered.duration <= 0 { filtered.duration = 1 }
+                        av_packet_rescale_ts(&filtered, bsf.pointee.time_base_out, outStream.pointee.time_base)
+                        av_interleaved_write_frame(out, &filtered)
+                        av_packet_unref(&filtered)
+                    }
+                } else {
+                    av_packet_unref(&encPkt)
+                }
+            } else {
+                encPkt.stream_index = outStream.pointee.index
+                if encPkt.duration <= 0 { encPkt.duration = 1 }
+                av_packet_rescale_ts(&encPkt, chain.encCtx.pointee.time_base, outStream.pointee.time_base)
+                av_interleaved_write_frame(out, &encPkt)
+                av_packet_unref(&encPkt)
+            }
         }
     }
 
@@ -437,12 +576,7 @@ final class RigelHlsExporter {
             swr_free(&swr)
         }
         if let video {
-            var dec: UnsafeMutablePointer<AVCodecContext>? = video.decCtx
-            avcodec_free_context(&dec)
-            var enc: UnsafeMutablePointer<AVCodecContext>? = video.encCtx
-            avcodec_free_context(&enc)
-            var ref: UnsafeMutablePointer<AVBufferRef>? = video.encCtx.pointee.hw_frames_ctx
-            av_buffer_unref(&ref)
+            video.release()
         }
     }
 

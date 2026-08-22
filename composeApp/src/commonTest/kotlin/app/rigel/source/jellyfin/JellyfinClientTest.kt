@@ -62,6 +62,51 @@ class JellyfinClientTest {
     }
 
     @Test
+    fun browseParsesWrappedItemsWithNestedDataAndEscapedName() = kotlinx.coroutines.test.runTest {
+        val json = """{"Items":[
+            {"Id":"folder-1","Name":"Movies","Type":"CollectionFolder","IsFolder":true,
+             "UserData":{"Played":false},"MediaSources":[{"Name":"nested","Type":"Default"}]},
+            {"Id":"movie-1","Name":"A \"quoted\" movie","Type":"Movie","IsFolder":false}
+        ],"TotalRecordCount":2}"""
+        val engine = MockEngine {
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        assertEquals(
+            listOf(
+                JellyfinItem("folder-1", "Movies", isFolder = true),
+                JellyfinItem("movie-1", "A \"quoted\" movie", isFolder = false),
+            ),
+            items,
+        )
+    }
+
+    @Test
+    fun searchCallsJellyfinItemsEndpoint() = kotlinx.coroutines.test.runTest {
+        val requested = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requested += request.url.toString()
+            respond(
+                """{"Items":[{"Id":"m1","Name":"Star Wars","Type":"Movie"},{"Id":"s1","Name":"The Expanse","Type":"Series"}]}""",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val items = JellyfinClient(HttpClient(engine)).search(base, "tok", "u1", "star wars")
+        assertEquals(
+            listOf(
+                JellyfinItem("m1", "Star Wars", isFolder = false),
+                JellyfinItem("s1", "The Expanse", isFolder = true),
+            ),
+            items,
+        )
+        assertEquals(
+            "$base/Users/u1/Items?Recursive=true&SearchTerm=star%20wars&IncludeItemTypes=Movie,Series,Episode,Video&Fields=Path",
+            requested.single(),
+        )
+    }
+
+    @Test
     fun browseEmptyOnNetworkError() = kotlinx.coroutines.test.runTest {
         val engine = MockEngine { throw RuntimeException("unreachable") }
         assertTrue(JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null).isEmpty())

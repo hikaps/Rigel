@@ -12,7 +12,9 @@ enum class PlaybackRoute { DIRECT, REMUX, TRANSCODE }
 
 object FormatRouter {
     private val directContainers = setOf("mp4", "mov")
-    private val directVideo = setOf("h264", "hevc")
+    // AVPlayer is accepting the HEVC audio track from Jellyfin but not
+    // producing video on-device. Route HEVC through the HLS transcode path.
+    private val directVideo = setOf("h264")
     private val directAudio = setOf("aac", "mp3", "flac", "alac")
     private val remuxAudio = setOf("ac3", "eac3", "dts", "dca", "truehd", "opus", "vorbis")
     private val remuxContainers = setOf("matroska", "mkv", "webm", "avi", "mpegts", "asf")

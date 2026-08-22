@@ -41,11 +41,19 @@ object JellyfinApi {
 
     fun browseUrl(base: String, userId: String, parentId: String?): String {
         val sb = StringBuilder(base.trimEnd('/'))
-            .append("/Users/").append(userId)
+            .append("/Users/").append(encodeUrlComponent(userId))
             .append("/Items?Recursive=false&Fields=Path")
-        if (!parentId.isNullOrBlank()) sb.append("&ParentId=").append(parentId)
+        if (!parentId.isNullOrBlank()) sb.append("&ParentId=").append(encodeUrlComponent(parentId))
         return sb.toString()
     }
+
+    fun searchUrl(base: String, userId: String, term: String): String =
+        base.trimEnd('/') +
+            "/Users/${encodeUrlComponent(userId)}/Items" +
+            "?Recursive=true" +
+            "&SearchTerm=${encodeUrlComponent(term)}" +
+            "&IncludeItemTypes=Movie,Series,Episode,Video" +
+            "&Fields=Path"
 
     /** Direct file stream URL — feeds the normal probe→route pipeline. */
     fun streamUrl(base: String, itemId: String, token: String): String =
@@ -56,6 +64,23 @@ object JellyfinApi {
 
     fun jsonEscape(s: String): String =
         s.replace("\\", "\\\\").replace("\"", "\\\"")
+
+    private fun encodeUrlComponent(value: String): String {
+        val hex = "0123456789ABCDEF"
+        return buildString {
+            for (byte in value.encodeToByteArray()) {
+                val unsigned = byte.toInt() and 0xff
+                val c = unsigned.toChar()
+                if (c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' || c == '-' || c == '_' || c == '.' || c == '~') {
+                    append(c)
+                } else {
+                    append('%')
+                    append(hex[unsigned ushr 4])
+                    append(hex[unsigned and 0x0f])
+                }
+            }
+        }
+    }
 }
 
 /** Jellyfin client operations (ktor). */
@@ -81,19 +106,13 @@ class JellyfinClient(private val http: HttpClient) {
         return JellyfinAuth(token, userId)
     }
 
-    suspend fun browse(base: String, token: String, userId: String, parentId: String?): List<JellyfinItem> {
-        val url = JellyfinApi.browseUrl(base, userId, parentId)
-        val resp = runCatching {
-            http.get(url) { header("X-Emby-Token", token) }.bodyAsText()
-        }.getOrNull() ?: return emptyList()
-        val out = mutableListOf<JellyfinItem>()
-        for (m in Regex("""\{[^{}]*?"Id":"([^"]+)"[^{}]*?"Name":"([^"]+)"[^{}]*?"Type":"([^"]+)"[^{}]*?}""").findAll(resp)) {
-            val id = m.groupValues[1]
-            val name = m.groupValues[2]
-            val type = m.groupValues[3]
-            out += JellyfinItem(id, name, type == "Folder")
-        }
-        return out
+    suspend fun browse(base: String, token: String, userId: String, parentId: String?): List<JellyfinItem> =
+        fetchItems(JellyfinApi.browseUrl(base, userId, parentId), token)
+
+    /** Search Jellyfin itself rather than filtering the currently loaded folder. */
+    suspend fun search(base: String, token: String, userId: String, term: String): List<JellyfinItem> {
+        if (term.isBlank()) return emptyList()
+        return fetchItems(JellyfinApi.searchUrl(base, userId, term.trim()), token)
     }
 
     suspend fun sessions(base: String, token: String): List<JellyfinSession> {
@@ -117,5 +136,212 @@ class JellyfinClient(private val http: HttpClient) {
             }.status.value
         }.getOrNull()
         return resp != null && resp in 200..299
+    }
+
+    private suspend fun fetchItems(url: String, token: String): List<JellyfinItem> {
+        val resp = runCatching {
+            http.get(url) { header("X-Emby-Token", token) }.bodyAsText()
+        }.getOrNull() ?: return emptyList()
+        return parseItems(resp)
+    }
+
+    /**
+     * Jellyfin returns both bare arrays and an object containing an Items array.
+     * Parse JSON structure instead of relying on property order or flat objects;
+     * real responses contain nested UserData and MediaSources objects.
+     */
+    private fun parseItems(response: String): List<JellyfinItem> {
+        val out = mutableListOf<JellyfinItem>()
+        return runCatching {
+            JsonObjectReader(response) { fields ->
+                val id = fields["Id"] ?: return@JsonObjectReader
+                val name = fields["Name"] ?: return@JsonObjectReader
+                val type = fields["Type"] ?: return@JsonObjectReader
+                if (type !in knownItemTypes) return@JsonObjectReader
+                val isFolder = fields["IsFolder"]?.equals("true", ignoreCase = true) == true ||
+                    type == "Folder" ||
+                    type == "CollectionFolder" ||
+                    type == "Series" ||
+                    type == "BoxSet" ||
+                    type == "Playlist"
+                out += JellyfinItem(id, name, isFolder)
+            }.parse()
+            out
+        }.getOrDefault(emptyList())
+    }
+
+    private companion object {
+        val knownItemTypes = setOf(
+            "Audio",
+            "AudioBook",
+            "Book",
+            "BoxSet",
+            "Channel",
+            "CollectionFolder",
+            "Episode",
+            "Folder",
+            "Genre",
+            "Movie",
+            "MusicAlbum",
+            "MusicArtist",
+            "MusicVideo",
+            "Photo",
+            "Playlist",
+            "Program",
+            "Recording",
+            "Series",
+            "Studio",
+            "Trailer",
+            "Video",
+        )
+    }
+}
+
+/**
+ * Small dependency-free JSON walker. It exposes scalar fields for every object
+ * and recursively visits nested objects, which is sufficient for Jellyfin's
+ * item envelopes on all supported targets.
+ */
+private class JsonObjectReader(
+    private val source: String,
+    private val onObject: (Map<String, String>) -> Unit,
+) {
+    private var index = 0
+
+    fun parse() {
+        parseValue()
+        skipWhitespace()
+        if (index != source.length) error("Trailing JSON content")
+    }
+
+    private fun parseValue(): String? {
+        skipWhitespace()
+        if (index >= source.length) error("Missing JSON value")
+        return when (source[index]) {
+            '"' -> parseString()
+            '{' -> {
+                parseObject()
+                null
+            }
+            '[' -> {
+                parseArray()
+                null
+            }
+            't' -> {
+                consumeLiteral("true")
+                "true"
+            }
+            'f' -> {
+                consumeLiteral("false")
+                "false"
+            }
+            'n' -> {
+                consumeLiteral("null")
+                null
+            }
+            '-', in '0'..'9' -> parseNumber()
+            else -> error("Invalid JSON value at $index")
+        }
+    }
+
+    private fun parseObject() {
+        expect('{')
+        val fields = mutableMapOf<String, String>()
+        skipWhitespace()
+        if (takeIf('}')) {
+            onObject(fields)
+            return
+        }
+        while (true) {
+            skipWhitespace()
+            val key = parseString()
+            skipWhitespace()
+            expect(':')
+            parseValue()?.let { fields[key] = it }
+            skipWhitespace()
+            when {
+                takeIf('}') -> {
+                    onObject(fields)
+                    return
+                }
+                takeIf(',') -> Unit
+                else -> error("Expected object separator at $index")
+            }
+        }
+    }
+
+    private fun parseArray() {
+        expect('[')
+        skipWhitespace()
+        if (takeIf(']')) return
+        while (true) {
+            parseValue()
+            skipWhitespace()
+            when {
+                takeIf(']') -> return
+                takeIf(',') -> Unit
+                else -> error("Expected array separator at $index")
+            }
+        }
+    }
+
+    private fun parseString(): String {
+        expect('"')
+        val out = StringBuilder()
+        while (index < source.length) {
+            when (val c = source[index++]) {
+                '"' -> return out.toString()
+                '\\' -> {
+                    if (index >= source.length) error("Unterminated JSON escape")
+                    when (val escaped = source[index++]) {
+                        '"', '\\', '/' -> out.append(escaped)
+                        'b' -> out.append('\b')
+                        'f' -> out.append('\u000C')
+                        'n' -> out.append('\n')
+                        'r' -> out.append('\r')
+                        't' -> out.append('\t')
+                        'u' -> {
+                            if (index + 4 > source.length) error("Incomplete unicode escape")
+                            out.append(source.substring(index, index + 4).toInt(16).toChar())
+                            index += 4
+                        }
+                        else -> error("Invalid JSON escape: $escaped")
+                    }
+                }
+                else -> {
+                    if (c < ' ') error("Unescaped control character")
+                    out.append(c)
+                }
+            }
+        }
+        error("Unterminated JSON string")
+    }
+
+    private fun parseNumber(): String {
+        val start = index
+        while (index < source.length && source[index] in "-+0123456789.eE") index++
+        return source.substring(start, index)
+    }
+
+    private fun consumeLiteral(literal: String) {
+        if (!source.startsWith(literal, index)) error("Invalid JSON literal at $index")
+        index += literal.length
+    }
+
+    private fun skipWhitespace() {
+        while (index < source.length && source[index] in " \n\r\t") index++
+    }
+
+    private fun expect(c: Char) {
+        if (index >= source.length || source[index] != c) error("Expected '$c' at $index")
+        index++
+    }
+
+    private fun takeIf(c: Char): Boolean {
+        if (index < source.length && source[index] == c) {
+            index++
+            return true
+        }
+        return false
     }
 }

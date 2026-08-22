@@ -36,8 +36,13 @@ class FormatRouterTest {
     }
 
     @Test
-    fun movHevcFlacDirect() {
-        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mov", "hevc", listOf("flac")), false))
+    fun hevcInMovTranscodesForDeviceVideoSupport() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mov", "hevc", listOf("flac")), false))
+    }
+
+    @Test
+    fun hevcMp4WithAacTranscodesForDeviceVideoSupport() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "hevc", listOf("aac")), false))
     }
 
     @Test
@@ -91,7 +96,7 @@ class FormatRouterTest {
     }
 
     @Test
-    fun hevcMkvWithOpusRemux() {
-        assertEquals(PlaybackRoute.REMUX, FormatRouter.decide(probe("matroska", "hevc", listOf("opus")), false))
+    fun hevcMkvWithOpusTranscodesForDeviceVideoSupport() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("matroska", "hevc", listOf("opus")), false))
     }
 }
