@@ -213,18 +213,25 @@ final class RigelHlsExporter {
                 let readRet = av_read_frame(ctx, &primePacket)
                 if readRet < 0 {
                     av_packet_unref(&primePacket)
+                    if flushPrimingVideo(chain, inputStream: videoInStream, outputStream: videoOutStream) == .fatal {
+                        DispatchQueue.main.async { onReady(nil, "video decoder produced no usable frame") }
+                        return
+                    }
                     break
                 }
                 if primePacket.stream_index == videoIndex {
-                    if !primeVideoPacket(
+                    switch primeVideoPacket(
                         chain,
                         packet: &primePacket,
                         inputStream: videoInStream,
                         outputStream: videoOutStream
                     ) {
+                    case .fatal:
                         av_packet_unref(&primePacket)
                         DispatchQueue.main.async { onReady(nil, "failed to initialize video transcoder") }
                         return
+                    case .needMoreInput, .initialized:
+                        break
                     }
                 } else if primePacket.stream_index == selectedAudioIndex,
                           let buffered = av_packet_alloc(),
@@ -249,6 +256,10 @@ final class RigelHlsExporter {
            let videoOutIndex = streamMap[chain.inputIndex],
            let videoOutStream = out.pointee.streams[Int(videoOutIndex)] {
             drainPendingVideoFrames(chain, out: out, outStream: videoOutStream)
+        }
+        if let videoError = videoChain?.error {
+            DispatchQueue.main.async { onReady(nil, videoError) }
+            return
         }
         for buffered in pendingAudioPackets {
             let inIdx = buffered.pointee.stream_index
@@ -295,7 +306,10 @@ final class RigelHlsExporter {
             default:
                 break
             }
-
+            if let videoError = videoChain?.error {
+                DispatchQueue.main.async { onReady(nil, videoError) }
+                return
+            }
             if !notified && FileManager.default.fileExists(atPath: playlistPath) {
                 notified = true
                 DispatchQueue.main.async { onReady("\(sessionId)/index.m3u8", nil) }
@@ -313,6 +327,10 @@ final class RigelHlsExporter {
                let outStream = out.pointee.streams[Int(outIndex)] {
                 flushTranscodedVideo(chain: chain, out: out, outStream: outStream)
             }
+        }
+        if let videoError = videoChain?.error {
+            DispatchQueue.main.async { onReady(nil, videoError) }
+            return
         }
         av_write_trailer(out)
         if !notified && FileManager.default.fileExists(atPath: playlistPath) {
@@ -450,28 +468,47 @@ final class RigelHlsExporter {
             chain.swr, &outBufs, Int32(maxOut), &inData, decoded.pointee.nb_samples))
         guard outSamples > 0 else { return }
 
+        let audioTimeBase = AVRational(num: 1, den: 90_000)
+        let proposedPTS: Int64
+        if decoded.pointee.pts == Int64.min {
+            proposedPTS = chain.nextPts
+        } else {
+            let sourcePTS = av_rescale_q(decoded.pointee.pts, chain.inputTimeBase, audioTimeBase)
+            let rebasedPTS = max(0, sourcePTS - chain.timestampOrigin90k)
+            proposedPTS = av_rescale_q(rebasedPTS, audioTimeBase, chain.encCtx.pointee.time_base)
+        }
+        encodeAudioSamples(
+            chain: chain,
+            left: buf0,
+            right: buf1,
+            sampleCount: outSamples,
+            proposedPTS: proposedPTS,
+            out: out,
+            outStream: outStream
+        )
+    }
+
+    private static func encodeAudioSamples(
+        chain: AudioChain,
+        left: UnsafeMutablePointer<UInt8>,
+        right: UnsafeMutablePointer<UInt8>,
+        sampleCount: Int,
+        proposedPTS: Int64,
+        out: UnsafeMutablePointer<AVFormatContext>,
+        outStream: UnsafeMutablePointer<AVStream>
+    ) {
         var encFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
         defer { av_frame_free(&encFrame) }
         guard let enc = encFrame else { return }
-        enc.pointee.nb_samples = Int32(outSamples)
+        enc.pointee.nb_samples = Int32(sampleCount)
         enc.pointee.format = Int32(AV_SAMPLE_FMT_FLTP.rawValue)
         enc.pointee.sample_rate = 48000
         av_channel_layout_copy(&enc.pointee.ch_layout, &chain.encCtx.pointee.ch_layout)
         guard av_frame_get_buffer(enc, 0) >= 0 else { return }
-        memcpy(enc.pointee.data.0, outBufs[0], outSamples * 4)
-        memcpy(enc.pointee.data.1, outBufs[1], outSamples * 4)
-
-        let audioTimeBase = AVRational(num: 1, den: 90_000)
-        let framePTS: Int64
-        if decoded.pointee.pts == Int64.min {
-            framePTS = chain.nextPts
-        } else {
-            let sourcePTS = av_rescale_q(decoded.pointee.pts, chain.inputTimeBase, audioTimeBase)
-            let rebasedPTS = max(0, sourcePTS - chain.timestampOrigin90k)
-            framePTS = av_rescale_q(rebasedPTS, audioTimeBase, chain.encCtx.pointee.time_base)
-        }
-        enc.pointee.pts = framePTS
-        chain.nextPts = max(chain.nextPts, framePTS + Int64(outSamples))
+        memcpy(enc.pointee.data.0, left, sampleCount * 4)
+        memcpy(enc.pointee.data.1, right, sampleCount * 4)
+        enc.pointee.pts = max(proposedPTS, chain.nextPts)
+        chain.nextPts = enc.pointee.pts + Int64(sampleCount)
         if avcodec_send_frame(chain.encCtx, enc) >= 0 {
             drainEncodedAudio(chain: chain, out: out, outStream: outStream)
         }
@@ -492,6 +529,7 @@ final class RigelHlsExporter {
             av_interleaved_write_frame(out, &encPkt)
         }
     }
+
     private static func flushTranscodedAudio(
         chain: AudioChain,
         out: UnsafeMutablePointer<AVFormatContext>,
@@ -504,8 +542,44 @@ final class RigelHlsExporter {
                 writeTranscodedAudioFrame(chain: chain, decoded: decoded, out: out, outStream: outStream)
             }
         }
+        flushAudioResampler(chain: chain, out: out, outStream: outStream)
         if avcodec_send_frame(chain.encCtx, nil) >= 0 {
             drainEncodedAudio(chain: chain, out: out, outStream: outStream)
+        }
+    }
+
+    private static func flushAudioResampler(
+        chain: AudioChain,
+        out: UnsafeMutablePointer<AVFormatContext>,
+        outStream: UnsafeMutablePointer<AVStream>
+    ) {
+        let emptyInput = [UnsafePointer<UInt8>?](repeating: nil, count: 8)
+        for _ in 0..<8 {
+            let delay = swr_get_delay(chain.swr, 48_000)
+            if delay <= 0 { break }
+            let maxOut = max(1, Int(delay) + 32)
+            let planarBytes = maxOut * 2 * 4
+            guard let left = av_malloc(planarBytes)?.assumingMemoryBound(to: UInt8.self),
+                  let right = av_malloc(planarBytes)?.assumingMemoryBound(to: UInt8.self) else { return }
+            defer {
+                av_free(left)
+                av_free(right)
+            }
+            var outBufs: [UnsafeMutablePointer<UInt8>?] = [left, right]
+            var input = emptyInput
+            let samples = Int(swr_convert(
+                chain.swr, &outBufs, Int32(maxOut), &input, 0
+            ))
+            if samples <= 0 { break }
+            encodeAudioSamples(
+                chain: chain,
+                left: left,
+                right: right,
+                sampleCount: samples,
+                proposedPTS: chain.nextPts,
+                out: out,
+                outStream: outStream
+            )
         }
     }
 
@@ -517,24 +591,33 @@ final class RigelHlsExporter {
         let encCtx: UnsafeMutablePointer<AVCodecContext>
         let inputTimeBase: AVRational
         let timestampOrigin90k: Int64
+        let frameDurationPTS: Int64
+        var inputPixFmt: AVPixelFormat = AV_PIX_FMT_NONE
+        var sourceWidth: Int32 = 0
+        var sourceHeight: Int32 = 0
         var hwFramesCtx: UnsafeMutablePointer<AVBufferRef>?
         var scaler: OpaquePointer?
         var scaledFrame: UnsafeMutablePointer<AVFrame>?
         var initialized = false
         var pendingFrames: [UnsafeMutablePointer<AVFrame>] = []
+        var error: String?
+        var hasVideoPTS = false
+        var lastVideoPTS: Int64 = 0
 
         init(
             inputIndex: Int32,
             decCtx: UnsafeMutablePointer<AVCodecContext>,
             encCtx: UnsafeMutablePointer<AVCodecContext>,
             inputTimeBase: AVRational,
-            timestampOrigin90k: Int64
+            timestampOrigin90k: Int64,
+            frameRate: Double
         ) {
             self.inputIndex = inputIndex
             self.decCtx = decCtx
             self.encCtx = encCtx
             self.inputTimeBase = inputTimeBase
             self.timestampOrigin90k = timestampOrigin90k
+            self.frameDurationPTS = max(1, Int64((90_000.0 / max(frameRate, 1.0)).rounded()))
         }
     }
 
@@ -554,16 +637,17 @@ final class RigelHlsExporter {
         guard avcodec_parameters_to_context(decCtx, codecpar) >= 0 else { return nil }
         decCtx.pointee.pkt_timebase = packetTimeBase
         guard avcodec_open2(decCtx, decoder, nil) >= 0 else { return nil }
-
         guard let encoder = avcodec_find_encoder(AV_CODEC_ID_H264),
               let encCtx = avcodec_alloc_context3(encoder) else { return nil }
         encCtx.pointee.time_base = encoderTimeBase
+
         let chain = VideoChain(
             inputIndex: inputStream.pointee.index,
             decCtx: decCtx,
             encCtx: encCtx,
             inputTimeBase: packetTimeBase,
-            timestampOrigin90k: timestampOrigin90k
+            timestampOrigin90k: timestampOrigin90k,
+            frameRate: fpsHint(inputStream: inputStream)
         )
 
         let codecFormat = AVPixelFormat(rawValue: codecpar.pointee.format)
@@ -658,7 +742,38 @@ final class RigelHlsExporter {
         chain.hwFramesCtx = framesRef
         chain.scaler = scaler
         chain.scaledFrame = scaledFrame
+        chain.inputPixFmt = inputPixFmt
+        chain.sourceWidth = sourceWidth
+        chain.sourceHeight = sourceHeight
         chain.initialized = true
+        return true
+    }
+    private enum PrimeVideoResult {
+        case fatal
+        case needMoreInput
+        case initialized
+    }
+
+    private static func retainPrimedFrame(
+        _ chain: VideoChain,
+        decoded: UnsafeMutablePointer<AVFrame>,
+        inputStream: UnsafeMutablePointer<AVStream>,
+        outputStream: UnsafeMutablePointer<AVStream>
+    ) -> Bool {
+        if !chain.initialized {
+            let format = AVPixelFormat(rawValue: decoded.pointee.format)
+            guard initializeVideoChain(
+                chain,
+                inputStream: inputStream,
+                outputStream: outputStream,
+                inputPixFmt: format,
+                sourceWidth: decoded.pointee.width,
+                sourceHeight: decoded.pointee.height
+            ) else { return false }
+        }
+        guard let retained = av_frame_alloc(), av_frame_ref(retained, decoded) >= 0 else { return false }
+        chain.pendingFrames.append(retained)
+        av_frame_unref(decoded)
         return true
     }
 
@@ -667,27 +782,32 @@ final class RigelHlsExporter {
         packet: UnsafeMutablePointer<AVPacket>,
         inputStream: UnsafeMutablePointer<AVStream>,
         outputStream: UnsafeMutablePointer<AVStream>
-    ) -> Bool {
-        guard avcodec_send_packet(chain.decCtx, packet) >= 0 else { return false }
+    ) -> PrimeVideoResult {
+        guard avcodec_send_packet(chain.decCtx, packet) >= 0 else { return .fatal }
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
         defer { av_frame_free(&frame) }
         while let decoded = frame, avcodec_receive_frame(chain.decCtx, decoded) >= 0 {
-            if !chain.initialized {
-                let format = AVPixelFormat(rawValue: decoded.pointee.format)
-                guard initializeVideoChain(
-                    chain,
-                    inputStream: inputStream,
-                    outputStream: outputStream,
-                    inputPixFmt: format,
-                    sourceWidth: decoded.pointee.width,
-                    sourceHeight: decoded.pointee.height
-                ) else { return false }
+            guard retainPrimedFrame(chain, decoded: decoded, inputStream: inputStream, outputStream: outputStream) else {
+                return .fatal
             }
-            guard let retained = av_frame_alloc(), av_frame_ref(retained, decoded) >= 0 else { return false }
-            chain.pendingFrames.append(retained)
-            av_frame_unref(decoded)
         }
-        return chain.initialized
+        return chain.initialized ? .initialized : .needMoreInput
+    }
+
+    private static func flushPrimingVideo(
+        _ chain: VideoChain,
+        inputStream: UnsafeMutablePointer<AVStream>,
+        outputStream: UnsafeMutablePointer<AVStream>
+    ) -> PrimeVideoResult {
+        guard avcodec_send_packet(chain.decCtx, nil) >= 0 else { return .fatal }
+        var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        defer { av_frame_free(&frame) }
+        while let decoded = frame, avcodec_receive_frame(chain.decCtx, decoded) >= 0 {
+            guard retainPrimedFrame(chain, decoded: decoded, inputStream: inputStream, outputStream: outputStream) else {
+                return .fatal
+            }
+        }
+        return chain.initialized ? .initialized : .fatal
     }
     /// Output bitrate by resolution class. Generous but bounded: AirPlay
     /// renderers buffer ~3 segments; a steady bitrate avoids VBV spikes that
@@ -699,15 +819,11 @@ final class RigelHlsExporter {
         return 10_000_000
     }
 
-    /// Return a complete GOP frame count without truncating fractional FPS
-    /// before multiplication (23.976fps × 4s = 96 frames).
     static func gopFrameCount(forFPS fps: Double, segmentDuration: Double = 4) -> Int32 {
         let clamped = fps.isFinite && fps > 0 ? min(max(fps, 15), 60) : 30
         return Int32((clamped * segmentDuration).rounded())
     }
 
-    /// Convert decoded frame PTS from decoder packet time base to encoder time
-    /// base, preserving the sentinel used for missing timestamps.
     static func rescaleVideoPTS(
         _ pts: Int64,
         from input: AVRational,
@@ -720,7 +836,6 @@ final class RigelHlsExporter {
         return av_rescale_q(max(0, commonPTS - origin90k), commonTimeBase, output)
     }
 
-    /// Source fps from the stream's avg_frame_rate, clamped to [15, 60].
     private static func fpsHint(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
         let rate = inputStream.pointee.avg_frame_rate
         if rate.den > 0 {
@@ -728,6 +843,28 @@ final class RigelHlsExporter {
             if fps.isFinite && fps > 0 { return min(max(fps, 15), 60) }
         }
         return 30
+    }
+
+    private static func nextVideoPTS(_ decoded: UnsafeMutablePointer<AVFrame>, chain: VideoChain) -> Int64 {
+        let rawPTS = decoded.pointee.best_effort_timestamp != Int64.min
+            ? decoded.pointee.best_effort_timestamp
+            : decoded.pointee.pts
+        let candidate: Int64
+        if rawPTS == Int64.min {
+            candidate = chain.hasVideoPTS ? chain.lastVideoPTS + chain.frameDurationPTS : 0
+        } else {
+            candidate = rescaleVideoPTS(
+                rawPTS,
+                from: chain.inputTimeBase,
+                to: chain.encCtx.pointee.time_base,
+                origin90k: chain.timestampOrigin90k
+            )
+        }
+        let minimum = chain.hasVideoPTS ? chain.lastVideoPTS + chain.frameDurationPTS : 0
+        let pts = max(candidate, minimum)
+        chain.lastVideoPTS = pts
+        chain.hasVideoPTS = true
+        return pts
     }
 
     private static func writeTranscodedVideo(
@@ -756,15 +893,27 @@ final class RigelHlsExporter {
         }
         chain.pendingFrames.removeAll()
     }
+
     private static func writeTranscodedVideoFrame(
         chain: VideoChain,
         decoded: UnsafeMutablePointer<AVFrame>,
         out: UnsafeMutablePointer<AVFormatContext>,
         outStream: UnsafeMutablePointer<AVStream>
     ) {
+        let format = AVPixelFormat(rawValue: decoded.pointee.format)
+        guard chain.initialized,
+              format == chain.inputPixFmt,
+              decoded.pointee.width == chain.sourceWidth,
+              decoded.pointee.height == chain.sourceHeight else {
+            chain.error = "video format changed during transcode"
+            return
+        }
         let uploadFrame: UnsafeMutablePointer<AVFrame>
         if let scaler = chain.scaler, let scaled = chain.scaledFrame {
-            guard sws_scale_frame(scaler, scaled, decoded) == 0 else { return }
+            guard sws_scale_frame(scaler, scaled, decoded) == 0 else {
+                chain.error = "video frame conversion failed"
+                return
+            }
             uploadFrame = scaled
         } else {
             uploadFrame = decoded
@@ -773,13 +922,11 @@ final class RigelHlsExporter {
         defer { av_frame_free(&hwFrame) }
         guard let hw = hwFrame,
               av_hwframe_get_buffer(chain.hwFramesCtx, hw, 0) >= 0,
-              av_hwframe_transfer_data(hw, uploadFrame, 0) >= 0 else { return }
-        hw.pointee.pts = rescaleVideoPTS(
-            decoded.pointee.pts,
-            from: chain.inputTimeBase,
-            to: chain.encCtx.pointee.time_base,
-            origin90k: chain.timestampOrigin90k
-        )
+              av_hwframe_transfer_data(hw, uploadFrame, 0) >= 0 else {
+            chain.error = "video hardware frame conversion failed"
+            return
+        }
+        hw.pointee.pts = nextVideoPTS(decoded, chain: chain)
         if avcodec_send_frame(chain.encCtx, hw) >= 0 {
             drainEncodedVideo(chain: chain, out: out, outStream: outStream)
         }
@@ -800,6 +947,7 @@ final class RigelHlsExporter {
             av_interleaved_write_frame(out, &encPkt)
         }
     }
+
     private static func flushTranscodedVideo(
         chain: VideoChain,
         out: UnsafeMutablePointer<AVFormatContext>,
