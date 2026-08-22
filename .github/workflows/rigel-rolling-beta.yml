@@ -1,0 +1,206 @@
+name: Rigel Rolling Beta Release
+
+# Rolling beta: every merge to develop archives the app for device, exports a
+# development-signed IPA, and publishes it to a single "beta" GitHub release
+# that is replaced on each run (previous beta + tag are deleted first).
+#
+# Free personal-team signing (no Apple Developer Program enrollment):
+#   - Export the Xcode-managed "Apple Development" cert as a p12 and the two
+#     device development profiles Xcode generated for com.rigel.player and
+#     com.rigel.player.share (Personal Teams cannot use wildcard App IDs).
+#   - Cert and profiles expire after 7 days: re-export and re-set the secrets
+#     weekly, or the job fails loudly instead of producing a stale IPA.
+#   - Installs only on devices registered in the development profiles (the
+#     devices used locally in Xcode). No TestFlight/App Store distribution.
+#
+# Required repository secrets:
+#   IOS_CERTIFICATE                  base64 of the personal-team .p12
+#   IOS_CERTIFICATE_PASSWORD         password of the .p12
+#   IOS_PROVISIONING_PROFILE         base64 of the com.rigel.player dev profile
+#   IOS_PROVISIONING_PROFILE_SHARE   base64 of the com.rigel.player.share dev profile
+#   IOS_TEAM_ID                      10-char personal team ID (from the cert)
+#
+# The job is skipped (not failed) until the secrets are set, so develop merges
+# stay unblocked. Trigger manually with workflow_dispatch once secrets exist.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: beta-ipa
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-beta-ipa:
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - name: Check signing configuration
+        id: signing
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_PROVISIONING_PROFILE_SHARE: ${{ secrets.IOS_PROVISIONING_PROFILE_SHARE }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        shell: bash
+        run: |
+          if [[ -z "$IOS_CERTIFICATE" || -z "$IOS_CERTIFICATE_PASSWORD" || -z "$IOS_PROVISIONING_PROFILE" || -z "$IOS_PROVISIONING_PROFILE_SHARE" || -z "$IOS_TEAM_ID" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Beta IPA skipped: signing secrets are not configured."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.signing.outputs.configured == 'true'
+        uses: actions/checkout@v4
+
+      - if: steps.signing.outputs.configured == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - if: steps.signing.outputs.configured == 'true'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install JDK 21 (Xcode prebuild hardcodes brew prefix)
+        if: steps.signing.outputs.configured == 'true'
+        run: brew install openjdk@21
+
+      - if: steps.signing.outputs.configured == 'true'
+        uses: actions/cache@v4
+        with:
+          path: iosApp/vendor/ffmpeg-device
+          key: ffmpeg-device-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+          restore-keys: |
+            ffmpeg-device-
+
+      - name: Restore or build FFmpeg device libs
+        if: steps.signing.outputs.configured == 'true'
+        run: |
+          # Vendored dependency: build once into a persistent runner store,
+          # copy on later runs (checkout cleans the gitignored vendor dir).
+          set -euo pipefail
+          if [ -d "$HOME/rigel-vendor/ffmpeg-device/lib" ]; then
+            mkdir -p iosApp/vendor/ffmpeg-device
+            cp -R "$HOME/rigel-vendor/ffmpeg-device/." iosApp/vendor/ffmpeg-device/
+            echo "restored FFmpeg device libs from persistent store"
+          else
+            mkdir -p "$HOME/rigel-vendor"
+            SDK=iphoneos JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-dev" ./scripts/build-ffmpeg.sh \
+              || SDK=iphoneos JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-dev" ./scripts/build-ffmpeg.sh
+            cp -R iosApp/vendor/ffmpeg-device "$HOME/rigel-vendor/ffmpeg-device"
+            echo "built and stored FFmpeg device libs"
+          fi
+
+      - name: Install signing certificate
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/rigel.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$IOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/cert.p12" -P "$IOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Never touch the user's default keychain (breaks the host session on
+          # self-hosted runners); prepend the temp keychain to the search list
+          # and remember the original list for the restore step below.
+          security list-keychains -d user | sed 's/^[[:space:]]*//; s/"//g' > "$RUNNER_TEMP/orig-search.txt"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(cat "$RUNNER_TEMP/orig-search.txt")
+
+      - name: Install provisioning profiles
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          IOS_PROVISIONING_PROFILE: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+          IOS_PROVISIONING_PROFILE_SHARE: ${{ secrets.IOS_PROVISIONING_PROFILE_SHARE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$IOS_PROVISIONING_PROFILE" | base64 --decode \
+            > "$HOME/Library/MobileDevice/Provisioning Profiles/Rigel.mobileprovision"
+          echo "$IOS_PROVISIONING_PROFILE_SHARE" | base64 --decode \
+            > "$HOME/Library/MobileDevice/Provisioning Profiles/RigelShare.mobileprovision"
+
+      - name: Archive app for device
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          xcodebuild archive \
+            -project iosApp/Rigel.xcodeproj \
+            -scheme Rigel \
+            -configuration Release \
+            -archivePath build/Rigel.xcarchive \
+            -destination "generic/platform=iOS" \
+            -allowProvisioningUpdates \
+            DEVELOPMENT_TEAM="$IOS_TEAM_ID"
+
+      - name: Export IPA (development)
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          cat > build/export-options.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>development</string>
+              <key>teamID</key>
+              <string>$IOS_TEAM_ID</string>
+              <key>signingStyle</key>
+              <string>automatic</string>
+              <key>stripSwiftSymbols</key>
+              <true/>
+              <key>uploadSymbols</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath build/Rigel.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist build/export-options.plist
+
+      - name: Publish rolling beta release
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA="${{ github.sha }}"
+          NAMED="build/Rigel-beta-${SHA:0:7}.ipa"
+          mv build/export/Rigel.ipa "$NAMED"
+          gh release delete beta --yes --cleanup-tag || true
+          gh release create beta "$NAMED" \
+            --target "$SHA" \
+            --title "Rigel Beta ($(date -u +%Y-%m-%d))" \
+            --notes "Rolling development beta from develop @ ${SHA:0:7}. Installs only on devices registered in the development profiles; expires ~7 days after signing." \
+            --latest=false
+
+      - name: Restore keychain search list
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "$RUNNER_TEMP/orig-search.txt" ]; then
+            security list-keychains -d user -s $(cat "$RUNNER_TEMP/orig-search.txt") || true
+          else
+            security list-keychains -d user -s \
+              "$HOME/Library/Keychains/login.keychain-db" \
+              /Library/Keychains/System.keychain || true
+          fi

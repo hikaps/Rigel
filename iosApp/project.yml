@@ -23,7 +23,7 @@ targets:
         CODE_SIGN_STYLE: Automatic
         CODE_SIGNING_ALLOWED: YES
         HEADER_SEARCH_PATHS:
-          - "$(SRCROOT)/vendor/ffmpeg/include"
+          - "$(SRCROOT)/vendor/ffmpeg/current/include"
         LIBRARY_SEARCH_PATHS:
           - "$(SRCROOT)/vendor/ffmpeg/current/lib"
         OTHER_LDFLAGS:
@@ -48,6 +48,7 @@ targets:
           rm -rf "$SRCROOT/vendor/ffmpeg/current"
           mkdir -p "$SRCROOT/vendor/ffmpeg/current"
           cp -R "$SRCROOT/vendor/$SRC/lib" "$SRCROOT/vendor/ffmpeg/current/"
+          cp -R "$SRCROOT/vendor/$SRC/include" "$SRCROOT/vendor/ffmpeg/current/"
       - name: Build ComposeApp framework
         basedOnDependencyAnalysis: false
         script: |

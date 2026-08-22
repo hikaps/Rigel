@@ -46,6 +46,9 @@ SYSROOT="$(xcrun -sdk "$SDK" --show-sdk-path)"
   --disable-x86asm \
   --pkg-config-flags="--static"
 
-make -j"$(sysctl -n hw.ncpu)"
+# Parallel make races on generated headers with -j$(ncpu) on fast machines
+# (flaky 'libavutil/... file not found' failures); JOBS lets callers pin it.
+JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
+make -j"$JOBS"
 make install
 echo "FFmpeg installed to $PREFIX"

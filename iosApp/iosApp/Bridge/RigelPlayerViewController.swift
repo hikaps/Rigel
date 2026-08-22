@@ -28,6 +28,7 @@ final class RigelPlayerViewController: UIViewController {
         try audioSession.setActive(true)
     }
 
+    private let topBar = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
     private let titleLabel = UILabel()
     private let senderLabel = UILabel()
     private let backButton = UIButton(type: .system)
@@ -48,60 +49,66 @@ final class RigelPlayerViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        view.backgroundColor = .black
         setupTopBar()
     }
 
     private func setupTopBar() {
-        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .dark))
-        blur.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(blur)
+        topBar.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(topBar)
         NSLayoutConstraint.activate([
-            blur.topAnchor.constraint(equalTo: view.topAnchor),
-            blur.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            blur.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            blur.heightAnchor.constraint(equalToConstant: 96),
+            topBar.topAnchor.constraint(equalTo: view.topAnchor),
+            topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
 
-        backButton.setTitle("←", for: .normal)
-        backButton.titleLabel?.font = .systemFont(ofSize: 24)
+        backButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
+        backButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
         backButton.tintColor = .white
+        backButton.accessibilityLabel = "Back"
+        backButton.accessibilityHint = "Return to Rigel"
         backButton.addTarget(self, action: #selector(backTapped), for: .touchUpInside)
         backButton.translatesAutoresizingMaskIntoConstraints = false
-        blur.contentView.addSubview(backButton)
+        topBar.contentView.addSubview(backButton)
 
         titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
         titleLabel.textColor = .white
         titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        blur.contentView.addSubview(titleLabel)
+        topBar.contentView.addSubview(titleLabel)
 
-        senderLabel.font = .systemFont(ofSize: 11)
+        senderLabel.font = .systemFont(ofSize: 12)
         senderLabel.textColor = .white.withAlphaComponent(0.7)
+        senderLabel.lineBreakMode = .byTruncatingTail
         senderLabel.translatesAutoresizingMaskIntoConstraints = false
-        blur.contentView.addSubview(senderLabel)
+        topBar.contentView.addSubview(senderLabel)
 
         routePicker.tintColor = .white
+        routePicker.accessibilityLabel = "Playback destination"
         routePicker.translatesAutoresizingMaskIntoConstraints = false
-        blur.contentView.addSubview(routePicker)
+        topBar.contentView.addSubview(routePicker)
 
         NSLayoutConstraint.activate([
-            backButton.leadingAnchor.constraint(equalTo: blur.leadingAnchor, constant: 8),
-            backButton.centerYAnchor.constraint(equalTo: blur.centerYAnchor, constant: 20),
+            backButton.leadingAnchor.constraint(equalTo: topBar.leadingAnchor, constant: 12),
+            backButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
             backButton.widthAnchor.constraint(equalToConstant: 40),
             backButton.heightAnchor.constraint(equalToConstant: 40),
 
-            titleLabel.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 4),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: routePicker.leadingAnchor, constant: -8),
-            titleLabel.centerYAnchor.constraint(equalTo: blur.centerYAnchor, constant: 8),
-
-            senderLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            senderLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
-            senderLabel.trailingAnchor.constraint(lessThanOrEqualTo: routePicker.leadingAnchor, constant: -8),
-
-            routePicker.trailingAnchor.constraint(equalTo: blur.trailingAnchor, constant: -12),
-            routePicker.centerYAnchor.constraint(equalTo: blur.centerYAnchor, constant: 20),
+            routePicker.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -12),
+            routePicker.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             routePicker.widthAnchor.constraint(equalToConstant: 44),
             routePicker.heightAnchor.constraint(equalToConstant: 44),
+
+            titleLabel.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 8),
+            titleLabel.trailingAnchor.constraint(equalTo: routePicker.leadingAnchor, constant: -8),
+            titleLabel.topAnchor.constraint(equalTo: backButton.topAnchor, constant: 1),
+
+            senderLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            senderLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            senderLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+
+            topBar.bottomAnchor.constraint(equalTo: backButton.bottomAnchor, constant: 12),
         ])
     }
 
@@ -127,6 +134,7 @@ final class RigelPlayerViewController: UIViewController {
             NSLog("[RigelPlayer] audio session setup failed: %@", error.localizedDescription)
         }
 
+        disposed = false
         notifiedPlaying = false
 
         let item = AVPlayerItem(url: avURL)
@@ -136,7 +144,10 @@ final class RigelPlayerViewController: UIViewController {
 
         let vc = AVPlayerViewController()
         vc.player = p
+        vc.videoGravity = .resizeAspect
+        vc.showsPlaybackControls = true
         vc.allowsPictureInPicturePlayback = true
+        vc.updatesNowPlayingInfoCenter = true
         addChild(vc)
         view.insertSubview(vc.view, at: 0)
         vc.view.frame = view.bounds
@@ -144,6 +155,8 @@ final class RigelPlayerViewController: UIViewController {
         vc.didMove(toParent: self)
         playerVC = vc
 
+        // AVPlayer queues this request until the item is ready. Do not call
+        // play() from polling: that would override a user's pause.
         p.play()
         startPolling()
     }
@@ -193,14 +206,10 @@ final class RigelPlayerViewController: UIViewController {
             NSLog("[RigelPlayer] item failed: %@ (domain=%@ code=%ld)", detail, nsErr?.domain ?? "?", nsErr?.code ?? -1)
             events.onError(message: detail)
         case .readyToPlay:
-            if player.timeControlStatus == .playing {
-                if !notifiedPlaying {
-                    notifiedPlaying = true
-                    NSLog("[RigelPlayer] playing")
-                }
+            if player.timeControlStatus == .playing, !notifiedPlaying {
+                notifiedPlaying = true
+                NSLog("[RigelPlayer] playing")
                 events.onReady()
-            } else {
-                player.play()
             }
         default:
             break

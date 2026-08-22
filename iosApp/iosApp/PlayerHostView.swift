@@ -31,30 +31,61 @@ struct PlayerHostView: View {
     private var content: some View {
         switch player.phase.name {
         case "IDLE":
-            VStack(spacing: 10) {
-                Text("Nothing playing")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Button("Home") { player.showPlayer = false }
-                    .buttonStyle(.bordered)
-                    .tint(Color.rigelStar)
+            VStack(spacing: 18) {
+                Image(systemName: "play.rectangle.fill")
+                    .font(.system(size: 42))
+                    .foregroundStyle(Color.rigelStar)
+                VStack(spacing: 6) {
+                    Text("Nothing playing")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text("Open a stream from the Rigel home screen.")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                Button {
+                    player.showPlayer = false
+                } label: {
+                    Label("Back to Rigel", systemImage: "chevron.left")
+                }
+                .buttonStyle(.bordered)
+                .tint(Color.rigelStar)
             }
+            .padding(28)
+            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .padding(24)
         case "PROBING", "PREPARING_PROXY":
-            VStack(spacing: 14) {
+            VStack(spacing: 18) {
+                Image(systemName: player.phase.name == "PROBING" ? "magnifyingglass" : "gearshape.2.fill")
+                    .font(.system(size: 34))
+                    .foregroundStyle(Color.rigelStar)
                 ProgressView()
                     .tint(.white)
                     .controlSize(.large)
-                Text(player.phase.name == "PROBING" ? "Probing stream…" : "Preparing local conversion…")
-                    .foregroundStyle(.white)
+                VStack(spacing: 6) {
+                    Text(player.phase.name == "PROBING" ? "Checking stream" : "Preparing playback")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(player.phase.name == "PROBING"
+                         ? "Finding the best way to play this link."
+                         : "Converting this stream for smooth playback.")
+                        .font(.subheadline)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
                 if !player.routeLabel.isEmpty {
                     Text(player.routeLabel)
-                        .font(.caption)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(.orange.opacity(0.25), in: Capsule())
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.orange.opacity(0.2), in: Capsule())
                         .foregroundStyle(.orange)
                 }
             }
+            .padding(28)
+            .frame(maxWidth: 360)
+            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .padding(24)
         case "PLAYING":
             if let url = player.playableURL {
                 PlayerView(
@@ -69,24 +100,42 @@ struct PlayerHostView: View {
                 .ignoresSafeArea()
             }
         default: // ERROR
-            VStack(spacing: 16) {
-                Text("Playback error")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Text(player.error ?? "Unknown error")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.8))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
+            VStack(spacing: 18) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 36))
+                    .foregroundStyle(.orange)
+                VStack(spacing: 6) {
+                    Text("Playback error")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(player.error ?? "Unknown error")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.75))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(6)
+                }
                 HStack(spacing: 12) {
-                    Button("Open via proxy") { player.retryWithProxy() }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Color.rigelStar)
-                    Button("Close") { player.stop() }
-                        .buttonStyle(.bordered)
-                        .tint(.white)
+                    Button {
+                        player.retryWithProxy()
+                    } label: {
+                        Label("Try proxy", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.rigelStar)
+
+                    Button {
+                        player.stop()
+                    } label: {
+                        Text("Close")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
                 }
             }
+            .padding(28)
+            .frame(maxWidth: 420)
+            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .padding(24)
         }
     }
 }
