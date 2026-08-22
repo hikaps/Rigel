@@ -185,13 +185,30 @@ struct PlayerView: UIViewControllerRepresentable {
             ])
             return vc
         }
+        // Bind the error path to the concrete controller created below: a
+        // stale .failed from a dismantled player must stop only itself, never
+        // the bridge's current (possibly newer) controller.
+        let origin = PlayerErrorOrigin()
         let events = PlayerEventsImpl(
             onReady: onReady,
-            onError: onError,
+            onError: { [weak origin] message in
+                if let origin, let controller = origin.controller,
+                   let currentBridge = PlayerBridgeFactory.shared.create() as? RigelPlayerBridge {
+                    currentBridge.stop(viewController: controller)
+                }
+                onError(message)
+            },
             onBack: onBack
         )
-        return bridge.createPlayerViewController(events: events)
+        let created = bridge.createPlayerViewController(events: events)
+        origin.controller = created as? RigelPlayerViewController
+        return created
     }
+
+    private final class PlayerErrorOrigin {
+        weak var controller: RigelPlayerViewController?
+    }
+
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         guard let bridge = PlayerBridgeFactory.shared.create() else { return }

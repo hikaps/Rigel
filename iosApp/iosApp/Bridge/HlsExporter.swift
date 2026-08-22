@@ -226,14 +226,15 @@ final class RigelHlsExporter {
            let videoOutIndex = streamMap[videoIndex],
            let videoInStream = ctx.pointee.streams[Int(videoIndex)],
            let videoOutStream = out.pointee.streams[Int(videoOutIndex)] {
-            /// Retained audio is memory-bounded, not fatal: a valid audio-first
-            /// live stream or long initial GOP may legitimately delay the first
-            /// video frame. Once the cap is hit, further audio is dropped until
-            /// video initializes (the output then continues from the live point)
-            /// instead of rejecting the stream.
+            /// Retained audio is a bounded tail ring, not fatal and not a
+            /// drop-the-middle hole: when the byte cap is exceeded the oldest
+            /// buffered packets are evicted, so what remains is always the
+            /// audio adjacent to the first decoded video frame. The timeline
+            /// is then rebased onto the ring head so replay stays continuous.
             let primingAudioByteLimit: Int64 = 8 * 1024 * 1024
             var primingAudioBytes: Int64 = 0
-            while !chain.initialized && !isCancelled(sessionId) {
+            var primingAudioEvicted = false
+            primingLoop: while !chain.initialized && !isCancelled(sessionId) {
                 var primePacket = AVPacket()
                 av_init_packet(&primePacket)
                 let readRet = av_read_frame(ctx, &primePacket)
@@ -246,6 +247,7 @@ final class RigelHlsExporter {
                     usleep(1_000)
                     continue
                 case .eof:
+                    av_packet_unref(&primePacket)
                     if flushPrimingVideo(chain, inputStream: videoInStream, outputStream: videoOutStream) == .fatal {
                         reportFailure("video decoder produced no usable frame")
                         return
@@ -254,8 +256,11 @@ final class RigelHlsExporter {
                         reportFailure("video decoder produced no usable frame")
                         return
                     }
-                    break
+                    // EOF packet is a sentinel, not media: exit the loop
+                    // before the dispatch below can feed it to the decoder.
+                    break primingLoop
                 case .readError(let message):
+                    av_packet_unref(&primePacket)
                     reportFailure(message)
                     return
                 }
@@ -274,17 +279,34 @@ final class RigelHlsExporter {
                         break
                     }
                 } else if primePacket.stream_index == selectedAudioIndex,
-                          primingAudioBytes < primingAudioByteLimit,
                           let buffered = av_packet_alloc(),
                           av_packet_ref(buffered, &primePacket) >= 0 {
                     primingAudioBytes += Int64(max(0, buffered.pointee.size))
                     pendingAudioPackets.append(buffered)
+                    while primingAudioBytes > primingAudioByteLimit,
+                          pendingAudioPackets.count > 1,
+                          let oldest = pendingAudioPackets.first {
+                        primingAudioBytes -= Int64(max(0, oldest.pointee.size))
+                        pendingAudioPackets.removeFirst()
+                        var oldestPointer: UnsafeMutablePointer<AVPacket>? = oldest
+                        av_packet_free(&oldestPointer)
+                        primingAudioEvicted = true
+                    }
                 }
                 av_packet_unref(&primePacket)
             }
             if !chain.initialized {
                 reportFailure("video decoder produced no usable frame")
                 return
+            }
+            if primingAudioEvicted,
+               let audioIndex = selectedAudioIndex,
+               let audioInStream = ctx.pointee.streams[Int(audioIndex)],
+               let ringHeadPTS = audioRingHeadPTS90k(pendingAudioPackets, timeBase: audioInStream.pointee.time_base) {
+                // Rebase both chains onto the retained tail so replayed audio
+                // and the first video frames share one continuous timeline.
+                chain.timestampOrigin90k = ringHeadPTS
+                audioChain?.timestampOrigin90k = ringHeadPTS
             }
         }
         let headerRet = avformat_write_header(out, nil)
@@ -404,7 +426,7 @@ final class RigelHlsExporter {
         let decCtx: UnsafeMutablePointer<AVCodecContext>
         let encCtx: UnsafeMutablePointer<AVCodecContext>
         let inputTimeBase: AVRational
-        let timestampOrigin90k: Int64
+        var timestampOrigin90k: Int64
         let swr: OpaquePointer
         var nextPts: Int64 = 0
 
@@ -636,7 +658,7 @@ final class RigelHlsExporter {
         let decCtx: UnsafeMutablePointer<AVCodecContext>
         let encCtx: UnsafeMutablePointer<AVCodecContext>
         let inputTimeBase: AVRational
-        let timestampOrigin90k: Int64
+        var timestampOrigin90k: Int64
         let frameDurationPTS: Int64
         var inputPixFmt: AVPixelFormat = AV_PIX_FMT_NONE
         var sourceWidth: Int32 = 0
@@ -855,6 +877,18 @@ final class RigelHlsExporter {
         }
         return chain.initialized ? .initialized : .fatal
     }
+    /// PTS (90 kHz) of the oldest retained audio packet in the priming tail
+    /// ring, used to rebase the shared timeline after eviction. Nil when the
+    /// ring is empty or the packet carries no timestamp.
+    static func audioRingHeadPTS90k(
+        _ packets: [UnsafeMutablePointer<AVPacket>],
+        timeBase: AVRational
+    ) -> Int64? {
+        guard timeBase.num != 0, timeBase.den != 0,
+              let first = packets.first,
+              first.pointee.pts != Int64.min else { return nil }
+        return av_rescale_q(first.pointee.pts, timeBase, AVRational(num: 1, den: 90_000))
+    }
     enum PrimingReadResult {
         case ok
         case again
@@ -906,13 +940,15 @@ final class RigelHlsExporter {
     ) -> Int64 {
         guard let previous else { return max(candidate ?? 0, 0) }
         guard let candidate else { return previous + frameDuration }
-        if candidate >= previous {
+        if candidate > previous {
             // Valid forward timestamp: keep its real cadence even when the
             // delta is smaller than the synthetic frame duration (120fps).
             return candidate
         }
-        // Regressed timestamp: re-space at one full frame duration. A run of
-        // regressions must not compress toward zero elapsed time.
+        // Equal or regressed timestamp: re-space at one full frame duration.
+        // Duplicate PTS would otherwise reach H.264/MPEG-TS unchanged and be
+        // rejected or collapsed; a run of regressions must not compress the
+        // timeline toward zero elapsed time.
         return previous + frameDuration
     }
 
