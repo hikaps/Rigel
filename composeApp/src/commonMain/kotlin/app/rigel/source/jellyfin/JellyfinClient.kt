@@ -107,11 +107,12 @@ class JellyfinClient(private val http: HttpClient) {
         }
         return JellyfinAuth(token, userId)
     }
-
+    @Throws(Exception::class)
     suspend fun browse(base: String, token: String, userId: String, parentId: String?): List<JellyfinItem> =
         fetchItems(JellyfinApi.browseUrl(base, userId, parentId), token)
 
     /** Search Jellyfin itself rather than filtering the currently loaded folder. */
+    @Throws(Exception::class)
     suspend fun search(base: String, token: String, userId: String, term: String): List<JellyfinItem> {
         if (term.isBlank()) return emptyList()
         return fetchItems(JellyfinApi.searchUrl(base, userId, term.trim()), token)

@@ -141,6 +141,26 @@ class JellyfinClientTest {
     }
 
     @Test
+    fun browsePropagatesUnauthorizedResponse() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine {
+            respond("", HttpStatusCode.Unauthorized, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        assertFailsWith<JellyfinRequestException> {
+            JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        }
+    }
+
+    @Test
+    fun browsePropagatesMalformedResponse() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine {
+            respond("{not-json", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        assertFailsWith<IllegalStateException> {
+            JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        }
+    }
+
+    @Test
     fun browsePropagatesCancellation() = kotlinx.coroutines.test.runTest {
         val engine = MockEngine { throw CancellationException("cancelled") }
         assertFailsWith<CancellationException> {

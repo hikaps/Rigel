@@ -272,6 +272,11 @@ final class RigelHlsExporter {
                 flushTranscodedVideo(chain: chain, out: out, outStream: outStream)
             }
         }
+        guard !isCancelled(session) else {
+            cancelled = true
+            return
+        }
+        av_write_trailer(out)
         if !notified && playlistReady(playlistPath: playlistPath, outDir: outDir, final: true) {
             notified = publishReady(
                 session: session,
@@ -858,6 +863,10 @@ final class RigelHlsExporter {
                 writeVideoPacket(
                     &encPkt,
                     packetTimeBase: chain.encCtx.pointee.time_base,
+                    fallbackDuration: videoFrameDuration(
+                        frameRate: chain.encCtx.pointee.framerate,
+                        packetTimeBase: chain.encCtx.pointee.time_base
+                    ),
                     out: out,
                     outStream: outStream
                 )
@@ -892,6 +901,10 @@ final class RigelHlsExporter {
             writeVideoPacket(
                 &filtered,
                 packetTimeBase: bsf.pointee.time_base_out,
+                fallbackDuration: videoFrameDuration(
+                    frameRate: chain.encCtx.pointee.framerate,
+                    packetTimeBase: bsf.pointee.time_base_out
+                ),
                 out: out,
                 outStream: outStream
             )
@@ -902,17 +915,32 @@ final class RigelHlsExporter {
     private static func writeVideoPacket(
         _ packet: UnsafeMutablePointer<AVPacket>,
         packetTimeBase: AVRational,
+        fallbackDuration: Int64,
         out: UnsafeMutablePointer<AVFormatContext>,
         outStream: UnsafeMutablePointer<AVStream>
     ) {
         packet.pointee.stream_index = outStream.pointee.index
-        if packet.pointee.duration <= 0 { packet.pointee.duration = 1 }
+        if packet.pointee.duration <= 0, fallbackDuration > 0 {
+            packet.pointee.duration = fallbackDuration
+        }
         av_packet_rescale_ts(packet, packetTimeBase, outStream.pointee.time_base)
         packet.pointee.pos = -1
         let ret = av_interleaved_write_frame(out, packet)
         if ret < 0 {
             NSLog("[RigelHls] H.264 packet write failed: %@", avErrorString(ret))
         }
+    }
+
+    private static func videoFrameDuration(
+        frameRate: AVRational,
+        packetTimeBase: AVRational
+    ) -> Int64 {
+        guard frameRate.num > 0, frameRate.den > 0,
+              packetTimeBase.num > 0, packetTimeBase.den > 0 else {
+            return 0
+        }
+        let frameTimeBase = AVRational(num: frameRate.den, den: frameRate.num)
+        return max(1, av_rescale_q(1, frameTimeBase, packetTimeBase))
     }
 
     // MARK: - Helpers
