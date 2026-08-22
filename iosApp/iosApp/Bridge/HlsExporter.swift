@@ -344,43 +344,62 @@ final class RigelHlsExporter {
         guard let codecpar = inputStream.pointee.codecpar,
               let decoder = avcodec_find_decoder(codecpar.pointee.codec_id),
               let decCtx = avcodec_alloc_context3(decoder) else { return nil }
+        var encCtx: UnsafeMutablePointer<AVCodecContext>? = nil
+        var swr: OpaquePointer? = nil
+        var fifo: OpaquePointer? = nil
+        // Every failure exit must release what was already allocated; no
+        // AudioChain exists yet to own them.
+        func fail() -> AudioChain? {
+            var decPtr: UnsafeMutablePointer<AVCodecContext>? = decCtx
+            avcodec_free_context(&decPtr)
+            if encCtx != nil {
+                var encPtr: UnsafeMutablePointer<AVCodecContext>? = encCtx
+                avcodec_free_context(&encPtr)
+            }
+            if swr != nil { swr_free(&swr) }
+            if fifo != nil { av_audio_fifo_free(fifo) }
+            return nil
+        }
+
         guard avcodec_parameters_to_context(decCtx, codecpar) >= 0,
-              avcodec_open2(decCtx, decoder, nil) >= 0 else { return nil }
+              avcodec_open2(decCtx, decoder, nil) >= 0 else { return fail() }
 
         guard let aacEncoder = avcodec_find_encoder(AV_CODEC_ID_AAC),
-              let encCtx = avcodec_alloc_context3(aacEncoder) else { return nil }
-        encCtx.pointee.sample_rate = 48000
-        av_channel_layout_default(&encCtx.pointee.ch_layout, 2)
-        encCtx.pointee.sample_fmt = AV_SAMPLE_FMT_FLTP
-        encCtx.pointee.bit_rate = 256_000
-        guard avcodec_open2(encCtx, aacEncoder, nil) >= 0 else { return nil }
+              let allocatedEnc = avcodec_alloc_context3(aacEncoder) else { return fail() }
+        encCtx = allocatedEnc
+        allocatedEnc.pointee.sample_rate = 48000
+        av_channel_layout_default(&allocatedEnc.pointee.ch_layout, 2)
+        allocatedEnc.pointee.sample_fmt = AV_SAMPLE_FMT_FLTP
+        allocatedEnc.pointee.bit_rate = 256_000
+        guard avcodec_open2(allocatedEnc, aacEncoder, nil) >= 0 else { return fail() }
 
-        var swr: OpaquePointer? = nil
         var inLayout = decCtx.pointee.ch_layout
-        var outLayout = encCtx.pointee.ch_layout
+        var outLayout = allocatedEnc.pointee.ch_layout
         swr_alloc_set_opts2(
             &swr, &outLayout, AV_SAMPLE_FMT_FLTP, 48000,
             &inLayout, decCtx.pointee.sample_fmt, decCtx.pointee.sample_rate,
             0, nil
         )
-        guard let swr, swr_init(swr) >= 0 else { return nil }
+        guard let swr, swr_init(swr) >= 0 else { return fail() }
 
-        avcodec_parameters_from_context(outputStream.pointee.codecpar, encCtx)
+        guard let allocatedFifo = av_audio_fifo_alloc(
+            AV_SAMPLE_FMT_FLTP,
+            Int32(allocatedEnc.pointee.ch_layout.nb_channels),
+            max(allocatedEnc.pointee.frame_size, 1)
+        ) else { return fail() }
+        fifo = allocatedFifo
+
+        avcodec_parameters_from_context(outputStream.pointee.codecpar, allocatedEnc)
         outputStream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_AUDIO
         outputStream.pointee.time_base = AVRational(num: 1, den: 48000)
 
-        guard let fifo = av_audio_fifo_alloc(
-            AV_SAMPLE_FMT_FLTP,
-            Int32(encCtx.pointee.ch_layout.nb_channels),
-            max(encCtx.pointee.frame_size, 1)
-        ) else { return nil }
         return AudioChain(
             inputIndex: inputStream.pointee.index,
             outputIndex: outputStream.pointee.index,
             decCtx: decCtx,
-            encCtx: encCtx,
+            encCtx: allocatedEnc,
             swr: swr,
-            fifo: fifo
+            fifo: allocatedFifo
         )
     }
     private static func writeTranscodedAudio(
@@ -630,11 +649,26 @@ final class RigelHlsExporter {
         guard let codecpar = inputStream.pointee.codecpar,
               let decoder = avcodec_find_decoder(codecpar.pointee.codec_id),
               let decCtx = avcodec_alloc_context3(decoder) else { return nil }
+        var encCtx: UnsafeMutablePointer<AVCodecContext>? = nil
+        var bsf: UnsafeMutablePointer<AVBSFContext>? = nil
+        // Failure exits must release what was already allocated; no VideoChain
+        // exists yet to own them.
+        func fail() -> VideoChain? {
+            var dec: UnsafeMutablePointer<AVCodecContext>? = decCtx
+            avcodec_free_context(&dec)
+            if encCtx != nil {
+                var enc: UnsafeMutablePointer<AVCodecContext>? = encCtx
+                avcodec_free_context(&enc)
+            }
+            if bsf != nil { av_bsf_free(&bsf) }
+            return nil
+        }
         guard avcodec_parameters_to_context(decCtx, codecpar) >= 0,
-              avcodec_open2(decCtx, decoder, nil) >= 0 else { return nil }
+              avcodec_open2(decCtx, decoder, nil) >= 0 else { return fail() }
 
         guard let encoder = avcodec_find_encoder(AV_CODEC_ID_H264),
-              let encCtx = avcodec_alloc_context3(encoder) else { return nil }
+              let allocatedEnc = avcodec_alloc_context3(encoder) else { return fail() }
+        encCtx = allocatedEnc
 
         // Keep the source clock and cadence. A fixed 1/30 time base collapses
         // adjacent 60fps timestamps to duplicates.
@@ -653,26 +687,21 @@ final class RigelHlsExporter {
             : (fallbackRate.num > 0 && fallbackRate.den > 0
                 ? fallbackRate
                 : AVRational(num: 30, den: 1))
-        encCtx.pointee.width = targetWidth
-        encCtx.pointee.height = targetHeight
-        encCtx.pointee.pix_fmt = AV_PIX_FMT_YUV420P
-        encCtx.pointee.time_base = encoderTimeBase
-        encCtx.pointee.framerate = encoderFrameRate
-        encCtx.pointee.bit_rate = 8_000_000
-        encCtx.pointee.gop_size = 60
-        encCtx.pointee.flags2 |= AV_CODEC_FLAG2_LOCAL_HEADER
-        guard avcodec_open2(encCtx, encoder, nil) >= 0 else { return nil }
+        allocatedEnc.pointee.width = targetWidth
+        allocatedEnc.pointee.height = targetHeight
+        allocatedEnc.pointee.pix_fmt = AV_PIX_FMT_YUV420P
+        allocatedEnc.pointee.time_base = encoderTimeBase
+        allocatedEnc.pointee.framerate = encoderFrameRate
+        allocatedEnc.pointee.bit_rate = 8_000_000
+        allocatedEnc.pointee.gop_size = 60
+        allocatedEnc.pointee.flags2 |= AV_CODEC_FLAG2_LOCAL_HEADER
+        guard avcodec_open2(allocatedEnc, encoder, nil) >= 0 else { return fail() }
 
-        guard let filter = av_bsf_get_by_name("h264_mp4toannexb") else { return nil }
-        var bsf: UnsafeMutablePointer<AVBSFContext>? = nil
+        guard let filter = av_bsf_get_by_name("h264_mp4toannexb") else { return fail() }
         guard av_bsf_alloc(filter, &bsf) >= 0, let bsf,
-              avcodec_parameters_from_context(bsf.pointee.par_in, encCtx) >= 0 else { return nil }
-        bsf.pointee.time_base_in = encCtx.pointee.time_base
-        guard av_bsf_init(bsf) >= 0 else {
-            var failedBsf: UnsafeMutablePointer<AVBSFContext>? = bsf
-            av_bsf_free(&failedBsf)
-            return nil
-        }
+              avcodec_parameters_from_context(bsf.pointee.par_in, allocatedEnc) >= 0 else { return fail() }
+        bsf.pointee.time_base_in = allocatedEnc.pointee.time_base
+        guard av_bsf_init(bsf) >= 0 else { return fail() }
         avcodec_parameters_copy(outputStream.pointee.codecpar, bsf.pointee.par_out)
         outputStream.pointee.time_base = bsf.pointee.time_base_out
 
@@ -681,7 +710,7 @@ final class RigelHlsExporter {
             outputIndex: outputStream.pointee.index,
             inTimeBase: inputStream.pointee.time_base,
             decCtx: decCtx,
-            encCtx: encCtx,
+            encCtx: allocatedEnc,
             bsf: bsf
         )
     }
@@ -747,7 +776,9 @@ final class RigelHlsExporter {
             return
         }
 
-        guard let activeSws = sws_getCachedContext(
+        // sws_getCachedContext frees the previous context even when it fails
+        // to build the replacement, so clear the cache before guarding.
+        let cachedSws = sws_getCachedContext(
             chain.scalerBox.pointee,
             src.pointee.width,
             src.pointee.height,
@@ -757,12 +788,13 @@ final class RigelHlsExporter {
             AV_PIX_FMT_YUV420P,
             SWS_BILINEAR,
             nil, nil, nil
-        ) else {
+        )
+        chain.scalerBox.pointee = cachedSws
+        guard let activeSws = cachedSws else {
             NSLog("[RigelHls] video scaler setup failed")
             av_frame_unref(dst)
             return
         }
-        chain.scalerBox.pointee = activeSws
 
         var srcPlanes: [UnsafePointer<UInt8>?] = [
             UnsafePointer(src.pointee.data.0), UnsafePointer(src.pointee.data.1),

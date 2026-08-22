@@ -161,6 +161,36 @@ class JellyfinClientTest {
     }
 
     @Test
+    fun browseHonorsExplicitIsFolderFalse() = kotlinx.coroutines.test.runTest {
+        val json = """{"Items":[
+            {"Id":"season-1","Name":"Season 1","Type":"Season","IsFolder":false}
+        ]}"""
+        val engine = MockEngine {
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        assertEquals(listOf(JellyfinItem("season-1", "Season 1", isFolder = false)), items)
+    }
+
+    @Test
+    fun browsePropagatesMalformedNumber() = kotlinx.coroutines.test.runTest {
+        for (payload in listOf(
+            """{"Items":[{"Id":-,"Name":"x","Type":"Movie"}]}""",
+            """{"Items":[{"Id":1+2,"Name":"x","Type":"Movie"}]}""",
+            """{"Items":[{"Id":1e,"Name":"x","Type":"Movie"}]}""",
+            """{"Items":[{"Id":1.,"Name":"x","Type":"Movie"}]}""",
+            """{"Items":[{"Id":01,"Name":"x","Type":"Movie"}]}""",
+        )) {
+            val engine = MockEngine {
+                respond(payload, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+            }
+            assertFailsWith<IllegalStateException>("payload should fail: $payload") {
+                JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+            }
+        }
+    }
+
+    @Test
     fun browsePropagatesCancellation() = kotlinx.coroutines.test.runTest {
         val engine = MockEngine { throw CancellationException("cancelled") }
         assertFailsWith<CancellationException> {

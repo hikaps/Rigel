@@ -380,6 +380,7 @@ struct SourcesView: View {
                 self.busy = false
                 self.loadedOnce = true
                 if let error {
+                    guard !isCancellation(error) else { return }
                     self.items = []
                     self.libraryError = self.errorMessage(error)
                     return
@@ -432,6 +433,7 @@ struct SourcesView: View {
                       self.searchGeneration == requestGeneration else { return }
                 self.searchBusy = false
                 if let error {
+                    guard !isCancellation(error) else { return }
                     self.searchResults = []
                     self.searchError = self.errorMessage(error)
                     return
@@ -453,6 +455,14 @@ struct SourcesView: View {
         searchPerformed = false
         searchError = nil
         loadLibrary(at: item.id)
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        let ns = error as NSError
+        return ns.domain.contains("CancellationException") ||
+            (ns.domain == "kotlinx.cancellation" ) ||
+            (ns.userInfo["KotlinException"] as? Error).map { isCancellation($0) } == true
     }
 
     private func errorMessage(_ error: Error) -> String {

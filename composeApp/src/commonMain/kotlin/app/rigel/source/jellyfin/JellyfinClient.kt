@@ -164,8 +164,8 @@ class JellyfinClient(private val http: HttpClient) {
             val id = fields["Id"] ?: return@JsonObjectReader
             val name = fields["Name"] ?: return@JsonObjectReader
             val type = fields["Type"] ?: return@JsonObjectReader
-            val isFolder = fields["IsFolder"]?.equals("true", ignoreCase = true) == true ||
-                type in folderItemTypes
+            val isFolder = fields["IsFolder"]?.equals("true", ignoreCase = true)
+                ?: (type in folderItemTypes)
             out += JellyfinItem(id, name, isFolder)
         }.parseItems()
         return out
@@ -373,7 +373,36 @@ private class JsonObjectReader(
 
     private fun parseNumber(): String {
         val start = index
-        while (index < source.length && source[index] in "-+0123456789.eE") index++
+        if (index < source.length && source[index] == '-') index++
+        // Integer part: single 0 or non-zero lead.
+        if (index < source.length && source[index] == '0') {
+            index++
+        } else {
+            val digitsStart = index
+            while (index < source.length && source[index] in '0'..'9') index++
+            if (index == digitsStart) error("Invalid JSON number at $start")
+        }
+        if (index < source.length && source[index] !in ",}] \n\r\t" &&
+            source[index] != '.' && source[index] != 'e' && source[index] != 'E'
+        ) {
+            error("Invalid JSON number at $start")
+        }
+        if (index < source.length && source[index] == '.') {
+            index++
+            val fracStart = index
+            while (index < source.length && source[index] in '0'..'9') index++
+            if (index == fracStart) error("Invalid JSON number at $start")
+        }
+        if (index < source.length && (source[index] == 'e' || source[index] == 'E')) {
+            index++
+            if (index < source.length && (source[index] == '+' || source[index] == '-')) index++
+            val expStart = index
+            while (index < source.length && source[index] in '0'..'9') index++
+            if (index == expStart) error("Invalid JSON number at $start")
+        }
+        if (index < source.length && source[index] !in ",}] \n\r\t") {
+            error("Invalid JSON number at $start")
+        }
         return source.substring(start, index)
     }
 
