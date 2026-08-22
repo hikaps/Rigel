@@ -671,6 +671,8 @@ final class RigelHlsExporter {
         var error: String?
         var hasVideoPTS = false
         var lastVideoPTS: Int64 = 0
+        var lastRawVideoPTS: Int64?
+        var videoPTSOffset: Int64 = 0
 
         init(
             inputIndex: Int32,
@@ -878,16 +880,19 @@ final class RigelHlsExporter {
         return chain.initialized ? .initialized : .fatal
     }
     /// PTS (90 kHz) of the oldest retained audio packet in the priming tail
-    /// ring, used to rebase the shared timeline after eviction. Nil when the
-    /// ring is empty or the packet carries no timestamp.
+    /// ring, used to rebase the shared timeline after eviction. DTS is the
+    /// fallback when PTS is unset — skipping the rebase on a missing PTS would
+    /// mix synthesized zero-based audio with later absolute timestamps. Nil
+    /// only when both are unset.
     static func audioRingHeadPTS90k(
         _ packets: [UnsafeMutablePointer<AVPacket>],
         timeBase: AVRational
     ) -> Int64? {
         guard timeBase.num != 0, timeBase.den != 0,
-              let first = packets.first,
-              first.pointee.pts != Int64.min else { return nil }
-        return av_rescale_q(first.pointee.pts, timeBase, AVRational(num: 1, den: 90_000))
+              let first = packets.first else { return nil }
+        let head = first.pointee.pts != Int64.min ? first.pointee.pts : first.pointee.dts
+        guard head != Int64.min else { return nil }
+        return av_rescale_q(head, timeBase, AVRational(num: 1, den: 90_000))
     }
     enum PrimingReadResult {
         case ok
@@ -933,23 +938,37 @@ final class RigelHlsExporter {
         return av_rescale_q(max(0, commonPTS - origin90k), commonTimeBase, output)
     }
 
+    /// Repairs a video timestamp while tracking the prior *raw* source value
+    /// and a persistent offset. After an anomaly the offset carries forward,
+    /// so a following genuine-but-close candidate is shifted with the repaired
+    /// timeline instead of collapsing onto it: for 30fps (3000 ticks),
+    /// candidates [0, 0, 3100] become [0, 3000, 6100], never [0, 3000, 3100].
     static func repairVideoPTS(
         candidate: Int64?,
-        previous: Int64?,
+        previousRepaired: Int64?,
+        previousRaw: Int64?,
+        previousOffset: Int64,
         frameDuration: Int64
-    ) -> Int64 {
-        guard let previous else { return max(candidate ?? 0, 0) }
-        guard let candidate else { return previous + frameDuration }
-        if candidate > previous {
-            // Valid forward timestamp: keep its real cadence even when the
-            // delta is smaller than the synthetic frame duration (120fps).
-            return candidate
+    ) -> (repaired: Int64, offset: Int64, lastRaw: Int64?) {
+        guard let previousRepaired else {
+            let repaired = max(candidate ?? 0, 0)
+            if let raw = candidate {
+                return (repaired, repaired - raw, raw)
+            }
+            return (repaired, previousOffset, nil)
         }
-        // Equal or regressed timestamp: re-space at one full frame duration.
-        // Duplicate PTS would otherwise reach H.264/MPEG-TS unchanged and be
-        // rejected or collapsed; a run of regressions must not compress the
-        // timeline toward zero elapsed time.
-        return previous + frameDuration
+        if let raw = candidate, let priorRaw = previousRaw, raw > priorRaw {
+            // Genuine forward timestamp (including VFR/high-FPS deltas):
+            // apply the carried repair offset, cadence stays source-true.
+            return (raw + previousOffset, previousOffset, raw)
+        }
+        // Missing, duplicate, or regressed timestamp: re-space at one full
+        // frame duration and re-anchor the offset onto this raw value.
+        let repaired = previousRepaired + frameDuration
+        if let raw = candidate {
+            return (repaired, repaired - raw, raw)
+        }
+        return (repaired, previousOffset, previousRaw)
     }
 
     private static func sourceFrameRate(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
@@ -980,14 +999,18 @@ final class RigelHlsExporter {
                 origin90k: chain.timestampOrigin90k
             )
         }
-        let pts = repairVideoPTS(
+        let repair = repairVideoPTS(
             candidate: candidate,
-            previous: chain.hasVideoPTS ? chain.lastVideoPTS : nil,
+            previousRepaired: chain.hasVideoPTS ? chain.lastVideoPTS : nil,
+            previousRaw: chain.lastRawVideoPTS,
+            previousOffset: chain.videoPTSOffset,
             frameDuration: chain.frameDurationPTS
         )
-        chain.lastVideoPTS = pts
+        chain.lastVideoPTS = repair.repaired
+        chain.lastRawVideoPTS = repair.lastRaw
+        chain.videoPTSOffset = repair.offset
         chain.hasVideoPTS = true
-        return pts
+        return repair.repaired
     }
 
     private static func writeTranscodedVideo(

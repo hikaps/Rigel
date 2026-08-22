@@ -65,17 +65,42 @@ final class ProbeTest: XCTestCase {
     }
 
     func testHighFrameRateTimestampRepairPreservesCadence() {
-        // 120fps at 90kHz advances 750 ticks. Valid source timestamps keep
-        // their real cadence regardless of the GOP-capped 60fps sizing.
-        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 0, previous: nil, frameDuration: 750), 0)
-        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 750, previous: 0, frameDuration: 1_500), 750)
-        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 1_500, previous: 750, frameDuration: 1_500), 1_500)
-        // Duplicate and regressed timestamps re-space at full duration.
-        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 1_500, previous: 1_500, frameDuration: 750), 2_250)
-        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 700, previous: 1_500, frameDuration: 1_500), 3_000)
-        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 710, previous: 3_000, frameDuration: 1_500), 4_500)
-        // Missing timestamps synthesize the same duration.
-        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: nil, previous: 1_500, frameDuration: 750), 2_250)
+        func step(_ candidate: Int64?, _ prev: Int64?, _ prevRaw: Int64?, _ offset: Int64, _ fd: Int64)
+            -> (repaired: Int64, offset: Int64, lastRaw: Int64?) {
+            RigelHlsExporter.repairVideoPTS(
+                candidate: candidate,
+                previousRepaired: prev,
+                previousRaw: prevRaw,
+                previousOffset: offset,
+                frameDuration: fd
+            )
+        }
+        // 120fps valid cadence (750 ticks) is preserved unchanged.
+        var r = step(0, nil, nil, 0, 750)
+        XCTAssertEqual(r.repaired, 0)
+        r = step(750, 0, 0, 0, 1_500)
+        XCTAssertEqual(r.repaired, 750)
+        XCTAssertEqual(r.offset, 0)
+        // Reviewer's case: 30fps [0, 0, 3100] must become [0, 3000, 6100] —
+        // the repair offset carries forward to the next genuine candidate.
+        r = step(0, nil, nil, 0, 3_000)
+        XCTAssertEqual(r.repaired, 0)
+        r = step(0, 0, 0, 0, 3_000)
+        XCTAssertEqual(r.repaired, 3_000)
+        XCTAssertEqual(r.offset, 3_000)
+        XCTAssertEqual(r.lastRaw, 0)
+        r = step(3_100, 3_000, 0, 3_000, 3_000)
+        XCTAssertEqual(r.repaired, 6_100)
+        XCTAssertEqual(r.offset, 3_000)
+        // Duplicate timestamps re-space at full duration and re-anchor.
+        r = step(6_100, 6_100, 6_100, 3_000, 750)
+        XCTAssertEqual(r.repaired, 6_850)
+        XCTAssertEqual(r.offset, 750)
+        // Missing timestamps synthesize one frame duration.
+        r = step(nil, 1_500, 1_000, 500, 750)
+        XCTAssertEqual(r.repaired, 2_250)
+        XCTAssertEqual(r.offset, 500)
+        XCTAssertEqual(r.lastRaw, 1_000)
     }
 
     func testAudioRingHeadPTS() {
@@ -95,9 +120,14 @@ final class ProbeTest: XCTestCase {
         // Millisecond time base rescales into 90 kHz.
         packets[0].pointee.pts = 50
         XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: AVRational(num: 1, den: 1_000)), 4_500)
-        // Empty ring and missing timestamps yield nil.
+        // Empty ring yields nil.
         XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k([], timeBase: timeBase), nil)
+        // Missing PTS falls back to DTS so the rebase is not skipped.
         packets[0].pointee.pts = Int64.min
+        packets[0].pointee.dts = 9_000
+        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase), 9_000)
+        // Both unset yields nil.
+        packets[0].pointee.dts = Int64.min
         XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase))
     }
 

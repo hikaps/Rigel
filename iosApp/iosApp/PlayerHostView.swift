@@ -155,6 +155,10 @@ struct PlayerView: UIViewControllerRepresentable {
 
     final class Coordinator {
         var loaded: (url: String, title: String?, sender: String?, longFormVideoAirPlayEligible: Bool)?
+        /// Strongly retains the error origin so the closure's weak capture
+        /// outlives makeUIViewController; otherwise the box deallocates and
+        /// every error forwards unconditionally.
+        var errorOrigin: PlayerErrorOrigin?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -185,27 +189,37 @@ struct PlayerView: UIViewControllerRepresentable {
             ])
             return vc
         }
-        // Bind the error path to the concrete controller created below: a
-        // stale .failed from a dismantled player must stop only itself, never
-        // the bridge's current (possibly newer) controller.
+        // Bind the error path to the concrete controller created below. The
+        // coordinator retains the origin box strongly; the closure forwards
+        // the error only when that controller was still the bridge's current
+        // one, so a stale .failed from a dismantled player is dropped after
+        // disposing only itself.
         let origin = PlayerErrorOrigin()
         let events = PlayerEventsImpl(
             onReady: onReady,
             onError: { [weak origin] message in
-                if let origin, let controller = origin.controller,
-                   let currentBridge = PlayerBridgeFactory.shared.create() as? RigelPlayerBridge {
-                    currentBridge.stop(viewController: controller)
+                guard let origin, let controller = origin.controller else {
+                    onError(message)
+                    return
                 }
-                onError(message)
+                guard let currentBridge = PlayerBridgeFactory.shared.create() as? RigelPlayerBridge else {
+                    onError(message)
+                    return
+                }
+                let wasCurrent = currentBridge.stop(viewController: controller)
+                if wasCurrent {
+                    onError(message)
+                }
             },
             onBack: onBack
         )
         let created = bridge.createPlayerViewController(events: events)
         origin.controller = created as? RigelPlayerViewController
+        context.coordinator.errorOrigin = origin
         return created
     }
 
-    private final class PlayerErrorOrigin {
+    final class PlayerErrorOrigin {
         weak var controller: RigelPlayerViewController?
     }
 
