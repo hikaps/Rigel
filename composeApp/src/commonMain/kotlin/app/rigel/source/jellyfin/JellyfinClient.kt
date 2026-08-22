@@ -195,6 +195,19 @@ class JellyfinClient(private val http: HttpClient) {
 
 class JellyfinRequestException(message: String) : Exception(message)
 
+/**
+ * Swift-facing classifier for Kotlin throwables that Kotlin/Native carries
+ * inside NSError.userInfo["KotlinException"]. The exported KotlinThrowable
+ * does not conform to Swift Error, so Swift must ask Kotlin directly.
+ */
+object JellyfinInterop {
+    fun isCancellation(throwable: Throwable): Boolean =
+        throwable is CancellationException
+
+    /** Swift test support: a cancellation throwable with the exported type. */
+    fun makeCancellationThrowable(): Throwable = CancellationException("cancelled")
+}
+
 
 /**
  * Small dependency-free JSON walker. It exposes scalar fields for every object

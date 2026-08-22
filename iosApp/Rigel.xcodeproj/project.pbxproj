@@ -34,6 +34,7 @@
 		E0784072F4F3A2C9B610467F /* Probe.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8CE17963A2289F4B9263B94 /* Probe.swift */; };
 		F9254DF13AA8D1E8B8F12B26 /* Ssdp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0A77D73BD53FB477190213 /* Ssdp.swift */; };
 		FEFAD4FE14DF390979D2DED1 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 523A8D7C5525838C63DC0274 /* ShareViewController.swift */; };
+		1B2C3D4E5F60718293A4B5C6 /* JellyfinCancellationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1C2D3E4F5A6B7C8D9E0F11 /* JellyfinCancellationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -100,6 +101,7 @@
 		F7068FB32C0275BE2242AD70 /* HlsExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HlsExporter.swift; sourceTree = "<group>"; };
 		FD75F9EC70ED2AC5CF7CE1EC /* RigelShare.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = RigelShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		FF3357516386402A9A76D43E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		7A1C2D3E4F5A6B7C8D9E0F11 /* JellyfinCancellationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinCancellationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -182,6 +184,7 @@
 				A620F48242D327688F867016 /* HttpServerTest.swift */,
 				891915EB9EED8B4E11F8BE84 /* PlayerModelTests.swift */,
 				91F18B7AB127264E9DFA96DE /* ProbeTest.swift */,
+				7A1C2D3E4F5A6B7C8D9E0F11 /* JellyfinCancellationTests.swift */,
 				0AE0321510248BF0799D87C8 /* SsdpTest.swift */,
 				60134AB62DD9047F823407A2 /* Fixtures */,
 			);
@@ -375,6 +378,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1B2C3D4E5F60718293A4B5C6 /* JellyfinCancellationTests.swift in Sources */,
 				E01707E07427611A2F42A0EF /* HttpServerTest.swift in Sources */,
 				23CDE6D097E80AA6F91AD064 /* PlayerModelTests.swift in Sources */,
 				225140C160FEDE45435E883B /* ProbeTest.swift in Sources */,
