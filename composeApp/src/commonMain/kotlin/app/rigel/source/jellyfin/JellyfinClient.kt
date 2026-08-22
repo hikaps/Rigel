@@ -166,7 +166,7 @@ class JellyfinClient(private val http: HttpClient) {
             val isFolder = fields["IsFolder"]?.equals("true", ignoreCase = true) == true ||
                 type in folderItemTypes
             out += JellyfinItem(id, name, isFolder)
-        }.parse()
+        }.parseItems()
         return out
     }
 
@@ -206,23 +206,78 @@ private class JsonObjectReader(
 ) {
     private var index = 0
 
-    fun parse() {
-        parseValue()
+    fun parseItems() {
+        skipWhitespace()
+        when {
+            takeIf('[') -> {
+                index--
+                parseItemArray()
+            }
+            takeIf('{') -> {
+                index--
+                parseItemsEnvelope()
+            }
+            else -> error("Expected Jellyfin item array or envelope")
+        }
         skipWhitespace()
         if (index != source.length) error("Trailing JSON content")
     }
 
-    private fun parseValue(): String? {
+    private fun parseItemsEnvelope() {
+        expect('{')
+        skipWhitespace()
+        if (takeIf('}')) return
+        while (true) {
+            skipWhitespace()
+            val key = parseString()
+            skipWhitespace()
+            expect(':')
+            skipWhitespace()
+            if (key == "Items" && index < source.length && source[index] == '[') {
+                parseItemArray()
+            } else {
+                parseValue(emitObjects = false)
+            }
+            skipWhitespace()
+            when {
+                takeIf('}') -> return
+                takeIf(',') -> Unit
+                else -> error("Expected object separator at $index")
+            }
+        }
+    }
+
+    private fun parseItemArray() {
+        expect('[')
+        skipWhitespace()
+        if (takeIf(']')) return
+        while (true) {
+            skipWhitespace()
+            if (index < source.length && source[index] == '{') {
+                onObject(parseObject(emitObject = false))
+            } else {
+                parseValue(emitObjects = false)
+            }
+            skipWhitespace()
+            when {
+                takeIf(']') -> return
+                takeIf(',') -> Unit
+                else -> error("Expected array separator at $index")
+            }
+        }
+    }
+
+    private fun parseValue(emitObjects: Boolean): String? {
         skipWhitespace()
         if (index >= source.length) error("Missing JSON value")
         return when (source[index]) {
             '"' -> parseString()
             '{' -> {
-                parseObject()
+                parseObject(emitObjects)
                 null
             }
             '[' -> {
-                parseArray()
+                parseArray(emitObjects)
                 null
             }
             't' -> {
@@ -242,25 +297,25 @@ private class JsonObjectReader(
         }
     }
 
-    private fun parseObject() {
+    private fun parseObject(emitObject: Boolean): Map<String, String> {
         expect('{')
         val fields = mutableMapOf<String, String>()
         skipWhitespace()
         if (takeIf('}')) {
-            onObject(fields)
-            return
+            if (emitObject) onObject(fields)
+            return fields
         }
         while (true) {
             skipWhitespace()
             val key = parseString()
             skipWhitespace()
             expect(':')
-            parseValue()?.let { fields[key] = it }
+            parseValue(emitObjects = false)?.let { fields[key] = it }
             skipWhitespace()
             when {
                 takeIf('}') -> {
-                    onObject(fields)
-                    return
+                    if (emitObject) onObject(fields)
+                    return fields
                 }
                 takeIf(',') -> Unit
                 else -> error("Expected object separator at $index")
@@ -268,12 +323,12 @@ private class JsonObjectReader(
         }
     }
 
-    private fun parseArray() {
+    private fun parseArray(emitObjects: Boolean) {
         expect('[')
         skipWhitespace()
         if (takeIf(']')) return
         while (true) {
-            parseValue()
+            parseValue(emitObjects)
             skipWhitespace()
             when {
                 takeIf(']') -> return

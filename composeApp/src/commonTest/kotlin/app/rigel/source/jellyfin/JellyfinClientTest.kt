@@ -67,7 +67,8 @@ class JellyfinClientTest {
     fun browseParsesWrappedItemsWithNestedDataAndEscapedName() = kotlinx.coroutines.test.runTest {
         val json = """{"Items":[
             {"Id":"folder-1","Name":"Movies","Type":"CollectionFolder","IsFolder":true,
-             "UserData":{"Played":false},"MediaSources":[{"Name":"nested","Type":"Default"}]},
+             "UserData":{"Played":false},
+             "MediaSources":[{"Id":"source-1","Name":"nested source","Type":"Default"}]},
             {"Id":"movie-1","Name":"A \"quoted\" movie","Type":"Movie","IsFolder":false}
         ],"TotalRecordCount":2}"""
         val engine = MockEngine {

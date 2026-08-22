@@ -6,15 +6,20 @@ import Foundation
 /// Audio is copied when compatible with the selected mode, otherwise converted
 /// to AAC.
 final class RigelHlsExporter {
-    struct Session {
+    final class Session {
         let queue: DispatchQueue
-        var cancel: Bool = false
+        var cancel = false
+        var finished = false
+        var readinessClaimed = false
+        var readinessDelivered = false
+
+        init(queue: DispatchQueue) {
+            self.queue = queue
+        }
     }
 
     private static var sessions: [String: Session] = [:]
     private static let lock = NSLock()
-
-    private static let passthroughAudio = Set(["aac", "mp3", "flac", "alac"])
 
     static func sessionDir(sessionId: String) -> URL {
         RigelHttpServer.proxyRootURL().appendingPathComponent(sessionId, isDirectory: true)
@@ -28,9 +33,17 @@ final class RigelHlsExporter {
         onReady: @escaping (String?, String?) -> Void
     ) {
         let queue = DispatchQueue(label: "rigel-hls-\(sessionId)")
-        lock.lock(); sessions[sessionId] = Session(queue: queue); lock.unlock()
+        let session = Session(queue: queue)
+        lock.lock(); sessions[sessionId] = session; lock.unlock()
         queue.async {
-            run(sessionId: sessionId, sourceUrl: sourceUrl, headers: headers, mode: mode, onReady: onReady)
+            run(
+                session: session,
+                sessionId: sessionId,
+                sourceUrl: sourceUrl,
+                headers: headers,
+                mode: mode,
+                onReady: onReady
+            )
         }
     }
 
@@ -38,12 +51,57 @@ final class RigelHlsExporter {
         lock.lock(); sessions[sessionId]?.cancel = true; lock.unlock()
     }
 
-    private static func isCancelled(_ sessionId: String) -> Bool {
+    private static func isCancelled(_ session: Session) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return sessions[sessionId]?.cancel ?? true
+        return session.cancel
+    }
+
+    private static func finishSession(_ session: Session, sessionId: String) -> Bool {
+        lock.lock()
+        session.finished = true
+        let cancelled = session.cancel
+        if sessions[sessionId] === session &&
+            (cancelled || !session.readinessClaimed || session.readinessDelivered) {
+            sessions.removeValue(forKey: sessionId)
+        }
+        lock.unlock()
+        return cancelled
+    }
+
+    @discardableResult
+    private static func publishReady(
+        session: Session,
+        sessionId: String,
+        path: String,
+        onReady: @escaping (String?, String?) -> Void
+    ) -> Bool {
+        lock.lock()
+        guard !session.cancel, !session.readinessClaimed else {
+            lock.unlock()
+            return false
+        }
+        session.readinessClaimed = true
+        lock.unlock()
+
+        DispatchQueue.main.async {
+            lock.lock()
+            let deliver = !session.cancel
+            if deliver {
+                session.readinessDelivered = true
+            }
+            if session.finished && sessions[sessionId] === session {
+                sessions.removeValue(forKey: sessionId)
+            }
+            lock.unlock()
+            if deliver {
+                onReady(path, nil)
+            }
+        }
+        return true
     }
 
     private static func run(
+        session: Session,
         sessionId: String,
         sourceUrl: String,
         headers: [String: String],
@@ -56,17 +114,24 @@ final class RigelHlsExporter {
 
         var ifmt: UnsafeMutablePointer<AVFormatContext>? = nil
         var ofmt: UnsafeMutablePointer<AVFormatContext>? = nil
-        var audioChain: AudioChain? = nil
-        var videoChain: VideoChain? = nil
+        var audioChains: [Int32: AudioChain] = [:]
+        var videoChains: [Int32: VideoChain] = [:]
         var setupError: String?
         var notified = false
 
         defer {
-            if !notified {
-                DispatchQueue.main.async { onReady(nil, "session ended before playlist was ready") }
+            let wasCancelled = finishSession(session, sessionId: sessionId)
+            if !notified && !wasCancelled {
+                DispatchQueue.main.async {
+                    lock.lock()
+                    let deliver = !session.cancel
+                    lock.unlock()
+                    if deliver {
+                        onReady(nil, "session ended before playlist was ready")
+                    }
+                }
             }
-            cleanup(ifmt: ifmt, ofmt: ofmt, audio: audioChain, video: videoChain)
-            lock.lock(); sessions.removeValue(forKey: sessionId); lock.unlock()
+            cleanup(ifmt: ifmt, ofmt: ofmt, audio: audioChains, video: videoChains)
         }
 
         guard openInput(url: sourceUrl, headers: headers, fmt: &ifmt), let ctx = ifmt else {
@@ -94,8 +159,9 @@ final class RigelHlsExporter {
         for i in 0..<inCount {
             guard let inStream = ctx.pointee.streams[i], let codecpar = inStream.pointee.codecpar else { continue }
             guard let outStream = avformat_new_stream(out, nil) else { continue }
+            let inputIndex = Int32(i)
             let outIndex = outStream.pointee.index
-            streamMap[Int32(i)] = outIndex
+            streamMap[inputIndex] = outIndex
 
             switch codecpar.pointee.codec_type {
             case AVMEDIA_TYPE_VIDEO:
@@ -104,15 +170,16 @@ final class RigelHlsExporter {
                 // output. Keep H.264 as a stream copy and transcode everything
                 // else to 8-bit H.264 in software.
                 if codecpar.pointee.codec_id == AV_CODEC_ID_H264 {
-                    if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
-                        outStream.pointee.codecpar.pointee.codec_tag = 0
-                        outStream.pointee.time_base = inStream.pointee.time_base
+                    guard avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 else {
+                        setupError = "video stream setup failed"
+                        continue
                     }
+                    outStream.pointee.codecpar.pointee.codec_tag = 0
+                    outStream.pointee.time_base = inStream.pointee.time_base
                 } else if let chain = makeVideoChain(inputStream: inStream, outputStream: outStream) {
-                    videoChain = chain
+                    videoChains[inputIndex] = chain
                 } else {
                     setupError = "video transcode setup failed"
-                    break
                 }
             case AVMEDIA_TYPE_AUDIO:
                 // AAC/MP3 are TS-compatible; stream-copy them so we never
@@ -120,12 +187,16 @@ final class RigelHlsExporter {
                 // than its frame size). Everything else decodes to AAC.
                 if let name = codecName(codecpar.pointee.codec_id),
                    (name == "aac" || name == "mp3") {
-                    if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
-                        outStream.pointee.codecpar.pointee.codec_tag = 0
-                        outStream.pointee.time_base = inStream.pointee.time_base
+                    guard avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 else {
+                        setupError = "audio stream setup failed"
+                        continue
                     }
+                    outStream.pointee.codecpar.pointee.codec_tag = 0
+                    outStream.pointee.time_base = inStream.pointee.time_base
+                } else if let chain = makeAudioChain(inputStream: inStream, outputStream: outStream) {
+                    audioChains[inputIndex] = chain
                 } else {
-                    audioChain = makeAudioChain(inputStream: inStream, outputStream: outStream)
+                    setupError = "audio transcode setup failed"
                 }
             default:
                 outStream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_UNKNOWN
@@ -149,7 +220,7 @@ final class RigelHlsExporter {
         var cancelled = false
         var reachedEnd = false
         while true {
-            if isCancelled(sessionId) {
+            if isCancelled(session) {
                 cancelled = true
                 break
             }
@@ -164,13 +235,13 @@ final class RigelHlsExporter {
                let outStream = out.pointee.streams[Int(outIdx)] {
                 switch inStream.pointee.codecpar.pointee.codec_type {
                 case AVMEDIA_TYPE_VIDEO:
-                    if let chain = videoChain, chain.inputIndex == inIdx {
+                    if let chain = videoChains[inIdx] {
                         writeTranscodedVideo(chain: chain, packet: &pkt, out: out, outStream: outStream)
                     } else {
                         writeRemuxPacket(&pkt, inStream: inStream, outStream: outStream, out: out)
                     }
                 case AVMEDIA_TYPE_AUDIO:
-                    if let chain = audioChain, chain.inputIndex == inIdx {
+                    if let chain = audioChains[inIdx] {
                         writeTranscodedAudio(chain: chain, packet: &pkt, out: out, outStream: outStream)
                     } else {
                         writeRemuxPacket(&pkt, inStream: inStream, outStream: outStream, out: out)
@@ -179,26 +250,35 @@ final class RigelHlsExporter {
                     break
                 }
                 if !notified && playlistReady(playlistPath: playlistPath, outDir: outDir, final: false) {
-                    notified = true
-                    DispatchQueue.main.async { onReady("\(sessionId)/index.m3u8", nil) }
+                    notified = publishReady(
+                        session: session,
+                        sessionId: sessionId,
+                        path: "\(sessionId)/index.m3u8",
+                        onReady: onReady
+                    )
                 }
             }
             av_packet_unref(&pkt)
         }
 
         guard reachedEnd, !cancelled else { return }
-        if let chain = audioChain,
-           let outStream = out.pointee.streams[Int(chain.outputIndex)] {
-            flushTranscodedAudio(chain: chain, out: out, outStream: outStream)
+        for chain in audioChains.values {
+            if let outStream = out.pointee.streams[Int(chain.outputIndex)] {
+                flushTranscodedAudio(chain: chain, out: out, outStream: outStream)
+            }
         }
-        if let chain = videoChain,
-           let outStream = out.pointee.streams[Int(chain.outputIndex)] {
-            flushTranscodedVideo(chain: chain, out: out, outStream: outStream)
+        for chain in videoChains.values {
+            if let outStream = out.pointee.streams[Int(chain.outputIndex)] {
+                flushTranscodedVideo(chain: chain, out: out, outStream: outStream)
+            }
         }
-        av_write_trailer(out)
         if !notified && playlistReady(playlistPath: playlistPath, outDir: outDir, final: true) {
-            notified = true
-            DispatchQueue.main.async { onReady("\(sessionId)/index.m3u8", nil) }
+            notified = publishReady(
+                session: session,
+                sessionId: sessionId,
+                path: "\(sessionId)/index.m3u8",
+                onReady: onReady
+            )
         }
 
     }
@@ -352,22 +432,30 @@ final class RigelHlsExporter {
         }
 
         var outBufs: [UnsafeMutablePointer<UInt8>?] = [buf0, buf1]
-        var inData: [UnsafePointer<UInt8>?] = Array(repeating: nil, count: 8)
+        let outSamples: Int
         if let decoded {
             let rawData = decoded.pointee.data
-            inData = [
+            var inData: [UnsafePointer<UInt8>?] = [
                 UnsafePointer(rawData.0), UnsafePointer(rawData.1), UnsafePointer(rawData.2),
                 UnsafePointer(rawData.3), UnsafePointer(rawData.4), UnsafePointer(rawData.5),
                 UnsafePointer(rawData.6), UnsafePointer(rawData.7),
             ]
+            outSamples = Int(swr_convert(
+                chain.swr,
+                &outBufs,
+                Int32(maxOut),
+                &inData,
+                inputSamples
+            ))
+        } else {
+            outSamples = Int(swr_convert(
+                chain.swr,
+                &outBufs,
+                Int32(maxOut),
+                nil,
+                0
+            ))
         }
-        let outSamples = Int(swr_convert(
-            chain.swr,
-            &outBufs,
-            Int32(maxOut),
-            &inData,
-            inputSamples
-        ))
         guard outSamples > 0 else { return 0 }
         var fifoBufs: [UnsafeMutableRawPointer?] = [
             UnsafeMutableRawPointer(buf0), UnsafeMutableRawPointer(buf1),
@@ -543,19 +631,28 @@ final class RigelHlsExporter {
         guard let encoder = avcodec_find_encoder(AV_CODEC_ID_H264),
               let encCtx = avcodec_alloc_context3(encoder) else { return nil }
 
-        // Software H.264 encode via VideoToolbox: HEVC sources decode to
-        // formats (e.g. 10-bit 4:2:0) that direct upload rejects, so frames
-        // are converted to an even 720p-class yuv420p output. Some Apple
-        // HLS paths reject unusual source dimensions such as 1800x1080.
+        // Keep the source clock and cadence. A fixed 1/30 time base collapses
+        // adjacent 60fps timestamps to duplicates.
         let sourceWidth = max(codecpar.pointee.width, 2)
         let sourceHeight = max(codecpar.pointee.height, 2)
         let targetWidth = min(sourceWidth, 1280)
         let targetHeight = max(2, (sourceHeight * targetWidth / sourceWidth) & ~1)
+        let sourceTimeBase = inputStream.pointee.time_base
+        let encoderTimeBase = sourceTimeBase.num > 0 && sourceTimeBase.den > 0
+            ? sourceTimeBase
+            : AVRational(num: 1, den: 90_000)
+        let advertisedRate = inputStream.pointee.avg_frame_rate
+        let fallbackRate = inputStream.pointee.r_frame_rate
+        let encoderFrameRate = advertisedRate.num > 0 && advertisedRate.den > 0
+            ? advertisedRate
+            : (fallbackRate.num > 0 && fallbackRate.den > 0
+                ? fallbackRate
+                : AVRational(num: 30, den: 1))
         encCtx.pointee.width = targetWidth
         encCtx.pointee.height = targetHeight
         encCtx.pointee.pix_fmt = AV_PIX_FMT_YUV420P
-        encCtx.pointee.time_base = AVRational(num: 1, den: 30)
-        encCtx.pointee.framerate = AVRational(num: 30, den: 1)
+        encCtx.pointee.time_base = encoderTimeBase
+        encCtx.pointee.framerate = encoderFrameRate
         encCtx.pointee.bit_rate = 8_000_000
         encCtx.pointee.gop_size = 60
         encCtx.pointee.flags2 |= AV_CODEC_FLAG2_LOCAL_HEADER
@@ -645,27 +742,22 @@ final class RigelHlsExporter {
             return
         }
 
-        if chain.scalerBox.pointee == nil {
-            guard let built = sws_getContext(
-                src.pointee.width,
-                src.pointee.height,
-                srcPixFmt,
-                chain.encCtx.pointee.width,
-                chain.encCtx.pointee.height,
-                AV_PIX_FMT_YUV420P,
-                SWS_BILINEAR,
-                nil, nil, nil
-            ) else {
-                NSLog("[RigelHls] video scaler setup failed")
-                av_frame_unref(dst)
-                return
-            }
-            chain.scalerBox.pointee = built
-        }
-        guard let activeSws = chain.scalerBox.pointee else {
+        guard let activeSws = sws_getCachedContext(
+            chain.scalerBox.pointee,
+            src.pointee.width,
+            src.pointee.height,
+            srcPixFmt,
+            chain.encCtx.pointee.width,
+            chain.encCtx.pointee.height,
+            AV_PIX_FMT_YUV420P,
+            SWS_BILINEAR,
+            nil, nil, nil
+        ) else {
+            NSLog("[RigelHls] video scaler setup failed")
             av_frame_unref(dst)
             return
         }
+        chain.scalerBox.pointee = activeSws
 
         var srcPlanes: [UnsafePointer<UInt8>?] = [
             UnsafePointer(src.pointee.data.0), UnsafePointer(src.pointee.data.1),
@@ -847,23 +939,23 @@ final class RigelHlsExporter {
     private static func cleanup(
         ifmt: UnsafeMutablePointer<AVFormatContext>?,
         ofmt: UnsafeMutablePointer<AVFormatContext>?,
-        audio: AudioChain?,
-        video: VideoChain?
+        audio: [Int32: AudioChain],
+        video: [Int32: VideoChain]
     ) {
         var ifmtPtr: UnsafeMutablePointer<AVFormatContext>? = ifmt
         avformat_close_input(&ifmtPtr)
         if let ofmt { avformat_free_context(ofmt) }
-        if let audio {
-            var dec: UnsafeMutablePointer<AVCodecContext>? = audio.decCtx
+        for chain in audio.values {
+            var dec: UnsafeMutablePointer<AVCodecContext>? = chain.decCtx
             avcodec_free_context(&dec)
-            var enc: UnsafeMutablePointer<AVCodecContext>? = audio.encCtx
+            var enc: UnsafeMutablePointer<AVCodecContext>? = chain.encCtx
             avcodec_free_context(&enc)
-            var swr: OpaquePointer? = audio.swr
+            var swr: OpaquePointer? = chain.swr
             swr_free(&swr)
-            av_audio_fifo_free(audio.fifo)
+            av_audio_fifo_free(chain.fifo)
         }
-        if let video {
-            video.release()
+        for chain in video.values {
+            chain.release()
         }
     }
 
