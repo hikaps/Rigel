@@ -363,11 +363,15 @@ final class RigelHlsExporter {
               let decoder = avcodec_find_decoder(codecpar.pointee.codec_id),
               let decCtx = avcodec_alloc_context3(decoder) else { return nil }
         let sourceTimeBase = inputStream.pointee.time_base
-        let encoderTimeBase = sourceTimeBase.num != 0 && sourceTimeBase.den != 0
+        let packetTimeBase = sourceTimeBase.num != 0 && sourceTimeBase.den != 0
             ? sourceTimeBase
             : AVRational(num: 1, den: 90_000)
+        // Decoder packet timestamps are expressed in pkt_timebase. Keep the
+        // encoder on its own stable MPEG-TS-compatible time base and rescale
+        // decoded frame PTS explicitly before VideoToolbox.
+        let encoderTimeBase = AVRational(num: 1, den: 90_000)
         guard avcodec_parameters_to_context(decCtx, codecpar) >= 0 else { return nil }
-        decCtx.pointee.time_base = encoderTimeBase
+        decCtx.pointee.pkt_timebase = packetTimeBase
         guard avcodec_open2(decCtx, decoder, nil) >= 0 else { return nil }
 
         guard let encoder = avcodec_find_encoder(AV_CODEC_ID_H264),
@@ -426,6 +430,7 @@ final class RigelHlsExporter {
         encCtx.pointee.width = outW
         encCtx.pointee.height = outH
         encCtx.pointee.time_base = encoderTimeBase
+        encCtx.pointee.bit_rate = transcodedBitrate(width: Int(outW), height: Int(outH))
         // AirPlay smoothness over fidelity: realtime-priority VideoToolbox
         // session, bitrate scaled to output size so the encoder never falls
         // behind the renderer's consumption rate.
@@ -436,7 +441,7 @@ final class RigelHlsExporter {
         // than 92 (3.84s — the muxer would wait for the next IDR and emit
         // ~7.7s segments, stalling AirPlay joins).
         let fps = fpsHint(inputStream: inputStream)
-        encCtx.pointee.gop_size = Int32((fps * 4).rounded())
+        encCtx.pointee.gop_size = gopFrameCount(forFPS: fps)
         encCtx.pointee.keyint_min = encCtx.pointee.gop_size
         encCtx.pointee.max_b_frames = 0
         encCtx.pointee.pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX
@@ -455,7 +460,7 @@ final class RigelHlsExporter {
             inputIndex: inputStream.pointee.index,
             decCtx: decCtx,
             encCtx: encCtx,
-            inputTimeBase: encoderTimeBase,
+            inputTimeBase: packetTimeBase,
             hwFramesCtx: framesRef,
             scaler: scaler,
             scaledFrame: scaledFrame
@@ -472,8 +477,21 @@ final class RigelHlsExporter {
         return 10_000_000
     }
 
+    /// Return a complete GOP frame count without truncating fractional FPS
+    /// before multiplication (23.976fps × 4s = 96 frames).
+    static func gopFrameCount(forFPS fps: Double, segmentDuration: Double = 4) -> Int32 {
+        let clamped = fps.isFinite && fps > 0 ? min(max(fps, 15), 60) : 30
+        return Int32((clamped * segmentDuration).rounded())
+    }
+
+    /// Convert decoded frame PTS from decoder packet time base to encoder time
+    /// base, preserving the sentinel used for missing timestamps.
+    static func rescaleVideoPTS(_ pts: Int64, from input: AVRational, to output: AVRational) -> Int64 {
+        guard pts != Int64.min else { return pts }
+        return av_rescale_q(pts, input, output)
+    }
+
     /// Source fps from the stream's avg_frame_rate, clamped to [15, 60].
-    /// Kept as Double so callers can round fps * segmentSeconds once.
     private static func fpsHint(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
         let rate = inputStream.pointee.avg_frame_rate
         if rate.den > 0 {
@@ -505,15 +523,11 @@ final class RigelHlsExporter {
             guard let hw = hwFrame,
                   av_hwframe_get_buffer(chain.hwFramesCtx, hw, 0) >= 0,
                   av_hwframe_transfer_data(hw, uploadFrame, 0) >= 0 else { continue }
-            if decoded.pointee.pts == Int64.min {
-                hw.pointee.pts = Int64.min
-            } else {
-                hw.pointee.pts = av_rescale_q(
-                    decoded.pointee.pts,
-                    chain.inputTimeBase,
-                    chain.encCtx.pointee.time_base
-                )
-            }
+            hw.pointee.pts = RigelHlsExporter.rescaleVideoPTS(
+                decoded.pointee.pts,
+                from: chain.inputTimeBase,
+                to: chain.encCtx.pointee.time_base
+            )
             if avcodec_send_frame(chain.encCtx, hw) >= 0 {
                 drainEncodedVideo(chain: chain, out: out, outStream: outStream)
             }

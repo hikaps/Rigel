@@ -32,7 +32,7 @@ class PlayerControllerTest {
     private val dispatcher = StandardTestDispatcher()
 
     private var probeResult: ProbeResult? =
-        ProbeResult("mp4", "h264", listOf("aac"), emptyList(), 60_000, isLive = false)
+        ProbeResult("mp4", "h264", listOf("aac"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
     private var probeError: String? = null
     private var hlsPath: String? = "hls/s1/out.m3u8"
     private var hlsError: String? = null
@@ -233,7 +233,7 @@ class PlayerControllerTest {
     }
 
     @Test
-    fun directFailureAutoFallsBackToRemuxOnce() = runTest(dispatcher.scheduler) {
+    fun directFailureAutoFallsBackToTranscodeOnce() = runTest(dispatcher.scheduler) {
         val c = controller()
         c.loadRequest(request)
         advanceUntilIdle()
@@ -243,9 +243,9 @@ class PlayerControllerTest {
         advanceUntilIdle()
         val state = c.uiState.value
         assertEquals(PlayerPhase.PLAYING, state.phase)
-        assertEquals(PlaybackRoute.REMUX, state.route)
+        assertEquals(PlaybackRoute.TRANSCODE, state.route)
         assertEquals("http://127.0.0.1:8090/hls/s1/out.m3u8", state.proxyUrl)
-        assertEquals(listOf("remux"), hlsModes)
+        assertEquals(listOf("transcode"), hlsModes)
     }
 
     @Test
@@ -269,7 +269,7 @@ class PlayerControllerTest {
         advanceUntilIdle()
         c.reportError("first media failure")
         advanceUntilIdle()
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
 
         c.stopPlayback()
         c.loadRequest(request)
@@ -279,7 +279,7 @@ class PlayerControllerTest {
         c.reportError("fresh failure")
         advanceUntilIdle()
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
     }
 
     @Test
@@ -401,7 +401,7 @@ class PlayerControllerTest {
         pendingReady?.invoke(hlsPath, hlsError)
         advanceUntilIdle()
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
         assertNotNull(c.uiState.value.proxyUrl)
         pendingReady = null
     }

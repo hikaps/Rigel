@@ -43,4 +43,24 @@ final class ProbeTest: XCTestCase {
         XCTAssertEqual(RigelProbe.normalizePixelFormat("yuv422p10le"), "yuv422p")
         XCTAssertEqual(RigelProbe.normalizePixelFormat("yuv444p10le"), "yuv444p")
     }
+
+    func testFractionalFrameTiming() {
+        XCTAssertEqual(RigelHlsExporter.gopFrameCount(forFPS: 24_000.0 / 1_001.0), 96)
+        XCTAssertEqual(RigelHlsExporter.gopFrameCount(forFPS: 30_000.0 / 1_001.0), 120)
+        XCTAssertEqual(RigelHlsExporter.gopFrameCount(forFPS: 60_000.0 / 1_001.0), 240)
+
+        let encoderTimeBase = AVRational(num: 1, den: 90_000)
+        XCTAssertEqual(
+            RigelHlsExporter.rescaleVideoPTS(
+                1,
+                from: AVRational(num: 1_001, den: 24_000),
+                to: encoderTimeBase
+            ),
+            3_754
+        )
+        XCTAssertEqual(
+            RigelHlsExporter.rescaleVideoPTS(Int64.min, from: AVRational(num: 1, den: 1_000), to: encoderTimeBase),
+            Int64.min
+        )
+    }
 }

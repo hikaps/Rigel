@@ -43,6 +43,22 @@ final class RigelProbe {
             var videoWidth: Int32 = 0
             var videoHeight: Int32 = 0
             let streamCount = Int(ctx.pointee.nb_streams)
+            var selectedVideoIndex: Int?
+            var selectedVideoIsDefault = false
+            if streamCount > 0 {
+                for i in 0..<streamCount {
+                    guard let stream = ctx.pointee.streams[i],
+                          let codecpar = stream.pointee.codecpar,
+                          codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO else { continue }
+                    let isAttachedPicture = (stream.pointee.disposition & AV_DISPOSITION_ATTACHED_PIC) != 0
+                    guard !isAttachedPicture else { continue }
+                    let isDefault = (stream.pointee.disposition & AV_DISPOSITION_DEFAULT) != 0
+                    if selectedVideoIndex == nil || (isDefault && !selectedVideoIsDefault) {
+                        selectedVideoIndex = i
+                        selectedVideoIsDefault = isDefault
+                    }
+                }
+            }
             if streamCount > 0 {
                 for i in 0..<streamCount {
                     guard let stream = ctx.pointee.streams[i] else { continue }
@@ -50,18 +66,16 @@ final class RigelProbe {
                     let codecName = codecNameString(codecpar.pointee.codec_id)
                     switch codecpar.pointee.codec_type {
                     case AVMEDIA_TYPE_VIDEO:
-                        if videoCodec == nil {
-                            videoCodec = codecName
-                            let pf = AVPixelFormat(rawValue: codecpar.pointee.format)
-                            if let name = av_get_pix_fmt_name(pf) {
-                                videoPixFmt = String(cString: name)
-                            }
-                            videoWidth = codecpar.pointee.width
-                            videoHeight = codecpar.pointee.height
+                        guard i == selectedVideoIndex else { continue }
+                        videoCodec = codecName
+                        let pf = AVPixelFormat(rawValue: codecpar.pointee.format)
+                        if let name = av_get_pix_fmt_name(pf) {
+                            videoPixFmt = String(cString: name)
                         }
+                        videoWidth = codecpar.pointee.width
+                        videoHeight = codecpar.pointee.height
                     case AVMEDIA_TYPE_AUDIO:
                         audioCodecs.append(codecName)
-                        break
                     case AVMEDIA_TYPE_SUBTITLE:
                         subtitleCodecs.append(codecName)
                     default:

@@ -31,6 +31,20 @@ class FormatRouterTest {
     fun hlsContainerDirectEvenWhenNotLive() {
         assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("m3u8", "h264", listOf("aac")), false))
     }
+    @Test
+    fun liveH264UnknownPixFmtTranscodes() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mpegts", "h264", listOf("aac"), isLive = true, pixFmt = null), false))
+    }
+
+    @Test
+    fun hlsH264Hi10pTranscodes() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("m3u8", "h264", listOf("aac"), pixFmt = "yuv420p10le"), false))
+    }
+
+    @Test
+    fun hlsHevcMain10StaysDirect() {
+        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("m3u8", "hevc", listOf("aac"), pixFmt = "yuv420p10le"), false))
+    }
 
     @Test
     fun mp4H264AacDirect() {
@@ -126,8 +140,8 @@ class FormatRouterTest {
     }
 
     @Test
-    fun unknownPixFmtStaysDirect() {
-        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mp4", "h264", listOf("aac"), pixFmt = null), false))
+    fun unknownPixFmtTranscodes() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "h264", listOf("aac"), pixFmt = null), false))
     }
 
     @Test

@@ -20,22 +20,20 @@ object FormatRouter {
 
     fun decide(probe: ProbeResult, hasExternalAssSubs: Boolean): PlaybackRoute {
         if (hasExternalAssSubs) return PlaybackRoute.TRANSCODE
-        if (probe.isLive) return PlaybackRoute.DIRECT
         val container = probe.container.lowercase()
-        if (container in hlsContainers) return PlaybackRoute.DIRECT
         val video = probe.videoCodec?.lowercase()
         val audio = probe.audioCodecs.map { it.lowercase() }.toSet()
 
-        // Hi10P/12-bit H.264 and 4:2:2/4:4:4 sources break AVPlayer's decoder
-        // regardless of container or audio. Remuxing cannot fix them (the
-        // bitstream is copied verbatim), so they must fully transcode — the
-        // proxy's scaler normalizes them to 8-bit NV12 for VideoToolbox.
-        // Exception: HEVC Main10 (10-bit 4:2:0) hardware-decodes on every
-        // device that runs this app, so it stays on the direct path.
+        // Apply the video safety gate before live/HLS early returns. A live or
+        // HLS container does not make an unsupported H.264/HEVC pixel format
+        // decodable by AVPlayer. HEVC Main10 is the only 10-bit exception.
         val hevcMain10 = video == "hevc" && probe.pixFmt?.lowercase() == "yuv420p10le"
         if (video in directVideo && !hevcMain10 && !directPlayablePixelFormat(probe.pixFmt)) {
             return PlaybackRoute.TRANSCODE
         }
+
+        if (probe.isLive) return PlaybackRoute.DIRECT
+        if (container in hlsContainers) return PlaybackRoute.DIRECT
 
         if (container in directContainers && video in directVideo &&
             audio.all { it in directAudio }
@@ -49,13 +47,11 @@ object FormatRouter {
     }
 
     /**
-     * AVPlayer hardware decode supports 8-bit 4:2:0 reliably; anything else
-     * (4:2:2, 4:4:4, float, H.264 > 8-bit) fails at runtime. HEVC Main10 is
-     * exempted in [decide]. Unknown formats stay eligible — probe may not
-     * resolve pix_fmt.
+     * AVPlayer hardware decode supports known 8-bit 4:2:0 formats. Unknown
+     * or missing pix_fmt is unsafe: the demuxer may have omitted codecpar
+     * format for Hi10P, 4:2:2, gray, RGB, or another unsupported surface.
      */
     fun directPlayablePixelFormat(pixFmt: String?): Boolean = when (pixFmt?.lowercase()) {
-        null, "" -> true
         "yuv420p", "nv12" -> true
         else -> false
     }

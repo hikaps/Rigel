@@ -269,10 +269,10 @@ class PlayerController(
     }
 
     /**
-     * Native playback failure seam. A DIRECT failure gets exactly one
-     * automatic demotion to the REMUX proxy — probe-based routing can miss
-     * profile/level/bit-depth quirks, and a silent auto-recover beats an
-     * error screen. Proxy failures surface as errors (no infinite loop).
+     * Native playback failure seam. A DIRECT decoder failure gets exactly one
+     * automatic demotion to the TRANSCODE proxy. REMUX would preserve the
+     * incompatible bitstream and fail a second time. Proxy failures surface
+     * as errors (no infinite loop).
      */
     fun reportError(message: String) {
         val current = _uiState.value
@@ -284,9 +284,9 @@ class PlayerController(
         ) {
             directFallbackUsed = true
             val generation = loadGeneration
-            _uiState.value = current.copy(phase = PlayerPhase.PREPARING_PROXY, route = PlaybackRoute.REMUX, error = null)
+            _uiState.value = current.copy(phase = PlayerPhase.PREPARING_PROXY, route = PlaybackRoute.TRANSCODE, error = null)
             pendingJob = scope.launch {
-                prepareProxy(current.probe!!, PlaybackRoute.REMUX, generation)
+                prepareProxy(current.probe!!, PlaybackRoute.TRANSCODE, generation)
             }
             return
         }
