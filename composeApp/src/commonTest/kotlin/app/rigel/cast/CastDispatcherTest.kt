@@ -40,6 +40,7 @@ private class FakeBridges(private val lan: String?) :
         headers: Map<String, String>,
         mode: String,
         onReady: (String?, String?) -> Unit,
+        onError: (String) -> Unit,
     ) = Unit
 
     override fun stopHlsSession(sessionId: String) = Unit

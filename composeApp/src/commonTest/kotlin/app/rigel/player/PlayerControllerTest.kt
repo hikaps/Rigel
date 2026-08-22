@@ -38,10 +38,11 @@ class PlayerControllerTest {
     private var hlsError: String? = null
     private var serverPort: Long = 8090
     private var serverError: String? = null
+    private var serverStopped = false
     private var lanBase: String? = null
     private val stoppedSessions = mutableListOf<String>()
-    private var serverStopped = false
     private val hlsModes = mutableListOf<String>()
+    private var transcodeErrorCallback: ((String) -> Unit)? = null
     /** When non-null, startHlsSession defers its onReady until fired here. */
     private var pendingReady: ((String?, String?) -> Unit)? = null
 
@@ -60,8 +61,10 @@ class PlayerControllerTest {
                     headers: Map<String, String>,
                     mode: String,
                     onReady: (String?, String?) -> Unit,
+                    onError: (String) -> Unit,
                 ) {
                     hlsModes += mode
+                    transcodeErrorCallback = onError
                     if (pendingReady != null) {
                         pendingReady = onReady
                     } else {
@@ -222,6 +225,19 @@ class PlayerControllerTest {
         assertEquals(listOf("remux"), hlsModes)
     }
 
+    @Test
+    fun runtimeProxyErrorAfterReadySetsError() = runTest(dispatcher.scheduler) {
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        c.loadRequest(request)
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+
+        transcodeErrorCallback?.invoke("video format changed during transcode")
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertEquals("video format changed during transcode", c.uiState.value.error)
+    }
     @Test
     fun stopPlaybackResetsStateAndStopsServer() = runTest(dispatcher.scheduler) {
         val c = controller()

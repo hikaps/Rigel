@@ -40,6 +40,7 @@ interface TranscodeBridge {
         headers: Map<String, String>,
         mode: String,
         onReady: (relativePlaylistPath: String?, errorMsg: String?) -> Unit,
+        onError: (errorMsg: String) -> Unit,
     )
 
     fun stopHlsSession(sessionId: String)

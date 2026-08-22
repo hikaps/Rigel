@@ -24,12 +24,20 @@ final class RigelHlsExporter {
         sourceUrl: String,
         headers: [String: String],
         mode: String,
-        onReady: @escaping (String?, String?) -> Void
+        onReady: @escaping (String?, String?) -> Void,
+        onError: @escaping (String) -> Void
     ) {
         let queue = DispatchQueue(label: "rigel-hls-\(sessionId)")
         lock.lock(); sessions[sessionId] = Session(queue: queue); lock.unlock()
         queue.async {
-            run(sessionId: sessionId, sourceUrl: sourceUrl, headers: headers, mode: mode, onReady: onReady)
+            run(
+                sessionId: sessionId,
+                sourceUrl: sourceUrl,
+                headers: headers,
+                mode: mode,
+                onReady: onReady,
+                onError: onError
+            )
         }
     }
 
@@ -71,7 +79,8 @@ final class RigelHlsExporter {
         sourceUrl: String,
         headers: [String: String],
         mode: String,
-        onReady: @escaping (String?, String?) -> Void
+        onReady: @escaping (String?, String?) -> Void,
+        onError: @escaping (String) -> Void
     ) {
         let outDir = sessionDir(sessionId: sessionId)
         try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
@@ -83,9 +92,19 @@ final class RigelHlsExporter {
         var videoChain: VideoChain? = nil
         var pendingAudioPackets: [UnsafeMutablePointer<AVPacket>] = []
         var notified = false
+        var terminalError: String?
+        func reportFailure(_ message: String) {
+            if notified {
+                DispatchQueue.main.async { onError(message) }
+            } else {
+                notified = true
+                DispatchQueue.main.async { onReady(nil, message) }
+            }
+        }
 
         defer {
             if !notified {
+                notified = true
                 DispatchQueue.main.async { onReady(nil, "session ended before playlist was ready") }
             }
             for packet in pendingAudioPackets {
@@ -97,12 +116,12 @@ final class RigelHlsExporter {
         }
 
         guard openInput(url: sourceUrl, headers: headers, fmt: &ifmt), let ctx = ifmt else {
-            DispatchQueue.main.async { onReady(nil, "failed to open source: \(sourceUrl)") }
+            reportFailure("failed to open source: \(sourceUrl)")
             return
         }
 
         guard avformat_alloc_output_context2(&ofmt, nil, "hls", playlistPath) >= 0, let out = ofmt else {
-            DispatchQueue.main.async { onReady(nil, "failed to create HLS output context") }
+            reportFailure("failed to create HLS output context")
             return
         }
 
@@ -193,7 +212,7 @@ final class RigelHlsExporter {
         }
 
         if mode != "remux", selectedVideoIndex != nil, videoChain == nil {
-            DispatchQueue.main.async { onReady(nil, "failed to initialize video transcoder") }
+            reportFailure("failed to initialize video transcoder")
             return
         }
 
@@ -214,7 +233,7 @@ final class RigelHlsExporter {
                 if readRet < 0 {
                     av_packet_unref(&primePacket)
                     if flushPrimingVideo(chain, inputStream: videoInStream, outputStream: videoOutStream) == .fatal {
-                        DispatchQueue.main.async { onReady(nil, "video decoder produced no usable frame") }
+                        reportFailure("video decoder produced no usable frame")
                         return
                     }
                     break
@@ -228,7 +247,7 @@ final class RigelHlsExporter {
                     ) {
                     case .fatal:
                         av_packet_unref(&primePacket)
-                        DispatchQueue.main.async { onReady(nil, "failed to initialize video transcoder") }
+                        reportFailure("failed to initialize video transcoder")
                         return
                     case .needMoreInput, .initialized:
                         break
@@ -241,14 +260,14 @@ final class RigelHlsExporter {
                 av_packet_unref(&primePacket)
             }
             if !chain.initialized {
-                DispatchQueue.main.async { onReady(nil, "video decoder produced no usable frame") }
+                reportFailure("video decoder produced no usable frame")
                 return
             }
         }
 
         let headerRet = avformat_write_header(out, nil)
         guard headerRet >= 0 else {
-            DispatchQueue.main.async { onReady(nil, "HLS write header failed: \(avErrorString(headerRet))") }
+            reportFailure("HLS write header failed: \(avErrorString(headerRet))")
             return
         }
 
@@ -258,7 +277,8 @@ final class RigelHlsExporter {
             drainPendingVideoFrames(chain, out: out, outStream: videoOutStream)
         }
         if let videoError = videoChain?.error {
-            DispatchQueue.main.async { onReady(nil, videoError) }
+            av_write_trailer(out)
+            reportFailure(videoError)
             return
         }
         for buffered in pendingAudioPackets {
@@ -307,8 +327,8 @@ final class RigelHlsExporter {
                 break
             }
             if let videoError = videoChain?.error {
-                DispatchQueue.main.async { onReady(nil, videoError) }
-                return
+                terminalError = videoError
+                break
             }
             if !notified && FileManager.default.fileExists(atPath: playlistPath) {
                 notified = true
@@ -316,7 +336,7 @@ final class RigelHlsExporter {
             }
         }
 
-        if !isCancelled(sessionId) {
+        if terminalError == nil && !isCancelled(sessionId) {
             if let chain = audioChain,
                let outIndex = streamMap[chain.inputIndex],
                let outStream = out.pointee.streams[Int(outIndex)] {
@@ -329,7 +349,11 @@ final class RigelHlsExporter {
             }
         }
         if let videoError = videoChain?.error {
-            DispatchQueue.main.async { onReady(nil, videoError) }
+            terminalError = terminalError ?? videoError
+        }
+        if let terminalError {
+            av_write_trailer(out)
+            reportFailure(terminalError)
             return
         }
         av_write_trailer(out)

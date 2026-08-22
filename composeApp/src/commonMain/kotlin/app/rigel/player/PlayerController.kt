@@ -191,6 +191,9 @@ class PlayerController(
             sourceUrl = sourceUrl,
             headers = emptyMap(),
             mode = route.name.lowercase(),
+            onError = { message ->
+                scope.launch { failProxySession(sessionId, generation, message) }
+            },
         )
         if (!isCurrent(generation)) {
             Bridges.stopHlsSession(sessionId)
@@ -238,6 +241,16 @@ class PlayerController(
         pendingSessionId = null
         Logger.i(tag) { "proxy ready: $proxyUrl" }
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.PLAYING, proxyUrl = proxyUrl)
+    }
+    private fun failProxySession(sessionId: String, generation: Long, message: String) {
+        if (!isCurrent(generation)) return
+        loadGeneration += 1
+        pendingJob?.cancel()
+        pendingJob = null
+        if (pendingSessionId == sessionId) pendingSessionId = null
+        Bridges.stopHlsSession(sessionId)
+        Bridges.stopHttpServer()
+        _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = message)
     }
 
     /** Error retry: force the REMUX proxy path. */
