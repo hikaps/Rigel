@@ -65,12 +65,23 @@ final class ProbeTest: XCTestCase {
     }
 
     func testHighFrameRateTimestampRepairPreservesCadence() {
-        // 120fps at 90kHz advances 750 ticks. Valid source timestamps must
-        // not be forced to the 60fps synthetic duration of 1,500 ticks.
+        // 120fps at 90kHz advances 750 ticks. Valid source timestamps keep
+        // their real cadence regardless of the GOP-capped 60fps sizing.
         XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 0, previous: nil, frameDuration: 750), 0)
         XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 750, previous: 0, frameDuration: 1_500), 750)
         XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 1_500, previous: 750, frameDuration: 1_500), 1_500)
-        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 700, previous: 1_500, frameDuration: 1_500), 1_501)
+        // A regressed run re-spaces at full frame duration, never one tick.
+        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 700, previous: 1_500, frameDuration: 1_500), 3_000)
+        XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: 710, previous: 3_000, frameDuration: 1_500), 4_500)
+        // Missing timestamps synthesize the same duration.
         XCTAssertEqual(RigelHlsExporter.repairVideoPTS(candidate: nil, previous: 1_500, frameDuration: 750), 2_250)
+    }
+
+    func testPrimingReadClassification() {
+        guard case .ok = RigelHlsExporter.classifyPrimingRead(0) else { return XCTFail("expected ok") }
+        guard case .ok = RigelHlsExporter.classifyPrimingRead(512) else { return XCTFail("expected ok") }
+        guard case .eof = RigelHlsExporter.classifyPrimingRead(-541_478_725) else { return XCTFail("expected eof") }
+        guard case .again = RigelHlsExporter.classifyPrimingRead(-EAGAIN) else { return XCTFail("expected again") }
+        guard case .readError = RigelHlsExporter.classifyPrimingRead(-5) else { return XCTFail("expected readError") }
     }
 }

@@ -250,11 +250,13 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         vc = nil
     }
 
-    /// Dismantling can race creation of a replacement PlayerView. Only clear
-    /// the bridge's retained controller when it is the one being dismantled.
+    /// Dismantling can race creation of a replacement PlayerView. The old
+    /// controller must always be stopped — only the bridge's retained
+    /// reference is conditional, so a newer replacement is untouched.
     func stop(viewController: RigelPlayerViewController) {
-        guard vc === viewController else { return }
         viewController.stopPlayback()
-        vc = nil
+        if vc === viewController {
+            vc = nil
+        }
     }
 }

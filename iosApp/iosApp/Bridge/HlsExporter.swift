@@ -226,29 +226,38 @@ final class RigelHlsExporter {
            let videoOutIndex = streamMap[videoIndex],
            let videoInStream = ctx.pointee.streams[Int(videoIndex)],
            let videoOutStream = out.pointee.streams[Int(videoOutIndex)] {
-            let primingStartedAt = DispatchTime.now().uptimeNanoseconds
-            var primingPacketCount = 0
-            var primingByteCount: Int64 = 0
+            /// Retained audio is memory-bounded, not fatal: a valid audio-first
+            /// live stream or long initial GOP may legitimately delay the first
+            /// video frame. Once the cap is hit, further audio is dropped until
+            /// video initializes (the output then continues from the live point)
+            /// instead of rejecting the stream.
+            let primingAudioByteLimit: Int64 = 8 * 1024 * 1024
+            var primingAudioBytes: Int64 = 0
             while !chain.initialized && !isCancelled(sessionId) {
-                let elapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - primingStartedAt) / 1_000_000_000
-                if primingPacketCount >= 512 || primingByteCount >= 32 * 1024 * 1024 || elapsedSeconds >= 10 {
-                    reportFailure("video decoder priming limit exceeded")
-                    return
-                }
                 var primePacket = AVPacket()
                 av_init_packet(&primePacket)
                 let readRet = av_read_frame(ctx, &primePacket)
-                if readRet >= 0 {
-                    primingPacketCount += 1
-                    primingByteCount += Int64(max(0, primePacket.size))
-                }
-                if readRet < 0 {
-                    av_packet_unref(&primePacket)
+                switch classifyPrimingRead(readRet) {
+                case .ok:
+                    break
+                case .again:
+                    // Non-blocking source: transient, not EOF. Yield briefly
+                    // so the retry loop does not spin.
+                    usleep(1_000)
+                    continue
+                case .eof:
                     if flushPrimingVideo(chain, inputStream: videoInStream, outputStream: videoOutStream) == .fatal {
                         reportFailure("video decoder produced no usable frame")
                         return
                     }
+                    if !chain.initialized {
+                        reportFailure("video decoder produced no usable frame")
+                        return
+                    }
                     break
+                case .readError(let message):
+                    reportFailure(message)
+                    return
                 }
                 if primePacket.stream_index == videoIndex {
                     switch primeVideoPacket(
@@ -265,8 +274,10 @@ final class RigelHlsExporter {
                         break
                     }
                 } else if primePacket.stream_index == selectedAudioIndex,
+                          primingAudioBytes < primingAudioByteLimit,
                           let buffered = av_packet_alloc(),
                           av_packet_ref(buffered, &primePacket) >= 0 {
+                    primingAudioBytes += Int64(max(0, buffered.pointee.size))
                     pendingAudioPackets.append(buffered)
                 }
                 av_packet_unref(&primePacket)
@@ -276,7 +287,6 @@ final class RigelHlsExporter {
                 return
             }
         }
-
         let headerRet = avformat_write_header(out, nil)
         guard headerRet >= 0 else {
             reportFailure("HLS write header failed: \(avErrorString(headerRet))")
@@ -845,6 +855,22 @@ final class RigelHlsExporter {
         }
         return chain.initialized ? .initialized : .fatal
     }
+    enum PrimingReadResult {
+        case ok
+        case again
+        case eof
+        case readError(String)
+    }
+
+    /// av_read_frame is negative for EOF, EAGAIN, and real I/O errors alike.
+    /// Only EOF terminates priming; EAGAIN is a transient non-blocking retry;
+    /// anything else is a genuine read failure.
+    static func classifyPrimingRead(_ ret: Int32) -> PrimingReadResult {
+        if ret >= 0 { return .ok }
+        if ret == -541_478_725 { return .eof } // AVERROR_EOF (FFERRTAG 'E','O','F',' ')
+        if ret == -EAGAIN { return .again }    // AVERROR(EAGAIN); Darwin EAGAIN = 35
+        return .readError("video priming read error: \(avErrorString(ret))")
+    }
     /// Output bitrate by resolution class. Generous but bounded: AirPlay
     /// renderers buffer ~3 segments; a steady bitrate avoids VBV spikes that
     /// stall segment fetches.
@@ -878,13 +904,16 @@ final class RigelHlsExporter {
         previous: Int64?,
         frameDuration: Int64
     ) -> Int64 {
-        let minimum: Int64
-        if let previous {
-            minimum = previous + (candidate == nil ? frameDuration : 1)
-        } else {
-            minimum = 0
+        guard let previous else { return max(candidate ?? 0, 0) }
+        guard let candidate else { return previous + frameDuration }
+        if candidate >= previous {
+            // Valid forward timestamp: keep its real cadence even when the
+            // delta is smaller than the synthetic frame duration (120fps).
+            return candidate
         }
-        return max(candidate ?? minimum, minimum)
+        // Regressed timestamp: re-space at one full frame duration. A run of
+        // regressions must not compress toward zero elapsed time.
+        return previous + frameDuration
     }
 
     private static func sourceFrameRate(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
