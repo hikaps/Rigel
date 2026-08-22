@@ -96,12 +96,35 @@ final class ProbeTest: XCTestCase {
         r = step(6_100, 6_100, 6_100, 3_000, 750)
         XCTAssertEqual(r.repaired, 6_850)
         XCTAssertEqual(r.offset, 750)
-        // Missing timestamps synthesize one frame duration.
+        // Missing PTS synthesizes one frame; the next forward raw timestamp
+        // must carry that repair offset instead of regressing behind 2250.
         r = step(nil, 1_500, 1_000, 500, 750)
         XCTAssertEqual(r.repaired, 2_250)
         XCTAssertEqual(r.offset, 500)
         XCTAssertEqual(r.lastRaw, 1_000)
+        r = step(1_500, 2_250, 1_000, 500, 750)
+        XCTAssertEqual(r.repaired, 3_000)
+        XCTAssertEqual(r.offset, 1_500)
+        XCTAssertEqual(r.lastRaw, 1_500)
     }
+    func testSourceFrameRateFallsBackToNominalRate() {
+        XCTAssertEqual(
+            RigelHlsExporter.sourceFrameRate(
+                avg: AVRational(num: 0, den: 0),
+                nominal: AVRational(num: 120, den: 1)
+            ),
+            120
+        )
+        XCTAssertEqual(
+            RigelHlsExporter.sourceFrameRate(
+                avg: AVRational(num: 24_000, den: 1_001),
+                nominal: AVRational(num: 120, den: 1)
+            ),
+            24_000.0 / 1_001.0,
+            accuracy: 0.0001
+        )
+    }
+
 
     func testAudioRingHeadPTS() {
         let timeBase = AVRational(num: 1, den: 90_000)
@@ -115,19 +138,29 @@ final class ProbeTest: XCTestCase {
         defer { packets.forEach { var p: UnsafeMutablePointer<AVPacket>? = $0; av_packet_free(&p) } }
         // Head is the oldest retained packet.
         XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase), 4_500)
-        packets.removeFirst()
-        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase), 9_000)
-        // Millisecond time base rescales into 90 kHz.
-        packets[0].pointee.pts = 50
-        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: AVRational(num: 1, den: 1_000)), 4_500)
+        // Both unset yields nil.
+        for packet in packets {
+            packet.pointee.pts = Int64.min
+            packet.pointee.dts = Int64.min
+        }
+        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase))
+        packets[0].pointee.duration = 50
+        packets[1].pointee.pts = 100
+        XCTAssertEqual(
+            RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: AVRational(num: 1, den: 1_000)),
+            4_500
+        )
         // Empty ring yields nil.
         XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k([], timeBase: timeBase), nil)
         // Missing PTS falls back to DTS so the rebase is not skipped.
         packets[0].pointee.pts = Int64.min
         packets[0].pointee.dts = 9_000
+        packets[0].pointee.duration = 0
         XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase), 9_000)
         // Both unset yields nil.
         packets[0].pointee.dts = Int64.min
+        packets[1].pointee.pts = Int64.min
+        packets[1].pointee.dts = Int64.min
         XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase))
     }
 

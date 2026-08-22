@@ -134,10 +134,12 @@ final class RigelPlayerViewController: UIViewController {
             try Self.configureAudioSession(
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
             )
-            audioSessionActivated = true
-            Self.audioSessionLock.lock()
-            Self.activeAudioSessionCount += 1
-            Self.audioSessionLock.unlock()
+            if !audioSessionActivated {
+                audioSessionActivated = true
+                Self.audioSessionLock.lock()
+                Self.activeAudioSessionCount += 1
+                Self.audioSessionLock.unlock()
+            }
         } catch {
             NSLog("[RigelPlayer] audio session setup failed: %@", error.localizedDescription)
         }

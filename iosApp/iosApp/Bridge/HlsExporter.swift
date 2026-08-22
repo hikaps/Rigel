@@ -879,20 +879,31 @@ final class RigelHlsExporter {
         }
         return chain.initialized ? .initialized : .fatal
     }
-    /// PTS (90 kHz) of the oldest retained audio packet in the priming tail
-    /// ring, used to rebase the shared timeline after eviction. DTS is the
-    /// fallback when PTS is unset — skipping the rebase on a missing PTS would
-    /// mix synthesized zero-based audio with later absolute timestamps. Nil
-    /// only when both are unset.
+    /// Derives a 90 kHz origin for the retained audio tail. Scans to the
+    /// first usable PTS/DTS and subtracts known durations of earlier packets;
+    /// a timestamp-less head must not disable the tail rebase.
     static func audioRingHeadPTS90k(
         _ packets: [UnsafeMutablePointer<AVPacket>],
         timeBase: AVRational
     ) -> Int64? {
-        guard timeBase.num != 0, timeBase.den != 0,
-              let first = packets.first else { return nil }
-        let head = first.pointee.pts != Int64.min ? first.pointee.pts : first.pointee.dts
-        guard head != Int64.min else { return nil }
-        return av_rescale_q(head, timeBase, AVRational(num: 1, den: 90_000))
+        guard timeBase.num != 0, timeBase.den != 0 else { return nil }
+        var durationBefore: Int64 = 0
+        for packet in packets {
+            let timestamp = packet.pointee.pts != Int64.min
+                ? packet.pointee.pts
+                : packet.pointee.dts
+            if timestamp != Int64.min {
+                return av_rescale_q(
+                    timestamp - durationBefore,
+                    timeBase,
+                    AVRational(num: 1, den: 90_000)
+                )
+            }
+            if packet.pointee.duration > 0 {
+                durationBefore = min(Int64.max, durationBefore + packet.pointee.duration)
+            }
+        }
+        return nil
     }
     enum PrimingReadResult {
         case ok
@@ -958,12 +969,17 @@ final class RigelHlsExporter {
             return (repaired, previousOffset, nil)
         }
         if let raw = candidate, let priorRaw = previousRaw, raw > priorRaw {
-            // Genuine forward timestamp (including VFR/high-FPS deltas):
-            // apply the carried repair offset, cadence stays source-true.
-            return (raw + previousOffset, previousOffset, raw)
+            let shifted = raw + previousOffset
+            if shifted > previousRepaired {
+                // Genuine forward timestamp (including VFR/high-FPS deltas):
+                // carry the repaired timeline offset only when it remains
+                // strictly monotonic past the repaired tail.
+                return (shifted, previousOffset, raw)
+            }
         }
-        // Missing, duplicate, or regressed timestamp: re-space at one full
-        // frame duration and re-anchor the offset onto this raw value.
+        // Missing, duplicate, regressed, or forward-but-still-behind the
+        // repaired timeline: re-space at one full frame duration and re-anchor
+        // the offset onto the raw value when one exists.
         let repaired = previousRepaired + frameDuration
         if let raw = candidate {
             return (repaired, repaired - raw, raw)
@@ -971,13 +987,19 @@ final class RigelHlsExporter {
         return (repaired, previousOffset, previousRaw)
     }
 
-    private static func sourceFrameRate(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
-        let rate = inputStream.pointee.avg_frame_rate
-        if rate.den > 0 {
+    static func sourceFrameRate(avg: AVRational, nominal: AVRational) -> Double {
+        for rate in [avg, nominal] where rate.den > 0 {
             let fps = Double(rate.num) / Double(rate.den)
             if fps.isFinite && fps > 0 { return fps }
         }
         return 30
+    }
+
+    private static func sourceFrameRate(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
+        sourceFrameRate(
+            avg: inputStream.pointee.avg_frame_rate,
+            nominal: inputStream.pointee.r_frame_rate
+        )
     }
 
     private static func fpsHint(inputStream: UnsafeMutablePointer<AVStream>) -> Double {
