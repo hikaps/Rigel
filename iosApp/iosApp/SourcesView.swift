@@ -236,7 +236,7 @@ struct SourcesView: View {
                             openFolder(item)
                         } onPlay: {
                             let url = JellyfinApi.shared.streamUrl(base: base, itemId: item.id, token: token)
-                            _ = player.open(url: url)
+                            _ = player.open(url: url, title: item.name)
                         }
                     }
                 }
@@ -248,7 +248,7 @@ struct SourcesView: View {
                         openFolder(item)
                     } onPlay: {
                         let url = JellyfinApi.shared.streamUrl(base: base, itemId: item.id, token: token)
-                        _ = player.open(url: url)
+                        _ = player.open(url: url, title: item.name)
                     }
                 }
             }

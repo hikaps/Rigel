@@ -90,7 +90,7 @@ struct PlayerHostView: View {
             if let url = player.playableURL {
                 PlayerView(
                     url: url,
-                    title: player.filename,
+                    title: player.displayTitle,
                     sender: player.sender,
                     longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
                     onReady: {},
