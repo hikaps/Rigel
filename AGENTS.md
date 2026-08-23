@@ -4,7 +4,7 @@
 
 Rigel is an iOS 16+ media player. Shared Kotlin Multiplatform code owns intake, playback orchestration, routing, settings, discovery, casting, and Jellyfin requests. Native Swift/SwiftUI supplies presentation plus AVPlayer, FFmpeg probing/HLS conversion, LAN HTTP serving, SSDP, and UPnP receive-mode implementations.
 
-There is no root README, contributor guide, release procedure, or documented XcodeGen invocation. Treat the build files, scripts, and CI workflow as the operational source of truth.
+The root README is user-facing only (features, usage, availability, license); there is no contributor guide, release procedure, or documented XcodeGen invocation. Treat the build files, scripts, and CI workflow as the operational source of truth.
 
 ## Branch, Worktree & PR Workflow
 
