@@ -93,6 +93,7 @@ struct PlayerHostView: View {
                     title: player.displayTitle,
                     sender: player.sender,
                     longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
+                    isProxy: player.proxyUrl != nil,
                     onReady: {},
                     onError: { player.reportError($0) },
                     onBack: { player.stop() }
@@ -149,12 +150,19 @@ struct PlayerView: UIViewControllerRepresentable {
     let title: String?
     let sender: String?
     let longFormVideoAirPlayEligible: Bool
+    let isProxy: Bool
     let onReady: () -> Void
     let onError: (String) -> Void
     let onBack: () -> Void
 
     final class Coordinator {
-        var loaded: (url: String, title: String?, sender: String?, longFormVideoAirPlayEligible: Bool)?
+        var loaded: (
+            url: String,
+            title: String?,
+            sender: String?,
+            longFormVideoAirPlayEligible: Bool,
+            isProxy: Bool
+        )?
         /// Strongly retains the error origin so the closure's weak capture
         /// outlives makeUIViewController; otherwise the box deallocates and
         /// every error forwards unconditionally.
@@ -230,14 +238,16 @@ struct PlayerView: UIViewControllerRepresentable {
         if loaded?.url != url ||
             loaded?.title != title ||
             loaded?.sender != sender ||
-            loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible {
+            loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible ||
+            loaded?.isProxy != isProxy {
             bridge.load(
                 url: url,
                 title: title,
                 sender: sender,
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
             )
-            context.coordinator.loaded = (url, title, sender, longFormVideoAirPlayEligible)
+            (uiViewController as? RigelPlayerViewController)?.setTrackSelectionEnabled(!isProxy)
+            context.coordinator.loaded = (url, title, sender, longFormVideoAirPlayEligible, isProxy)
         }
     }
 }

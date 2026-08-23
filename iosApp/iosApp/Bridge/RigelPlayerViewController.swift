@@ -52,6 +52,11 @@ final class RigelPlayerViewController: UIViewController {
     private var audioGroup: AVMediaSelectionGroup?
     private var subtitleGroup: AVMediaSelectionGroup?
     private var trackGroupsLoadedFor: AVPlayerItem?
+    private var trackSelectionEnabled = true
+    private var isScrubbing = false
+    private var pendingScrubValue: Float?
+    private var scrubGeneration = 0
+
     private var customPlaybackControls = false
     private var controlsHideTimer: Timer?
     private var controlsVisible = true
@@ -163,6 +168,13 @@ final class RigelPlayerViewController: UIViewController {
         progressSlider.minimumTrackTintColor = .white
         progressSlider.maximumTrackTintColor = .white.withAlphaComponent(0.35)
         progressSlider.addTarget(self, action: #selector(progressChanged), for: .valueChanged)
+        progressSlider.addTarget(self, action: #selector(progressTouchDown), for: .touchDown)
+        progressSlider.addTarget(
+            self,
+            action: #selector(progressTouchUp),
+            for: [.touchUpInside, .touchUpOutside, .touchCancel]
+        )
+        progressSlider.accessibilityIdentifier = "player.progressSlider"
         progressSlider.translatesAutoresizingMaskIntoConstraints = false
         bottomBar.contentView.addSubview(progressSlider)
 
@@ -259,7 +271,7 @@ final class RigelPlayerViewController: UIViewController {
     private func scheduleControlsHide() {
         controlsHideTimer?.invalidate()
         controlsHideTimer = nil
-        guard controlsVisible, player?.timeControlStatus == .playing else { return }
+        guard controlsVisible, !isScrubbing, player?.timeControlStatus == .playing else { return }
         controlsHideTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
             self?.hideControls()
         }
@@ -268,6 +280,20 @@ final class RigelPlayerViewController: UIViewController {
     @objc private func backTapped() {
         events.onBack()
     }
+    /// FFmpeg HLS proxy sessions currently contain only their selected audio
+    /// stream and no subtitle renditions. Keep the selector out of that UI
+    /// rather than presenting a control that can never change the track.
+    func setTrackSelectionEnabled(_ enabled: Bool) {
+        trackSelectionEnabled = enabled
+        tracksButton.isHidden = !enabled
+        tracksButton.isUserInteractionEnabled = enabled
+        if !enabled {
+            audioGroup = nil
+            subtitleGroup = nil
+            trackGroupsLoadedFor = nil
+        }
+    }
+
     static func fallbackTitle(for rawURL: String) -> String {
         let decoded = rawURL.removingPercentEncoding ?? rawURL
         let component = URL(string: decoded)?.deletingPathExtension().lastPathComponent
@@ -329,7 +355,7 @@ final class RigelPlayerViewController: UIViewController {
     }
 
     private func loadTrackGroups(for item: AVPlayerItem) {
-        guard trackGroupsLoadedFor !== item else { return }
+        guard trackSelectionEnabled, trackGroupsLoadedFor !== item else { return }
         let asset = item.asset
         let key = "availableMediaCharacteristicsWithMediaSelectionOptions"
         asset.loadValuesAsynchronously(forKeys: [key]) { [weak self, weak item] in
@@ -388,6 +414,8 @@ final class RigelPlayerViewController: UIViewController {
 
         disposed = false
         notifiedPlaying = false
+        isScrubbing = false
+        pendingScrubValue = nil
         customPlaybackControls = Self.isHLSURL(url)
         bottomBar.isHidden = !customPlaybackControls
         progressSlider.isHidden = true
@@ -397,7 +425,8 @@ final class RigelPlayerViewController: UIViewController {
         audioGroup = nil
         subtitleGroup = nil
         trackGroupsLoadedFor = nil
-        tracksButton.accessibilityValue = "Loading tracks"
+        tracksButton.isHidden = !trackSelectionEnabled
+        tracksButton.accessibilityValue = trackSelectionEnabled ? "Loading tracks" : nil
         showControls()
 
         let item = AVPlayerItem(url: avURL)
@@ -455,13 +484,46 @@ final class RigelPlayerViewController: UIViewController {
         updatePlaybackControls()
     }
 
-    @objc private func progressChanged() {
+    @objc private func progressTouchDown() {
+        scrubGeneration &+= 1
+        isScrubbing = true
+        pendingScrubValue = progressSlider.value
+        controlsHideTimer?.invalidate()
+        controlsHideTimer = nil
         showControls()
-        guard let player, let item = player.currentItem else { return }
+    }
+
+    @objc private func progressChanged() {
+        guard isScrubbing else { return }
+        pendingScrubValue = progressSlider.value
+        showControls()
+    }
+
+    @objc private func progressTouchUp() {
+        let value = pendingScrubValue ?? progressSlider.value
+        let generation = scrubGeneration
+        isScrubbing = false
+        guard let player, let item = player.currentItem else {
+            pendingScrubValue = nil
+            showControls()
+            return
+        }
         let duration = item.duration.seconds
-        guard duration.isFinite, duration > 0 else { return }
-        let target = Double(progressSlider.value) * duration
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+        guard duration.isFinite, duration > 0 else {
+            pendingScrubValue = nil
+            showControls()
+            return
+        }
+        let target = Double(value) * duration
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self, weak player] _ in
+            DispatchQueue.main.async {
+                guard let self, let player, self.player === player, self.scrubGeneration == generation else { return }
+                self.pendingScrubValue = nil
+                self.updatePlaybackControls()
+                self.scheduleControlsHide()
+            }
+        }
+        showControls()
     }
 
     private func updatePlaybackControls() {
@@ -471,7 +533,11 @@ final class RigelPlayerViewController: UIViewController {
         let duration = item.duration.seconds
         if duration.isFinite, duration > 0 {
             progressSlider.isHidden = false
-            progressSlider.value = Float(min(max(elapsed / duration, 0), 1))
+            if let pendingScrubValue {
+                progressSlider.value = pendingScrubValue
+            } else if !isScrubbing {
+                progressSlider.value = Float(min(max(elapsed / duration, 0), 1))
+            }
             durationLabel.text = Self.formatTime(duration)
         } else {
             progressSlider.isHidden = true
@@ -514,6 +580,9 @@ final class RigelPlayerViewController: UIViewController {
         controlsVisible = true
         topBar.isHidden = false
         customPlaybackControls = false
+        isScrubbing = false
+        pendingScrubValue = nil
+        scrubGeneration &+= 1
         bottomBar.isHidden = true
         audioGroup = nil
         subtitleGroup = nil
