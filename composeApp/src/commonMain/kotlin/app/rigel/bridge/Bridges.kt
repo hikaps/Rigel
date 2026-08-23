@@ -37,12 +37,20 @@ object Bridges {
         sourceUrl: String,
         headers: Map<String, String>,
         mode: String,
+        onError: (String) -> Unit,
     ): Pair<String?, String?> {
         val bridge = requireBridge("Transcode", RigelBridgeFactory.transcode)
         return suspendCancellableCoroutine { cont ->
-            bridge.startHlsSession(sessionId, sourceUrl, headers, mode) { path, error ->
-                if (cont.isActive) cont.resume(path to error)
-            }
+            bridge.startHlsSession(
+                sessionId,
+                sourceUrl,
+                headers,
+                mode,
+                onReady = { path, error ->
+                    if (cont.isActive) cont.resume(path to error)
+                },
+                onError = onError,
+            )
         }
     }
 

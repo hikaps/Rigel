@@ -15,6 +15,11 @@ final class RigelPlayerViewController: UIViewController {
     private var pollTimer: Timer?
     private var disposed = false
     private var audioSessionActivated = false
+    /// AVAudioSession is process-wide: only the last active controller may
+    /// deactivate it. A late dismantle of an old controller must not kill the
+    /// session a replacement just activated.
+    private static var activeAudioSessionCount = 0
+    private static let audioSessionLock = NSLock()
     private var notifiedPlaying = false
 
     /// Configure AVAudioSession for the current media so only eligible
@@ -129,7 +134,12 @@ final class RigelPlayerViewController: UIViewController {
             try Self.configureAudioSession(
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
             )
-            audioSessionActivated = true
+            if !audioSessionActivated {
+                audioSessionActivated = true
+                Self.audioSessionLock.lock()
+                Self.activeAudioSessionCount += 1
+                Self.audioSessionLock.unlock()
+            }
         } catch {
             NSLog("[RigelPlayer] audio session setup failed: %@", error.localizedDescription)
         }
@@ -180,12 +190,17 @@ final class RigelPlayerViewController: UIViewController {
 
     private func deactivateAudioSession() {
         guard audioSessionActivated else { return }
+        audioSessionActivated = false
+        Self.audioSessionLock.lock()
+        Self.activeAudioSessionCount -= 1
+        let remaining = Self.activeAudioSessionCount
+        Self.audioSessionLock.unlock()
+        guard remaining <= 0 else { return }
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         } catch {
             NSLog("[RigelPlayer] audio session deactivation failed: %@", error.localizedDescription)
         }
-        audioSessionActivated = false
     }
 
     private func startPolling() {
@@ -204,6 +219,11 @@ final class RigelPlayerViewController: UIViewController {
             let nsErr = item.error as NSError?
             let detail = nsErr?.localizedDescription ?? "Playback failed"
             NSLog("[RigelPlayer] item failed: %@ (domain=%@ code=%ld)", detail, nsErr?.domain ?? "?", nsErr?.code ?? -1)
+            // One-shot: stop polling so a `.failed` is delivered exactly once.
+            // PlayerController may be auto-falling back to the proxy; repeated
+            // delivery would race the proxy build and force an error screen.
+            pollTimer?.invalidate()
+            pollTimer = nil
             events.onError(message: detail)
         case .readyToPlay:
             if player.timeControlStatus == .playing, !notifiedPlaying {
@@ -242,5 +262,18 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
 
     func stop() {
         vc?.stopPlayback()
+        vc = nil
+    }
+
+    /// Stops the given controller (per-player disposal is always safe; audio
+    /// session release is reference-counted). Returns true only when that
+    /// controller was still the bridge's current one, letting callers discard
+    /// stale errors from dismantled players.
+    @discardableResult
+    func stop(viewController: RigelPlayerViewController) -> Bool {
+        viewController.stopPlayback()
+        guard vc === viewController else { return false }
+        vc = nil
+        return true
     }
 }

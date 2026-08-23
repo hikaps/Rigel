@@ -24,14 +24,16 @@ final class RigelTranscodeBridge: NSObject, TranscodeBridge {
         sourceUrl: String,
         headers: [String: String],
         mode: String,
-        onReady: @escaping (String?, String?) -> Void
+        onReady: @escaping (String?, String?) -> Void,
+        onError: @escaping (String) -> Void
     ) {
         RigelHlsExporter.startSession(
             sessionId: sessionId,
             sourceUrl: sourceUrl,
             headers: headers,
             mode: mode,
-            onReady: onReady
+            onReady: onReady,
+            onError: onError
         )
     }
 

@@ -69,6 +69,10 @@ final class PlayerModel: ObservableObject {
     }
 
     func reportError(_ message: String) {
+        // Native teardown is bound to the originating controller in
+        // PlayerView.makeUIViewController: a stale .failed from a dismantled
+        // player must not stop the bridge's current (possibly newer)
+        // controller. Only forward the error; Kotlin rejects stale state.
         SwiftPlayer.shared.reportError(message: message)
     }
 }

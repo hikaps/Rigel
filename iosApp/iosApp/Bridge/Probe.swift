@@ -39,7 +39,26 @@ final class RigelProbe {
             var videoCodec: String? = nil
             var audioCodecs: [String] = []
             var subtitleCodecs: [String] = []
+            var videoPixFmt: String? = nil
+            var videoWidth: Int32 = 0
+            var videoHeight: Int32 = 0
             let streamCount = Int(ctx.pointee.nb_streams)
+            var selectedVideoIndex: Int?
+            var selectedVideoIsDefault = false
+            if streamCount > 0 {
+                for i in 0..<streamCount {
+                    guard let stream = ctx.pointee.streams[i],
+                          let codecpar = stream.pointee.codecpar,
+                          codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO else { continue }
+                    let isAttachedPicture = (stream.pointee.disposition & AV_DISPOSITION_ATTACHED_PIC) != 0
+                    guard !isAttachedPicture else { continue }
+                    let isDefault = (stream.pointee.disposition & AV_DISPOSITION_DEFAULT) != 0
+                    if selectedVideoIndex == nil || (isDefault && !selectedVideoIsDefault) {
+                        selectedVideoIndex = i
+                        selectedVideoIsDefault = isDefault
+                    }
+                }
+            }
             if streamCount > 0 {
                 for i in 0..<streamCount {
                     guard let stream = ctx.pointee.streams[i] else { continue }
@@ -47,7 +66,14 @@ final class RigelProbe {
                     let codecName = codecNameString(codecpar.pointee.codec_id)
                     switch codecpar.pointee.codec_type {
                     case AVMEDIA_TYPE_VIDEO:
-                        if videoCodec == nil { videoCodec = codecName }
+                        guard i == selectedVideoIndex else { continue }
+                        videoCodec = codecName
+                        let pf = AVPixelFormat(rawValue: codecpar.pointee.format)
+                        if let name = av_get_pix_fmt_name(pf) {
+                            videoPixFmt = String(cString: name)
+                        }
+                        videoWidth = codecpar.pointee.width
+                        videoHeight = codecpar.pointee.height
                     case AVMEDIA_TYPE_AUDIO:
                         audioCodecs.append(codecName)
                     case AVMEDIA_TYPE_SUBTITLE:
@@ -68,7 +94,10 @@ final class RigelProbe {
                 audioCodecs: audioCodecs.map { normalizeCodec($0) ?? "unknown" },
                 subtitleCodecs: subtitleCodecs.map { normalizeCodec($0) ?? "unknown" },
                 durationMs: durationMs.map { KotlinLong(longLong: $0) },
-                isLive: isLive
+                isLive: isLive,
+                pixFmt: videoPixFmt.flatMap { normalizePixelFormat($0) },
+                width: videoWidth,
+                height: videoHeight
             )
             avformat_close_input(&fmt)
         }
@@ -105,5 +134,29 @@ final class RigelProbe {
         case "hevc": return "hevc"
         default: return raw.lowercased()
         }
+    }
+
+    /// Collapse only explicit YUV/NV12/P010 families. Unknown formats stay
+    /// unknown so FormatRouter cannot accidentally grant a direct-play route
+    /// (for example, gray10le is not HEVC Main10 4:2:0).
+    static func normalizePixelFormat(_ raw: String) -> String {
+        let lower = raw.lowercased()
+        if lower == "nv12" { return "yuv420p" }
+        if lower == "p010" || lower == "p010le" || lower == "p010be" {
+            return "yuv420p10le"
+        }
+        guard lower.hasPrefix("yuv") || lower.hasPrefix("yuvj") else { return lower }
+        if lower.contains("444") { return "yuv444p" }
+        if lower.contains("422") { return "yuv422p" }
+        // Planar 4:2:0: preserve bit depth instead of collapsing 12/14/16
+        // bit to 8-bit. Big-endian names normalize to the same shape because
+        // the router gates chroma and depth, not memory byte order.
+        if lower.contains("16") { return "yuv420p16le" }
+        if lower.contains("14") { return "yuv420p14le" }
+        if lower.contains("12") { return "yuv420p12le" }
+        if lower.contains("10") { return "yuv420p10le" }
+        if lower.contains("9") { return "yuv420p9le" }
+        if lower.contains("420") { return "yuv420p" }
+        return lower
     }
 }
