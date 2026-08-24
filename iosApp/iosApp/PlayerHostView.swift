@@ -31,10 +31,13 @@ struct PlayerHostView: View {
     private var content: some View {
         switch player.phase.name {
         case "IDLE":
-            VStack(spacing: 18) {
+            stateCard {
                 Image(systemName: "play.rectangle.fill")
-                    .font(.system(size: 42))
+                    .font(.system(size: 42, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(Color.rigelStar)
+                    .accessibilityHidden(true)
+
                 VStack(spacing: 6) {
                     Text("Nothing playing")
                         .font(.title3.weight(.semibold))
@@ -42,7 +45,9 @@ struct PlayerHostView: View {
                     Text("Open a stream from the Rigel home screen.")
                         .font(.subheadline)
                         .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
                 }
+
                 Button {
                     player.showPlayer = false
                 } label: {
@@ -50,42 +55,50 @@ struct PlayerHostView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(Color.rigelStar)
+                .controlSize(.large)
             }
-            .padding(28)
-            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .padding(24)
         case "PROBING", "PREPARING_PROXY":
-            VStack(spacing: 18) {
-                Image(systemName: player.phase.name == "PROBING" ? "magnifyingglass" : "gearshape.2.fill")
-                    .font(.system(size: 34))
+            let preparingProxy = player.phase.name == "PREPARING_PROXY"
+            stateCard {
+                Image(systemName: preparingProxy ? "gearshape.2.fill" : "magnifyingglass")
+                    .font(.system(size: 34, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(Color.rigelStar)
+                    .accessibilityHidden(true)
+
                 ProgressView()
                     .tint(.white)
                     .controlSize(.large)
+                    .accessibilityLabel(preparingProxy ? "Preparing playback" : "Checking stream")
+
                 VStack(spacing: 6) {
-                    Text(player.phase.name == "PROBING" ? "Checking stream" : "Preparing playback")
+                    Text(preparingProxy ? "Preparing playback" : "Checking stream")
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(.white)
-                    Text(player.phase.name == "PROBING"
-                         ? "Finding the best way to play this link."
-                         : "Converting this stream for smooth playback.")
+                    Text(preparingProxy
+                         ? "Converting this stream for smooth playback."
+                         : "Finding the best way to play this link.")
                         .font(.subheadline)
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.white.opacity(0.7))
                 }
+
                 if !player.routeLabel.isEmpty {
-                    Text(player.routeLabel)
-                        .font(.caption.weight(.semibold))
+                    Label(player.routeLabel, systemImage: "arrow.triangle.branch")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.rigelStar)
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color.orange.opacity(0.2), in: Capsule())
-                        .foregroundStyle(.orange)
+                        .padding(.vertical, 8)
+                        .background(Color.rigelStarDim.opacity(0.8), in: Capsule())
                 }
+
+                Button("Cancel", role: .cancel) {
+                    player.stop()
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+                .controlSize(.large)
             }
-            .padding(28)
-            .frame(maxWidth: 360)
-            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .padding(24)
         case "PLAYING":
             if let url = player.playableURL {
                 PlayerView(
@@ -99,13 +112,25 @@ struct PlayerHostView: View {
                     onBack: { player.stop() }
                 )
                 .ignoresSafeArea()
+            } else {
+                stateCard {
+                    ProgressView()
+                        .tint(.white)
+                        .controlSize(.large)
+                    Text("Loading player")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                }
             }
         default: // ERROR
-            VStack(spacing: 18) {
+            stateCard {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 36))
+                    .font(.system(size: 36, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.orange)
-                VStack(spacing: 6) {
+                    .accessibilityHidden(true)
+
+                VStack(spacing: 8) {
                     Text("Playback error")
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(.white)
@@ -114,30 +139,44 @@ struct PlayerHostView: View {
                         .foregroundStyle(.white.opacity(0.75))
                         .multilineTextAlignment(.center)
                         .lineLimit(6)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                HStack(spacing: 12) {
+
+                VStack(spacing: 12) {
                     Button {
                         player.retryWithProxy()
                     } label: {
-                        Label("Try proxy", systemImage: "arrow.triangle.2.circlepath")
+                        Label("Try with proxy", systemImage: "arrow.triangle.2.circlepath")
+                            .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Color.rigelStar)
+                    .controlSize(.large)
 
-                    Button {
+                    Button("Close", role: .cancel) {
                         player.stop()
-                    } label: {
-                        Text("Close")
                     }
                     .buttonStyle(.bordered)
                     .tint(.white)
+                    .controlSize(.large)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func stateCard<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(spacing: 20, content: content)
             .padding(28)
             .frame(maxWidth: 420)
-            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .padding(24)
-        }
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .strokeBorder(.white.opacity(0.14), lineWidth: 1)
+            }
+            .padding(.horizontal, 24)
     }
 }
 
