@@ -318,7 +318,11 @@ final class RigelPlayerViewController: UIViewController {
         controlsVisible = true
         topBar.isHidden = false
         bottomBar.isHidden = !customPlaybackControls
-        UIView.animate(withDuration: 0.25) {
+        UIView.animate(
+            withDuration: 0.25,
+            delay: 0,
+            options: [.beginFromCurrentState, .allowUserInteraction]
+        ) {
             self.topBar.alpha = 1
             self.bottomBar.alpha = 1
         }
@@ -331,6 +335,8 @@ final class RigelPlayerViewController: UIViewController {
         controlsVisible = false
         UIView.animate(
             withDuration: 0.25,
+            delay: 0,
+            options: [.beginFromCurrentState, .allowUserInteraction],
             animations: {
                 self.topBar.alpha = 0
                 self.bottomBar.alpha = 0
