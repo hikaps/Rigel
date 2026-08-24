@@ -64,6 +64,62 @@ final class ProbeTest: XCTestCase {
         )
     }
 
+    func testHardwareFramesContextUsesBufferData() {
+        let size = MemoryLayout<AVHWFramesContext>.size
+        guard let frames = av_buffer_alloc(size) else {
+            return XCTFail("buffer allocation failed")
+        }
+        let framesRef = frames
+        defer {
+            var pointer: UnsafeMutablePointer<AVBufferRef>? = framesRef
+            av_buffer_unref(&pointer)
+        }
+
+        guard let context = RigelHlsExporter.configureHardwareFramesContext(
+            frames,
+            width: 1_920,
+            height: 1_080
+        ) else {
+            return XCTFail("hardware frames context data missing")
+        }
+        XCTAssertEqual(context.pointee.width, 1_920)
+        XCTAssertEqual(context.pointee.height, 1_080)
+        XCTAssertEqual(context.pointee.sw_format, AV_PIX_FMT_NV12)
+        XCTAssertNotEqual(
+            UnsafeMutableRawPointer(frames),
+            UnsafeMutableRawPointer(context)
+        )
+    }
+
+    func testTranscodeSessionProducesVideo() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let sessionId = "test-transcode-\(UUID().uuidString)"
+        let finished = expectation(description: "transcode session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "transcode",
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 10)
+        RigelHlsExporter.stopSession(sessionId: sessionId)
+
+        XCTAssertNotNil(readyPath, error ?? "transcode session did not produce a playlist")
+        XCTAssertNil(error)
+    }
+
     func testHighFrameRateTimestampRepairPreservesCadence() {
         func step(_ candidate: Int64?, _ prev: Int64?, _ prevRaw: Int64?, _ offset: Int64, _ fd: Int64)
             -> (repaired: Int64, offset: Int64, lastRaw: Int64?) {
