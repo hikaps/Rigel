@@ -884,6 +884,22 @@ final class RigelHlsExporter {
     /// Complete VideoToolbox setup only after a concrete decoded format is
     /// known. codecpar.format is legitimately AV_PIX_FMT_NONE for some
     /// demuxers and becomes reliable only on the first decoded frame.
+    static func configureHardwareFramesContext(
+        _ frames: UnsafeMutablePointer<AVBufferRef>,
+        width: Int32,
+        height: Int32
+    ) -> UnsafeMutablePointer<AVHWFramesContext>? {
+        guard let framesData = frames.pointee.data else { return nil }
+        let context = UnsafeMutableRawPointer(framesData)
+            .assumingMemoryBound(to: AVHWFramesContext.self)
+        context.pointee.format = AV_PIX_FMT_VIDEOTOOLBOX
+        context.pointee.sw_format = AV_PIX_FMT_NV12
+        context.pointee.width = width
+        context.pointee.height = height
+        context.pointee.initial_pool_size = 8
+        return context
+    }
+
     private static func initializeVideoChain(
         _ chain: VideoChain,
         inputStream: UnsafeMutablePointer<AVStream>,
@@ -932,12 +948,9 @@ final class RigelHlsExporter {
         }
 
         guard let frames = framesRef else { return false }
-        let framesPtr = UnsafeMutableRawPointer(frames).assumingMemoryBound(to: AVHWFramesContext.self)
-        framesPtr.pointee.format = AV_PIX_FMT_VIDEOTOOLBOX
-        framesPtr.pointee.sw_format = AV_PIX_FMT_NV12
-        framesPtr.pointee.width = outW
-        framesPtr.pointee.height = outH
-        framesPtr.pointee.initial_pool_size = 8
+        guard configureHardwareFramesContext(frames, width: outW, height: outH) != nil else {
+            return false
+        }
         guard av_hwframe_ctx_init(frames) >= 0 else { return false }
 
         if needScale {
@@ -1237,6 +1250,55 @@ final class RigelHlsExporter {
         chain.pendingFrames.removeAll()
     }
 
+    private static func scaleVideoFrame(
+        _ scaler: OpaquePointer,
+        source: UnsafeMutablePointer<AVFrame>,
+        destination: UnsafeMutablePointer<AVFrame>
+    ) -> Bool {
+        guard av_frame_make_writable(destination) >= 0 else { return false }
+        var sourcePlanes: [UnsafePointer<UInt8>?] = [
+            UnsafePointer(source.pointee.data.0), UnsafePointer(source.pointee.data.1),
+            UnsafePointer(source.pointee.data.2), UnsafePointer(source.pointee.data.3),
+            UnsafePointer(source.pointee.data.4), UnsafePointer(source.pointee.data.5),
+            UnsafePointer(source.pointee.data.6), UnsafePointer(source.pointee.data.7),
+        ]
+        var sourceStrides: [Int32] = [
+            source.pointee.linesize.0, source.pointee.linesize.1, source.pointee.linesize.2,
+            source.pointee.linesize.3, source.pointee.linesize.4, source.pointee.linesize.5,
+            source.pointee.linesize.6, source.pointee.linesize.7,
+        ]
+        var destinationPlanes: [UnsafeMutablePointer<UInt8>?] = [
+            destination.pointee.data.0, destination.pointee.data.1,
+            destination.pointee.data.2, destination.pointee.data.3,
+            destination.pointee.data.4, destination.pointee.data.5,
+            destination.pointee.data.6, destination.pointee.data.7,
+        ]
+        var destinationStrides: [Int32] = [
+            destination.pointee.linesize.0, destination.pointee.linesize.1,
+            destination.pointee.linesize.2, destination.pointee.linesize.3,
+            destination.pointee.linesize.4, destination.pointee.linesize.5,
+            destination.pointee.linesize.6, destination.pointee.linesize.7,
+        ]
+        let scaledRows = sourcePlanes.withUnsafeBufferPointer { sourcePlanes in
+            sourceStrides.withUnsafeBufferPointer { sourceStrides in
+                destinationPlanes.withUnsafeBufferPointer { destinationPlanes in
+                    destinationStrides.withUnsafeBufferPointer { destinationStrides in
+                        sws_scale(
+                            scaler,
+                            sourcePlanes.baseAddress,
+                            sourceStrides.baseAddress,
+                            0,
+                            source.pointee.height,
+                            destinationPlanes.baseAddress,
+                            destinationStrides.baseAddress
+                        )
+                    }
+                }
+            }
+        }
+        return scaledRows == destination.pointee.height
+    }
+
     private static func writeTranscodedVideoFrame(
         chain: VideoChain,
         decoded: UnsafeMutablePointer<AVFrame>,
@@ -1253,7 +1315,7 @@ final class RigelHlsExporter {
         }
         let uploadFrame: UnsafeMutablePointer<AVFrame>
         if let scaler = chain.scaler, let scaled = chain.scaledFrame {
-            guard sws_scale_frame(scaler, scaled, decoded) == 0 else {
+            guard Self.scaleVideoFrame(scaler, source: decoded, destination: scaled) else {
                 chain.error = "video frame conversion failed"
                 return
             }
