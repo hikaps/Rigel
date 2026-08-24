@@ -45,6 +45,8 @@ class ChromePayloadsTest {
     fun extractsReceiverTransportAndMessageFields() {
         val json = """{"requestId":2,"status":{"applications":[{"appId":"CC1AD845","transportId":"transport-1"}]},"type":"RECEIVER_STATUS"}"""
         assertEquals("transport-1", ChromePayloads.extractTransportId(json))
+        assertEquals(12, ChromePayloads.requestId("{\"type\":\"MEDIA_STATUS\",\"requestId\":12}"))
+        assertNull(ChromePayloads.requestId("{\"type\":\"MEDIA_STATUS\"}"))
         assertEquals("RECEIVER_STATUS", ChromePayloads.messageType(json))
         assertNull(ChromePayloads.errorReason("{\"type\":\"OK\"}"))
         assertEquals("NOT_FOUND", ChromePayloads.errorReason("{\"type\":\"LAUNCH_ERROR\",\"reason\":\"NOT_FOUND\"}"))

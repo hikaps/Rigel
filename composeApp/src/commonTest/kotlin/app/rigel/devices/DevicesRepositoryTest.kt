@@ -42,6 +42,7 @@ class DevicesRepositoryTest {
             host: String,
             port: Int,
             onFrame: (ByteArray) -> Unit,
+            onError: (String) -> Unit,
             onOpen: (CastWireConnection?, String?) -> Unit,
         ) {
             onOpen(null, "not implemented in repository scan tests")

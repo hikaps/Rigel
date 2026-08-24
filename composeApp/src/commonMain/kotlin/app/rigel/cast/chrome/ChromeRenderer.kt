@@ -24,28 +24,37 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
         "Chromecast did not confirm playback"
     } catch (e: CancellationException) {
         throw e
+    } catch (e: ChromecastTransportException) {
+        "Chromecast connection failed: ${e.message}"
     } catch (_: Throwable) {
         "Chromecast did not respond"
     }
 
     suspend fun probe(host: String, port: Int): Boolean = try {
         withTimeout<Boolean>(3_000) {
-            val frames = Channel<ByteArray>(Channel.UNLIMITED)
-            val connection = open(host, port) { frames.trySend(it) }
+            val events = Channel<Incoming>(Channel.UNLIMITED)
+            val connection = open(
+                host,
+                port,
+                onFrame = { events.trySend(Incoming.Frame(it)) },
+                onError = { events.trySend(Incoming.Error(it)) },
+            )
             try {
                 var requestId = 1
                 send(connection, receiverId, ChromePayloads.NS_CONNECTION, ChromePayloads.connect(requestId++))
-                send(connection, receiverId, ChromePayloads.NS_RECEIVER, ChromePayloads.getStatus(requestId++))
+                val statusRequestId = requestId++
+                send(connection, receiverId, ChromePayloads.NS_RECEIVER, ChromePayloads.getStatus(statusRequestId))
                 var found = false
                 while (!found) {
-                    val frame = nextFrame(frames, connection, requestId)
-                    found = frame.namespace == ChromePayloads.NS_RECEIVER &&
-                        ChromePayloads.messageType(frame.payloadUtf8) == "RECEIVER_STATUS"
+                    val frame = nextFrame(events, connection, requestId)
+                    found = isReply(frame, receiverId, ChromePayloads.NS_RECEIVER) &&
+                        ChromePayloads.messageType(frame.payloadUtf8) == "RECEIVER_STATUS" &&
+                        ChromePayloads.requestId(frame.payloadUtf8) == statusRequestId
                 }
                 found
             } finally {
                 connection.close()
-                frames.close()
+                events.close()
             }
         }
     } catch (_: TimeoutCancellationException) {
@@ -57,23 +66,29 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
     }
 
     private suspend fun launchInternal(device: ChromeDevice, url: String, title: String): String {
-        val frames = Channel<ByteArray>(Channel.UNLIMITED)
-        var connection: CastWireConnection? = null
+        val events = Channel<Incoming>(Channel.UNLIMITED)
+        val connection = open(
+            device.host,
+            device.port,
+            onFrame = { events.trySend(Incoming.Frame(it)) },
+            onError = { events.trySend(Incoming.Error(it)) },
+        )
         try {
-            connection = open(device.host, device.port) { frames.trySend(it) }
             var requestId = 1
             send(connection, receiverId, ChromePayloads.NS_CONNECTION, ChromePayloads.connect(requestId++))
+            val launchRequestId = requestId++
             send(
                 connection,
                 receiverId,
                 ChromePayloads.NS_RECEIVER,
-                ChromePayloads.launch(ChromePayloads.DEFAULT_MEDIA_APP_ID, requestId++),
+                ChromePayloads.launch(ChromePayloads.DEFAULT_MEDIA_APP_ID, launchRequestId),
             )
 
             var transportId: String? = null
             while (transportId == null) {
-                val frame = nextFrame(frames, connection, requestId)
-                if (frame.namespace != ChromePayloads.NS_RECEIVER) continue
+                val frame = nextFrame(events, connection, requestId)
+                if (!isReply(frame, receiverId, ChromePayloads.NS_RECEIVER)) continue
+                if (ChromePayloads.requestId(frame.payloadUtf8) != launchRequestId) continue
                 when (ChromePayloads.messageType(frame.payloadUtf8)) {
                     "LAUNCH_ERROR" -> {
                         val reason = ChromePayloads.errorReason(frame.payloadUtf8) ?: "unknown error"
@@ -83,27 +98,30 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
                 }
             }
 
+            val mediaTransportId = transportId
             send(
                 connection,
-                transportId,
+                mediaTransportId,
                 ChromePayloads.NS_CONNECTION,
                 ChromePayloads.connect(requestId++),
             )
+            val loadRequestId = requestId++
             send(
                 connection,
-                transportId,
+                mediaTransportId,
                 ChromePayloads.NS_MEDIA,
                 ChromePayloads.load(
                     url = url,
                     title = title,
                     contentType = ChromePayloads.contentTypeFor(url),
-                    requestId = requestId++,
+                    requestId = loadRequestId,
                 ),
             )
 
             while (true) {
-                val frame = nextFrame(frames, connection, requestId)
-                if (frame.namespace != ChromePayloads.NS_MEDIA) continue
+                val frame = nextFrame(events, connection, requestId)
+                if (!isReply(frame, mediaTransportId, ChromePayloads.NS_MEDIA)) continue
+                if (ChromePayloads.requestId(frame.payloadUtf8) != loadRequestId) continue
                 when (ChromePayloads.messageType(frame.payloadUtf8)) {
                     "LOAD_FAILED" -> return "Chromecast load failed"
                     "MEDIA_STATUS" -> {
@@ -114,8 +132,8 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
                 }
             }
         } finally {
-            connection?.close()
-            frames.close()
+            connection.close()
+            events.close()
         }
     }
 
@@ -123,41 +141,58 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
         host: String,
         port: Int,
         onFrame: (ByteArray) -> Unit,
+        onError: (String) -> Unit,
     ): CastWireConnection = suspendCancellableCoroutine { continuation ->
-        bridge.open(host, port, onFrame) { connection, errorMsg ->
+        bridge.open(host, port, onFrame, { errorMsg ->
+            if (continuation.isActive) {
+                continuation.resumeWithException(ChromecastTransportException(errorMsg))
+            } else {
+                onError(errorMsg)
+            }
+        }) { connection, errorMsg ->
             if (!continuation.isActive) {
                 connection?.close()
             } else if (connection != null) {
                 continuation.resume(connection)
             } else {
                 continuation.resumeWithException(
-                    IllegalStateException(errorMsg ?: "Chromecast connection failed"),
+                    ChromecastTransportException(errorMsg ?: "Chromecast connection failed"),
                 )
             }
         }
     }
 
     private suspend fun nextFrame(
-        frames: Channel<ByteArray>,
+        events: Channel<Incoming>,
         connection: CastWireConnection,
         requestId: Int,
     ): CastFrame {
         while (true) {
-            val decoded = CastWire.decode(frames.receive()) ?: continue
-            if (decoded.namespace == ChromePayloads.NS_HEARTBEAT &&
-                ChromePayloads.messageType(decoded.payloadUtf8) == "PING"
-            ) {
-                send(
-                    connection,
-                    decoded.sourceId,
-                    ChromePayloads.NS_HEARTBEAT,
-                    ChromePayloads.pong(requestId),
-                )
-                continue
+            when (val incoming = events.receive()) {
+                is Incoming.Error -> throw ChromecastTransportException(incoming.message)
+                is Incoming.Frame -> {
+                    val decoded = CastWire.decode(incoming.bytes) ?: continue
+                    if (decoded.namespace == ChromePayloads.NS_HEARTBEAT &&
+                        ChromePayloads.messageType(decoded.payloadUtf8) == "PING"
+                    ) {
+                        send(
+                            connection,
+                            decoded.sourceId,
+                            ChromePayloads.NS_HEARTBEAT,
+                            ChromePayloads.pong(requestId),
+                        )
+                        continue
+                    }
+                    return decoded
+                }
             }
-            return decoded
         }
     }
+
+    private fun isReply(frame: CastFrame, expectedSourceId: String, expectedNamespace: String): Boolean =
+        frame.sourceId == expectedSourceId &&
+            frame.destinationId == senderId &&
+            frame.namespace == expectedNamespace
 
     private fun send(
         connection: CastWireConnection,
@@ -167,4 +202,11 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
     ) {
         connection.send(CastWire.encode(CastFrame(senderId, destinationId, namespace, payload)))
     }
+
+    private sealed interface Incoming {
+        data class Frame(val bytes: ByteArray) : Incoming
+        data class Error(val message: String) : Incoming
+    }
+
+    private class ChromecastTransportException(message: String) : Exception(message)
 }

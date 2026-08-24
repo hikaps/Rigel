@@ -5,7 +5,15 @@ import ComposeApp
 /// Pure CASTV2 TCP framing helper. The protobuf envelope is encoded/decoded in Kotlin;
 /// this layer only handles the 4-byte big-endian length prefix required by the socket.
 enum ChromecastFraming {
-    static func splitFrames(_ data: Data) -> (frames: [Data], remainder: Data) {
+    static let maxFrameLength = 16 * 1024 * 1024
+
+    struct SplitResult {
+        let frames: [Data]
+        let remainder: Data
+        let oversized: Bool
+    }
+
+    static func splitFrames(_ data: Data) -> SplitResult {
         var frames: [Data] = []
         var offset = 0
         while data.count - offset >= 4 {
@@ -13,32 +21,45 @@ enum ChromecastFraming {
                 (UInt32(data[offset + 1]) << 16) |
                 (UInt32(data[offset + 2]) << 8) |
                 UInt32(data[offset + 3])
+            guard length <= UInt32(maxFrameLength) else {
+                return SplitResult(frames: frames, remainder: Data(), oversized: true)
+            }
             let bodyStart = offset + 4
             let bodyEnd = bodyStart + Int(length)
             guard bodyEnd <= data.count else { break }
             frames.append(data.subdata(in: bodyStart..<bodyEnd))
             offset = bodyEnd
         }
-        return (frames, data.subdata(in: offset..<data.count))
+        return SplitResult(
+            frames: frames,
+            remainder: data.subdata(in: offset..<data.count),
+            oversized: false,
+        )
     }
 }
 
 final class RigelChromecastBridge: NSObject, ChromecastBridge {
     private var activeDiscovery: ChromecastDiscovery?
+    private var activeDiscoveryID: UUID?
     private var activeConnections: [CastTLSConnection] = []
     func discover(timeoutMs: Int32, onResult: @escaping ([ChromeDevice]) -> Void) {
+        activeDiscovery?.cancel()
+        let discoveryID = UUID()
         let discovery = ChromecastDiscovery(timeoutMs: Int(timeoutMs)) { [weak self] devices in
-            self?.activeDiscovery = nil
+            guard let self, self.activeDiscoveryID == discoveryID else { return }
+            self.activeDiscovery = nil
+            self.activeDiscoveryID = nil
             onResult(devices)
         }
+        activeDiscoveryID = discoveryID
         activeDiscovery = discovery
         discovery.start()
     }
-
     func open(
         host: String,
         port: Int32,
         onFrame: @escaping (KotlinByteArray) -> Void,
+        onError: @escaping (String) -> Void,
         onOpen: @escaping (CastWireConnection?, String?) -> Void,
     ) {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(clamping: Int(port))) else {
@@ -49,10 +70,13 @@ final class RigelChromecastBridge: NSObject, ChromecastBridge {
             host: host,
             port: nwPort,
             onFrame: onFrame,
+            onError: onError,
             onOpen: onOpen,
         )
         connection.onClosed = { [weak self] closed in
-            self?.activeConnections.removeAll { $0 === closed }
+            DispatchQueue.main.async {
+                self?.activeConnections.removeAll { $0 === closed }
+            }
         }
         activeConnections.append(connection)
         connection.start()
@@ -90,7 +114,13 @@ private final class ChromecastDiscovery {
             guard let self else { return }
             for result in results {
                 guard case let .service(name, _, _, _) = result.endpoint else { continue }
-                self.resolve(result.endpoint, id: name, name: name)
+                var id = name
+                var friendlyName = name
+                if case let .bonjour(txtRecord) = result.metadata {
+                    id = txtRecord["id"] ?? name
+                    friendlyName = txtRecord["fn"] ?? name
+                }
+                self.resolve(result.endpoint, id: id, name: friendlyName)
             }
         }
         browser.start(queue: queue)
@@ -98,6 +128,15 @@ private final class ChromecastDiscovery {
             self?.finish()
         }
     }
+    func cancel() {
+        guard !finished else { return }
+        finished = true
+        browser?.cancel()
+        browser = nil
+        resolvers.forEach { $0.cancel() }
+        resolvers.removeAll()
+    }
+
 
     private func resolve(_ endpoint: NWEndpoint, id: String, name: String) {
         guard !seen.contains(id) else { return }
@@ -144,6 +183,7 @@ private final class CastTLSConnection: NSObject, CastWireConnection {
     private let host: String
     private let port: NWEndpoint.Port
     private let onFrame: (KotlinByteArray) -> Void
+    private let onError: (String) -> Void
     private let onOpen: (CastWireConnection?, String?) -> Void
     var onClosed: ((CastTLSConnection) -> Void)?
     private let queue = DispatchQueue(label: "rigel-chromecast-connection")
@@ -156,11 +196,13 @@ private final class CastTLSConnection: NSObject, CastWireConnection {
         host: String,
         port: NWEndpoint.Port,
         onFrame: @escaping (KotlinByteArray) -> Void,
+        onError: @escaping (String) -> Void,
         onOpen: @escaping (CastWireConnection?, String?) -> Void,
     ) {
         self.host = host
         self.port = port
         self.onFrame = onFrame
+        self.onError = onError
         self.onOpen = onOpen
     }
 
@@ -184,6 +226,8 @@ private final class CastTLSConnection: NSObject, CastWireConnection {
                 if !self.openCallbackSent {
                     self.openCallbackSent = true
                     DispatchQueue.main.async { [self] in self.onOpen(nil, error.localizedDescription) }
+                } else {
+                    DispatchQueue.main.async { [onError] in onError(error.localizedDescription) }
                 }
                 self.close()
             case .cancelled:
@@ -227,6 +271,13 @@ private final class CastTLSConnection: NSObject, CastWireConnection {
             if let data, !data.isEmpty {
                 self.received.append(data)
                 let split = ChromecastFraming.splitFrames(self.received)
+                if split.oversized {
+                    DispatchQueue.main.async { [onError] in
+                        onError("Chromecast frame exceeds \(ChromecastFraming.maxFrameLength) bytes")
+                    }
+                    self.close()
+                    return
+                }
                 self.received = split.remainder
                 for frame in split.frames {
                     let bytes = kotlinByteArray(from: frame)

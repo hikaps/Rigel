@@ -45,6 +45,9 @@ object ChromePayloads {
     fun extractTransportId(receiverStatusJson: String): String? =
         Regex("\\\"transportId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"")
             .find(receiverStatusJson)?.groupValues?.getOrNull(1)
+    fun requestId(payload: String): Int? =
+        Regex("\\\"requestId\\\"\\s*:\\s*(\\d+)")
+            .find(payload)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
     fun messageType(payload: String): String? = stringField(payload, "type")
 

@@ -21,6 +21,7 @@ interface ChromecastBridge {
         host: String,
         port: Int,
         onFrame: (ByteArray) -> Unit,
+        onError: (String) -> Unit,
         onOpen: (CastWireConnection?, errorMsg: String?) -> Unit,
     )
 }

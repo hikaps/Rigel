@@ -97,6 +97,7 @@ class ChromeRendererTest {
             host: String,
             port: Int,
             onFrame: (ByteArray) -> Unit,
+            onError: (String) -> Unit,
             onOpen: (CastWireConnection?, String?) -> Unit,
         ) {
             openHost = host
@@ -108,33 +109,58 @@ class ChromeRendererTest {
                         val decoded = CastWire.decode(frame) ?: return
                         sent += decoded
                         if (!respond) return
+                        val responseRequestId = ChromePayloads.requestId(decoded.payloadUtf8) ?: 0
                         when (ChromePayloads.messageType(decoded.payloadUtf8)) {
                             "LAUNCH" -> {
                                 if (launchError) {
                                     emit(
-                                        decoded.destinationId,
-                                        ChromePayloads.NS_RECEIVER,
-                                        "{\"type\":\"LAUNCH_ERROR\",\"reason\":\"NOT_FOUND\"}",
+                                        source = "receiver-0",
+                                        destination = "sender-rigel",
+                                        namespace = ChromePayloads.NS_RECEIVER,
+                                        payload = "{\"type\":\"LAUNCH_ERROR\",\"reason\":\"NOT_FOUND\",\"requestId\":$responseRequestId}",
                                     )
                                 } else {
-                                    emit(decoded.destinationId, ChromePayloads.NS_HEARTBEAT, "{\"type\":\"PING\"}")
                                     emit(
-                                        decoded.destinationId,
-                                        ChromePayloads.NS_RECEIVER,
-                                        "{\"type\":\"RECEIVER_STATUS\",\"status\":{" +
-                                            "\"applications\":[{\"transportId\":\"transport-1\"}]}}",
+                                        source = "receiver-0",
+                                        destination = "sender-rigel",
+                                        namespace = ChromePayloads.NS_HEARTBEAT,
+                                        payload = "{\"type\":\"PING\"}",
+                                    )
+                                    // Stale receiver status must not select this wrong transport.
+                                    emit(
+                                        source = "receiver-0",
+                                        destination = "sender-rigel",
+                                        namespace = ChromePayloads.NS_RECEIVER,
+                                        payload = "{\"type\":\"RECEIVER_STATUS\",\"requestId\":1,\"status\":{\"applications\":[{\"transportId\":\"wrong\"}]} }",
+                                    )
+                                    emit(
+                                        source = "receiver-0",
+                                        destination = "sender-rigel",
+                                        namespace = ChromePayloads.NS_RECEIVER,
+                                        payload = "{\"type\":\"RECEIVER_STATUS\",\"requestId\":$responseRequestId,\"status\":{\"applications\":[{\"transportId\":\"transport-1\"}]}}",
                                     )
                                 }
                             }
-                            "LOAD" -> emit(
-                                decoded.destinationId,
-                                ChromePayloads.NS_MEDIA,
-                                "{\"type\":\"MEDIA_STATUS\",\"status\":[{\"playerState\":\"BUFFERING\"}]}",
-                            )
+                            "LOAD" -> {
+                                // A stale media update must not complete this request.
+                                emit(
+                                    source = "transport-1",
+                                    destination = "sender-rigel",
+                                    namespace = ChromePayloads.NS_MEDIA,
+                                    payload = "{\"type\":\"MEDIA_STATUS\",\"requestId\":1,\"status\":[{\"playerState\":\"PLAYING\"}]}",
+                                )
+                                emit(
+                                    source = "transport-1",
+                                    destination = "sender-rigel",
+                                    namespace = ChromePayloads.NS_MEDIA,
+                                    payload = "{\"type\":\"MEDIA_STATUS\",\"requestId\":$responseRequestId,\"status\":[{\"playerState\":\"BUFFERING\"}]}",
+                                )
+                            }
                             "GET_STATUS" -> if (probeResponse) emit(
-                                decoded.destinationId,
-                                ChromePayloads.NS_RECEIVER,
-                                "{\"type\":\"RECEIVER_STATUS\",\"status\":{}}",
+                                source = "receiver-0",
+                                destination = "sender-rigel",
+                                namespace = ChromePayloads.NS_RECEIVER,
+                                payload = "{\"type\":\"RECEIVER_STATUS\",\"requestId\":$responseRequestId,\"status\":{}}",
                             )
                         }
                     }
@@ -145,8 +171,8 @@ class ChromeRendererTest {
             )
         }
 
-        private fun emit(destination: String, namespace: String, payload: String) {
-            onFrame?.invoke(CastWire.encode(CastFrame("receiver-0", destination, namespace, payload)))
+        private fun emit(source: String, destination: String, namespace: String, payload: String) {
+            onFrame?.invoke(CastWire.encode(CastFrame(source, destination, namespace, payload)))
         }
     }
 }

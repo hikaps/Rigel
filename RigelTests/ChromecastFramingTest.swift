@@ -36,6 +36,13 @@ final class ChromecastFramingTest: XCTestCase {
         XCTAssertEqual(result.frames, [Data()])
         XCTAssertTrue(result.remainder.isEmpty)
     }
+    func testRejectsOversizedFrame() {
+        let result = ChromecastFraming.splitFrames(Data([0xff, 0xff, 0xff, 0xff]))
+        XCTAssertTrue(result.oversized)
+        XCTAssertTrue(result.frames.isEmpty)
+        XCTAssertTrue(result.remainder.isEmpty)
+    }
+
 
     private func packet(_ body: Data) -> Data {
         var length = UInt32(body.count).bigEndian
