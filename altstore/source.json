@@ -29,11 +29,11 @@
       },
       "versions": [
         {
-          "version": "1.0.13",
-          "date": "2026-08-24T18:39:53Z",
+          "version": "1.0.14",
+          "date": "2026-08-24T19:03:02Z",
           "downloadURL": "https://github.com/hikaps/Rigel/releases/download/beta/Rigel.ipa",
-          "localizedDescription": "Rolling beta build 13. This IPA is development-signed and may require re-signing for your device.",
-          "size": 9867634,
+          "localizedDescription": "Rolling beta build 14. This IPA is development-signed and may require re-signing for your device.",
+          "size": 9867639,
           "minOSVersion": "16.0"
         }
       ]
