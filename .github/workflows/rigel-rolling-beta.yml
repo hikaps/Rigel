@@ -188,11 +188,13 @@ jobs:
         run: |
           set -euo pipefail
           SHA="${{ github.sha }}"
-          IPA="build/Rigel.ipa"
-          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/beta/Rigel.ipa"
+          ASSET_NAME="Rigel-${SHA:0:7}.ipa"
+          # A beta tag is deliberately replaced for every develop build. Give
+          # its IPA an immutable URL so AltStore cannot receive a stale CDN copy.
+          IPA="build/$ASSET_NAME"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/beta/$ASSET_NAME"
           SOURCE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/altstore/source.json"
           ICON_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
-
           mv build/export/Rigel.ipa "$IPA"
           python3 scripts/generate-altstore-source.py \
             --ipa "$IPA" \
