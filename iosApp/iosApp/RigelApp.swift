@@ -1,8 +1,23 @@
 import SwiftUI
+import UIKit
 import ComposeApp
+
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// App-wide orientation gate. `.allButUpsideDown` matches the Info.plist
+    /// mask; the player temporarily narrows it to landscape.
+    static var orientationLock: UIInterfaceOrientationMask = .allButUpsideDown
+
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        Self.orientationLock
+    }
+}
 
 @main
 struct RigelApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var player: PlayerModel
 
     init() {

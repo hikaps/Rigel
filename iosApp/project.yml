@@ -69,6 +69,7 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: true
         NSLocalNetworkUsageDescription: "Rigel discovers TVs on your local network (DLNA, Roku)."
         AVInitialRouteSharingPolicy: LongFormVideo
         UIBackgroundModes:

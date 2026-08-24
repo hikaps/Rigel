@@ -101,10 +101,11 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertFalse(tracks?.isHidden == true)
 
         controller.hideControls()
-        XCTAssertTrue(topBar?.isHidden == true)
-        XCTAssertTrue(bottomBar?.isHidden == true)
+        XCTAssertTrue(topBar?.alpha == 0)
+        XCTAssertTrue(bottomBar?.alpha == 0)
         controller.showControls()
         XCTAssertFalse(topBar?.isHidden == true)
+        XCTAssertTrue(topBar?.alpha == 1)
         XCTAssertFalse(bottomBar?.isHidden == true)
     }
 

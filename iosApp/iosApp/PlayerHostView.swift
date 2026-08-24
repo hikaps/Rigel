@@ -1,5 +1,27 @@
 import SwiftUI
+import UIKit
 import ComposeApp
+
+/// Rotates the app while the player cover is up. The window-scene geometry
+/// request only succeeds when the app-level mask (AppDelegate) allows it.
+enum PlayerOrientation {
+    static func forceLandscape() {
+        AppDelegate.orientationLock = .landscape
+        request(.landscapeRight)
+    }
+
+    static func restore() {
+        AppDelegate.orientationLock = .allButUpsideDown
+        request(.portrait)
+    }
+
+    private static func request(_ orientation: UIInterfaceOrientationMask) {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientation))
+    }
+}
 
 /// Full-screen player host. Renders the native AVPlayerViewController when
 /// playing; shows probing/proxy/error states while Kotlin prepares the stream.
@@ -18,7 +40,11 @@ struct PlayerHostView: View {
             content
         }
         .statusBarHidden()
+        .onAppear {
+            PlayerOrientation.forceLandscape()
+        }
         .onDisappear {
+            PlayerOrientation.restore()
             // Belt-and-braces: if the cover is dismissed by any path other than
             // the back/close buttons, make sure the native player stops.
             if player.phase != .idle {
@@ -171,12 +197,27 @@ struct PlayerHostView: View {
         VStack(spacing: 20, content: content)
             .padding(28)
             .frame(maxWidth: 420)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .strokeBorder(.white.opacity(0.14), lineWidth: 1)
-            }
+            .modifier(CardChrome())
             .padding(.horizontal, 24)
+    }
+    /// Liquid Glass card on iOS 26; ultra-thin material with a hairline border
+    /// before that.
+    private struct CardChrome: ViewModifier {
+        func body(content: Content) -> some View {
+            if #available(iOS 26.0, *) {
+                content.glassEffect(
+                    .regular,
+                    in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+                )
+            } else {
+                content
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .strokeBorder(.white.opacity(0.14), lineWidth: 1)
+                    }
+            }
+        }
     }
 }
 
