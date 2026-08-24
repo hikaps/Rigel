@@ -1,8 +1,8 @@
 name: Rigel Rolling Beta Release
 
 # Rolling beta: every merge to develop archives the app for device, exports a
-# development-signed IPA, and publishes it to a single "beta" GitHub release
-# that is replaced on each run (previous beta + tag are deleted first).
+# development-signed IPA, publishes it to a single "beta" GitHub release, and
+# refreshes the AltStore/SideStore source manifest at altstore/source.json.
 #
 # Free personal-team signing (no Apple Developer Program enrollment):
 #   - Export the Xcode-managed "Apple Development" cert as a p12 and the two
@@ -37,6 +37,7 @@ permissions:
 
 jobs:
   build-beta-ipa:
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - name: Check signing configuration
@@ -137,7 +138,9 @@ jobs:
       - name: Archive app for device
         if: steps.signing.outputs.configured == 'true'
         env:
+          CURRENT_PROJECT_VERSION: "${{ github.run_number }}"
           IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          MARKETING_VERSION: "1.0.${{ github.run_number }}"
         run: |
           xcodebuild archive \
             -project iosApp/Rigel.xcodeproj \
@@ -146,7 +149,9 @@ jobs:
             -archivePath build/Rigel.xcarchive \
             -destination "generic/platform=iOS" \
             -allowProvisioningUpdates \
-            DEVELOPMENT_TEAM="$IOS_TEAM_ID"
+            DEVELOPMENT_TEAM="$IOS_TEAM_ID" \
+            MARKETING_VERSION="$MARKETING_VERSION" \
+            CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION"
 
       - name: Export IPA (development)
         if: steps.signing.outputs.configured == 'true'
@@ -176,21 +181,44 @@ jobs:
             -exportPath build/export \
             -exportOptionsPlist build/export-options.plist
 
-      - name: Publish rolling beta release
+      - name: Publish rolling beta release and source
         if: steps.signing.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           SHA="${{ github.sha }}"
-          NAMED="build/Rigel-beta-${SHA:0:7}.ipa"
-          mv build/export/Rigel.ipa "$NAMED"
+          IPA="build/Rigel.ipa"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/beta/Rigel.ipa"
+          SOURCE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/altstore/source.json"
+          ICON_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
+
+          mv build/export/Rigel.ipa "$IPA"
+          python3 scripts/generate-altstore-source.py \
+            --ipa "$IPA" \
+            --output altstore/source.json \
+            --download-url "$DOWNLOAD_URL" \
+            --source-url "$SOURCE_URL" \
+            --icon-url "$ICON_URL" \
+            --release-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
           gh release delete beta --yes --cleanup-tag || true
-          gh release create beta "$NAMED" \
+          gh release create beta "$IPA" \
             --target "$SHA" \
             --title "Rigel Beta ($(date -u +%Y-%m-%d))" \
-            --notes "Rolling development beta from develop @ ${SHA:0:7}. Installs only on devices registered in the development profiles; expires ~7 days after signing." \
+            --notes "Rolling development beta from develop @ ${SHA:0:7}. The AltStore/SideStore source is refreshed at ${SOURCE_URL}. Installs only on devices registered in the development profiles or after re-signing; profiles expire about 7 days after signing." \
             --latest=false
+          gh release upload beta altstore/source.json --clobber
+
+          if [[ "$GITHUB_REF_NAME" == "develop" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add altstore/source.json
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: update AltStore source [skip ci]"
+              git push origin "HEAD:${GITHUB_REF_NAME}"
+            fi
+          fi
 
       - name: Restore keychain search list
         if: always()
