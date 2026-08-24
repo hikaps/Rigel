@@ -29,10 +29,10 @@
       },
       "versions": [
         {
-          "version": "1.0.15",
-          "date": "2026-08-24T20:32:19Z",
-          "downloadURL": "https://github.com/hikaps/Rigel/releases/download/beta/Rigel.ipa",
-          "localizedDescription": "Rolling beta build 15. This IPA is development-signed and may require re-signing for your device.",
+          "version": "1.0.16",
+          "date": "2026-08-24T20:54:38Z",
+          "downloadURL": "https://github.com/hikaps/Rigel/releases/download/beta/Rigel-ac5730c.ipa",
+          "localizedDescription": "Rolling beta build 16. This IPA is development-signed and may require re-signing for your device.",
           "size": 9867631,
           "minOSVersion": "16.0"
         }
