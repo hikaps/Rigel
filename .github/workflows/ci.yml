@@ -15,9 +15,9 @@ permissions:
   contents: read
 
 jobs:
-  # Public PR signal: JVM tests and coverage run on GitHub-hosted Linux.
-  # iOS simulator/FFmpeg jobs remain on the trusted self-hosted Mac after
-  # integration into develop (or when explicitly dispatched).
+  # Public PR signal: all tests run on disposable GitHub-hosted runners.
+  # Device signing and rolling-beta release remain on the trusted self-hosted Mac.
+  # The FFmpeg simulator build uses an Actions cache because hosted VMs are ephemeral.
   unit-tests-jvm:
     runs-on: ubuntu-latest
     steps:
@@ -41,9 +41,7 @@ jobs:
   # deterministically breaks the Kotlin/Native build (config-phase failure, seen
   # twice). Fresh toolchain download costs ~2 min; gradle caches cover the rest.
   test-ios-kotlin:
-    # Never execute pull-request code on the self-hosted Mac.
-    if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -59,9 +57,7 @@ jobs:
   # Gating: the SwiftUI pivot dropped Compose, so the former link failure
   # (private UIKit symbol UIViewLayoutRegion, Compose 1.11.1) cannot recur.
   test-ios-swift:
-    # Never execute pull-request code on the self-hosted Mac.
-    if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -77,26 +73,21 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew list --versions ffmpeg >/dev/null 2>&1 || brew install ffmpeg
-      - name: Restore or build FFmpeg simulator libs
+      - id: xcode-version
+        name: Identify Xcode for FFmpeg cache
+        run: echo "version=$(xcodebuild -version | awk 'NR == 1 { print $2 }')" >> "$GITHUB_OUTPUT"
+      - id: ffmpeg-cache
+        name: Restore FFmpeg simulator libs
+        uses: actions/cache@v4
+        with:
+          path: iosApp/vendor/ffmpeg
+          key: ffmpeg-sim-${{ runner.os }}-${{ runner.arch }}-xcode-${{ steps.xcode-version.outputs.version }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+      - name: Build FFmpeg simulator libs
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: |
-          # FFmpeg is a vendored dependency, not a test subject: build once into
-          # a persistent runner store, then copy it in. checkout cleans the
-          # gitignored vendor dir every run, so rebuilding unconditionally was
-          # pure waste (~5 min/run).
-          set -euo pipefail
-          if [ -d "$HOME/rigel-vendor/ffmpeg-sim/lib" ]; then
-            mkdir -p iosApp/vendor/ffmpeg
-            cp -R "$HOME/rigel-vendor/ffmpeg-sim/." iosApp/vendor/ffmpeg/
-            echo "restored FFmpeg simulator libs from persistent store"
-          else
-            mkdir -p "$HOME/rigel-vendor"
-            # Pin parallelism (parallel make races on generated headers) and
-            # retry once — the race is flaky, not deterministic.
-            JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh \
-              || JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh
-            cp -R iosApp/vendor/ffmpeg "$HOME/rigel-vendor/ffmpeg-sim"
-            echo "built and stored FFmpeg simulator libs"
-          fi
+          # Pin parallelism (parallel make races on generated headers) and retry once.
+          JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh \
+            || JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh
       - name: Generate media fixtures
         run: ./scripts/gen-fixtures.sh
       - name: Run Swift unit tests
