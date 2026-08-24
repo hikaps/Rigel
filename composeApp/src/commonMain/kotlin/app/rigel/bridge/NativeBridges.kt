@@ -20,6 +20,9 @@ data class ProbeResult(
     val subtitleCodecs: List<String>,
     val durationMs: Long?,
     val isLive: Boolean,
+    val pixFmt: String? = null,
+    val width: Int = 0,
+    val height: Int = 0,
 )
 
 interface DiscoveryBridge {
@@ -37,6 +40,7 @@ interface TranscodeBridge {
         headers: Map<String, String>,
         mode: String,
         onReady: (relativePlaylistPath: String?, errorMsg: String?) -> Unit,
+        onError: (errorMsg: String) -> Unit,
     )
 
     fun stopHlsSession(sessionId: String)

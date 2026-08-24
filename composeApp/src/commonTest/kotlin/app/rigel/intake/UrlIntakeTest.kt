@@ -81,4 +81,55 @@ class UrlIntakeTest {
         assertEquals("a b&c", UrlIntake.percentDecode("a+b%26c"))
         assertEquals("héllo", UrlIntake.percentDecode("h%C3%A9llo"))
     }
+
+    @Test
+    fun rigelSchemeIsCaseInsensitive() {
+        val raw = "RIGEL://x-callback-url/play?url=http%3A%2F%2Fa%2Fv.mp4"
+        val request = UrlIntake.parse(raw)
+        assertNotNull(request)
+        assertEquals("http://a/v.mp4", request.sourceUrl)
+    }
+
+    @Test
+    fun parseQueryHandlesBareKeysAndRepeats() {
+        val parsed = UrlIntake.parseQuery("a=1&a=2&b&c=")
+        assertEquals(listOf("1", "2"), parsed["a"])
+        assertEquals(listOf(""), parsed["b"])
+        assertEquals(listOf(""), parsed["c"])
+    }
+
+    @Test
+    fun parseQueryIgnoresTrailingAmpersand() {
+        assertEquals(emptyMap(), UrlIntake.parseQuery("&"))
+    }
+
+    @Test
+    fun percentDecodePassesThroughInvalidHex() {
+        assertEquals("a%zzb", UrlIntake.percentDecode("a%zzb"))
+        assertEquals("%", UrlIntake.percentDecode("%"))
+    }
+
+    @Test
+    fun nonHttpSubtitlesAreFiltered() {
+        val raw = "rigel://x-callback-url/play?url=http%3A%2F%2Fa%2Fv.mp4&sub=ftp%3A%2F%2Fx%2Fs.vtt"
+        val request = UrlIntake.parse(raw)
+        assertNotNull(request)
+        assertEquals(emptyList(), request.subtitleUrls)
+    }
+
+    @Test
+    fun nonHttpSuccessCallbackRejected() {
+        val raw = "rigel://x-callback-url/play?url=http%3A%2F%2Fa%2Fv.mp4&x-success=ftp%3A%2F%2Fx%2Fdone"
+        val request = UrlIntake.parse(raw)
+        assertNotNull(request)
+        assertNull(request.successCallbackUrl)
+    }
+
+    @Test
+    fun blankXSourceIsNull() {
+        val raw = "rigel://x-callback-url/play?url=http%3A%2F%2Fa%2Fv.mp4&x-source=%20%20"
+        val request = UrlIntake.parse(raw)
+        assertNotNull(request)
+        assertNull(request.xSource)
+    }
 }

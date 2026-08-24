@@ -1,0 +1,120 @@
+name: Rigel Rolling Beta Release
+
+# Rolling beta: every merge to develop archives an ad-hoc IPA for device,
+# publishes it to a single immutable-named asset in the rolling "beta" release,
+# and refreshes the AltStore/SideStore source manifest at altstore/source.json.
+# AltStore/SideStore re-signs the IPA with the installer's Apple ID.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: beta-ipa
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-beta-ipa:
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install JDK 21 (Xcode prebuild hardcodes brew prefix)
+        run: brew install openjdk@21
+
+      - id: ffmpeg-cache
+        name: Restore FFmpeg device libs
+        uses: actions/cache@v4
+        with:
+          path: iosApp/vendor/ffmpeg-device
+          key: ffmpeg-device-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+          restore-keys: |
+            ffmpeg-device-${{ runner.arch }}-
+            ffmpeg-device-
+
+      - name: Build FFmpeg device libs
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          SDK=iphoneos JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-dev" ./scripts/build-ffmpeg.sh \
+            || SDK=iphoneos JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-dev" ./scripts/build-ffmpeg.sh
+
+      - name: Archive unsigned beta app
+        env:
+          MARKETING_VERSION: "1.0.${{ github.run_number }}"
+          CURRENT_PROJECT_VERSION: "${{ github.run_number }}"
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project iosApp/Rigel.xcodeproj \
+            -scheme Rigel \
+            -configuration Release \
+            -archivePath build/Rigel.xcarchive \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            MARKETING_VERSION="$MARKETING_VERSION" \
+            CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION" \
+            BUNDLE_SUFFIX=".beta" \
+            APP_DISPLAY_NAME="Rigel Beta"
+
+      - name: Package ad-hoc IPA
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ASSET_NAME="Rigel-beta-${SHA:0:7}.ipa"
+          APP="build/Rigel.xcarchive/Products/Applications/Rigel.app"
+          codesign --force --deep --sign - "$APP"
+          mkdir -p build/payload/Payload
+          cp -R "$APP" build/payload/Payload/
+          (cd build/payload && zip -qry "$GITHUB_WORKSPACE/build/$ASSET_NAME" Payload)
+
+      - name: Publish rolling beta release and source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA="${{ github.sha }}"
+          ASSET_NAME="Rigel-beta-${SHA:0:7}.ipa"
+          IPA="build/$ASSET_NAME"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/beta/$ASSET_NAME"
+          SOURCE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/altstore/source.json"
+          ICON_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
+
+          python3 scripts/generate-altstore-source.py \
+            --channel beta \
+            --ipa "$IPA" \
+            --output altstore/source.json \
+            --download-url "$DOWNLOAD_URL" \
+            --source-url "$SOURCE_URL" \
+            --icon-url "$ICON_URL" \
+            --release-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          gh release delete beta --yes --cleanup-tag || true
+          gh release create beta "$IPA" \
+            --target "$SHA" \
+            --title "Rigel Beta ($(date -u +%Y-%m-%d))" \
+            --notes "Rolling ad-hoc beta from develop @ ${SHA:0:7}. AltStore/SideStore re-signs the IPA with the installer's Apple ID. The source is refreshed at ${SOURCE_URL}." \
+            --latest=false
+          gh release upload beta altstore/source.json --clobber
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add altstore/source.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update AltStore source [skip ci]"
+            git push origin HEAD:develop
+          fi

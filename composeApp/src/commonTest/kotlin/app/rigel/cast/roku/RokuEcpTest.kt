@@ -48,4 +48,17 @@ class RokuEcpTest {
         assertEquals("Play on Roku", apps["15985"])
         assertEquals("Netflix", apps["2285"])
     }
+
+    @Test
+    fun appsParseEmptyWhenNoApps() {
+        assertEquals(emptyMap(), RokuEcp.parseApps("<apps></apps>"))
+    }
+
+    @Test
+    fun formEncodeKeepsUnreservedAndEncodesUtf8() {
+        assertEquals("abc-_.~", RokuEcp.formEncode("abc-_.~"))
+        assertEquals("a%20b%2Fc", RokuEcp.formEncode("a b/c"))
+        assertEquals("h%C3%A9llo", RokuEcp.formEncode("héllo"))
+        assertEquals("%3A%2F%2F", RokuEcp.formEncode("://"))
+    }
 }

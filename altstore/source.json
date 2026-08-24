@@ -1,0 +1,42 @@
+{
+  "name": "Rigel",
+  "identifier": "com.rigel.player.source",
+  "sourceURL": "https://raw.githubusercontent.com/hikaps/Rigel/develop/altstore/source.json",
+  "apps": [
+    {
+      "name": "Rigel Beta",
+      "bundleIdentifier": "com.rigel.player.beta",
+      "developerName": "Rigel contributors",
+      "subtitle": "Rolling beta builds of Rigel.",
+      "localizedDescription": "Rigel is an iOS media player for HTTP(S) links, local files, HLS, Jellyfin, and formats such as MKV, WebM, AVI, MPEG-TS, and FLV. It can cast to DLNA, Kodi, Roku, and AirPlay devices, and can act as a UPnP renderer.",
+      "iconURL": "https://raw.githubusercontent.com/hikaps/Rigel/develop/iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+      "tintColor": "#243B53",
+      "permissions": [
+        {
+          "type": "network",
+          "usageDescription": "Rigel discovers and connects to media devices on your local network."
+        },
+        {
+          "type": "background-audio",
+          "usageDescription": "Rigel continues audio playback while the app is in the background."
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {
+          "NSLocalNetworkUsageDescription": "Rigel discovers TVs on your local network (DLNA, Roku)."
+        }
+      },
+      "versions": [
+        {
+          "version": "1.0.18",
+          "date": "2026-08-24T21:55:10Z",
+          "downloadURL": "https://github.com/hikaps/Rigel/releases/download/beta/Rigel-beta-88805eb.ipa",
+          "localizedDescription": "Rolling beta build 18. This IPA is ad-hoc signed and will be re-signed by AltStore or SideStore.",
+          "size": 9781440,
+          "minOSVersion": "16.0"
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 package app.rigel.settings
 
 import app.rigel.cast.CastTarget
+import app.rigel.cast.ReceiverRegistry
 import com.russhwolf.settings.Settings
 
 enum class RouteOverride { AUTO, DIRECT, ALWAYS_PROXY }
@@ -42,20 +43,20 @@ class SettingsStore(private val settings: Settings) {
 
     fun addManualDevice(row: String) {
         val current = manualDevices().toMutableList()
-        if (current.none { it.startsWith(row.substringBefore('|')) }) current += row
+        // Dedupe by device location (kind|usn|location|name), not by kind:
+        // two manual devices of the same type (e.g. two Kodi boxes) must both survive.
+        val location = row.split('|').getOrNull(2)
+        if (location != null && current.none { it.split('|').getOrNull(2) == location }) current += row
         settings.putString(devicesKey, current.joinToString("\n"))
     }
 
     fun removeManualDevice(target: CastTarget) {
-        val marker = when (target) {
-            is CastTarget.Dlna -> "dlna|"
-            is CastTarget.Roku -> "roku|"
-            is CastTarget.Kodi -> "kodi|"
-            is CastTarget.JellyfinSessionTarget -> "jellyfin|"
-        }
+        val prefix = ReceiverRegistry.adapterFor(target).removalPrefix(target)
         settings.putString(
             devicesKey,
-            manualDevices().filterNot { it.startsWith(marker) }.joinToString("\n"),
+            manualDevices()
+                .filterNot { it.startsWith(prefix) }
+                .joinToString("\n"),
         )
     }
 }
