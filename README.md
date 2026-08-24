@@ -36,7 +36,11 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 Rigel is not on the App Store or TestFlight. The [rolling beta IPA](https://github.com/hikaps/Rigel/releases/tag/beta) is development-signed: as published, it installs only on devices registered in the developer's profiles and expires about a week after signing.
 
-To install it on another device, re-sign the IPA for that device with a sideloading tool such as AltStore, SideStore, or Sideloadly. A free Apple ID normally requires a refresh about every seven days and is subject to Apple's device and app limits. To build from source instead, see [AGENTS.md](AGENTS.md) for the development setup.
+To receive rolling beta updates through AltStore Classic or SideStore, add the source manifest:
+
+`https://raw.githubusercontent.com/hikaps/Rigel/develop/altstore/source.json`
+
+The manifest is refreshed by the beta workflow after each successfully signed release. To install the IPA on another device, AltStore or SideStore must re-sign it for that device. A free Apple ID normally requires a refresh about every seven days and is subject to Apple's device and app limits. To build from source instead, see [AGENTS.md](AGENTS.md) for the development setup.
 
 ## License
 
