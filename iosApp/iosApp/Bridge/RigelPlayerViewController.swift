@@ -94,25 +94,33 @@ final class RigelPlayerViewController: UIViewController {
             topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
 
-        backButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
-        backButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
-        backButton.tintColor = .white
-        backButton.accessibilityLabel = "Back"
+        topBar.contentView.layoutMargins = UIEdgeInsets(top: 4, left: 12, bottom: 8, right: 12)
+
+        var backConfiguration = UIButton.Configuration.plain()
+        backConfiguration.image = UIImage(systemName: "xmark")
+        backConfiguration.baseForegroundColor = .white
+        backConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10)
+        backButton.configuration = backConfiguration
+        backButton.accessibilityLabel = "Close player"
         backButton.accessibilityHint = "Return to Rigel"
         backButton.addTarget(self, action: #selector(backTapped), for: .touchUpInside)
         backButton.translatesAutoresizingMaskIntoConstraints = false
         topBar.contentView.addSubview(backButton)
 
-        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        titleLabel.font = .preferredFont(forTextStyle: .headline)
+        titleLabel.adjustsFontForContentSizeCategory = true
         titleLabel.textColor = .white
         titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.numberOfLines = 1
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         topBar.contentView.addSubview(titleLabel)
 
-        senderLabel.font = .systemFont(ofSize: 12)
+        senderLabel.font = .preferredFont(forTextStyle: .subheadline)
+        senderLabel.adjustsFontForContentSizeCategory = true
         senderLabel.textColor = .white.withAlphaComponent(0.7)
         senderLabel.lineBreakMode = .byTruncatingTail
+        senderLabel.numberOfLines = 1
         senderLabel.translatesAutoresizingMaskIntoConstraints = false
         topBar.contentView.addSubview(senderLabel)
 
@@ -121,8 +129,11 @@ final class RigelPlayerViewController: UIViewController {
         routePicker.translatesAutoresizingMaskIntoConstraints = false
         topBar.contentView.addSubview(routePicker)
 
-        tracksButton.setImage(UIImage(systemName: "captions.bubble"), for: .normal)
-        tracksButton.tintColor = .white
+        var tracksConfiguration = UIButton.Configuration.plain()
+        tracksConfiguration.image = UIImage(systemName: "captions.bubble")
+        tracksConfiguration.baseForegroundColor = .white
+        tracksConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 8)
+        tracksButton.configuration = tracksConfiguration
         tracksButton.accessibilityLabel = "Audio and subtitles"
         tracksButton.accessibilityHint = "Choose an audio track or subtitle"
         tracksButton.addTarget(self, action: #selector(tracksTapped), for: .touchUpInside)
@@ -130,38 +141,40 @@ final class RigelPlayerViewController: UIViewController {
         topBar.contentView.addSubview(tracksButton)
 
         NSLayoutConstraint.activate([
-            backButton.leadingAnchor.constraint(equalTo: topBar.leadingAnchor, constant: 12),
-            backButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
-            backButton.widthAnchor.constraint(equalToConstant: 40),
-            backButton.heightAnchor.constraint(equalToConstant: 40),
+            backButton.leadingAnchor.constraint(equalTo: topBar.contentView.layoutMarginsGuide.leadingAnchor),
+            backButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            backButton.widthAnchor.constraint(equalToConstant: 44),
+            backButton.heightAnchor.constraint(equalToConstant: 44),
 
-            routePicker.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -12),
+            routePicker.trailingAnchor.constraint(equalTo: topBar.contentView.layoutMarginsGuide.trailingAnchor),
             routePicker.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             routePicker.widthAnchor.constraint(equalToConstant: 44),
             routePicker.heightAnchor.constraint(equalToConstant: 44),
 
-            tracksButton.trailingAnchor.constraint(equalTo: routePicker.leadingAnchor, constant: -2),
+            tracksButton.trailingAnchor.constraint(equalTo: routePicker.leadingAnchor, constant: -4),
             tracksButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            tracksButton.widthAnchor.constraint(equalToConstant: 40),
-            tracksButton.heightAnchor.constraint(equalToConstant: 40),
+            tracksButton.widthAnchor.constraint(equalToConstant: 44),
+            tracksButton.heightAnchor.constraint(equalToConstant: 44),
 
             titleLabel.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 8),
-            titleLabel.trailingAnchor.constraint(equalTo: tracksButton.leadingAnchor, constant: -4),
-            titleLabel.topAnchor.constraint(equalTo: backButton.topAnchor, constant: 1),
+            titleLabel.trailingAnchor.constraint(equalTo: tracksButton.leadingAnchor, constant: -8),
+            titleLabel.topAnchor.constraint(equalTo: backButton.topAnchor, constant: 2),
 
             senderLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
             senderLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
-            senderLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
-
+            senderLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 1),
+            senderLabel.bottomAnchor.constraint(lessThanOrEqualTo: backButton.bottomAnchor),
 
             topBar.bottomAnchor.constraint(equalTo: backButton.bottomAnchor, constant: 12),
         ])
     }
+
     private func setupBottomBar() {
         bottomBar.accessibilityIdentifier = "player.bottomBar"
         bottomBar.translatesAutoresizingMaskIntoConstraints = false
         bottomBar.isHidden = true
         view.addSubview(bottomBar)
+        bottomBar.contentView.layoutMargins = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
 
         progressSlider.minimumValue = 0
         progressSlider.maximumValue = 1
@@ -175,8 +188,26 @@ final class RigelPlayerViewController: UIViewController {
             for: [.touchUpInside, .touchUpOutside, .touchCancel]
         )
         progressSlider.accessibilityIdentifier = "player.progressSlider"
+        progressSlider.accessibilityLabel = "Playback position"
+        progressSlider.accessibilityHint = "Adjust playback position"
         progressSlider.translatesAutoresizingMaskIntoConstraints = false
-        bottomBar.contentView.addSubview(progressSlider)
+
+        for label in [elapsedLabel, durationLabel] {
+            let preferredSize = UIFont.preferredFont(forTextStyle: .caption1).pointSize
+            label.font = UIFont.monospacedDigitSystemFont(ofSize: preferredSize, weight: .medium)
+            label.adjustsFontForContentSizeCategory = true
+            label.textColor = .white
+            label.text = "00:00"
+            label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+        durationLabel.textAlignment = .right
+
+        let timeline = UIStackView(arrangedSubviews: [elapsedLabel, progressSlider, durationLabel])
+        timeline.axis = .horizontal
+        timeline.alignment = .center
+        timeline.spacing = 10
+        timeline.translatesAutoresizingMaskIntoConstraints = false
+        bottomBar.contentView.addSubview(timeline)
 
         let buttons: [(UIButton, String, String, Selector)] = [
             (skipBackwardButton, "gobackward.15", "Back 15 seconds", #selector(skipBackwardTapped)),
@@ -184,50 +215,62 @@ final class RigelPlayerViewController: UIViewController {
             (skipForwardButton, "goforward.15", "Forward 15 seconds", #selector(skipForwardTapped)),
         ]
         for (button, imageName, label, action) in buttons {
-            button.setImage(UIImage(systemName: imageName), for: .normal)
-            button.tintColor = .white
+            var configuration = UIButton.Configuration.plain()
+            configuration.image = UIImage(
+                systemName: imageName,
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+            )
+            configuration.baseForegroundColor = .white
+            configuration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 8)
+            button.configuration = configuration
             button.accessibilityLabel = label
             button.addTarget(self, action: action, for: .touchUpInside)
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.widthAnchor.constraint(equalToConstant: 44).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 44).isActive = true
+            if button !== playPauseButton {
+                button.widthAnchor.constraint(equalToConstant: 44).isActive = true
+                button.heightAnchor.constraint(equalToConstant: 44).isActive = true
+            }
         }
+
+        var playConfiguration = UIButton.Configuration.filled()
+        playConfiguration.image = UIImage(
+            systemName: "play.fill",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+        )
+        playConfiguration.baseBackgroundColor = .white.withAlphaComponent(0.18)
+        playConfiguration.baseForegroundColor = .white
+        playConfiguration.cornerStyle = .capsule
+        playConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 14, leading: 14, bottom: 14, trailing: 14)
+        playPauseButton.configuration = playConfiguration
+        playPauseButton.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        playPauseButton.heightAnchor.constraint(equalToConstant: 56).isActive = true
         playPauseButton.accessibilityHint = "Pause or resume playback"
 
-        for label in [elapsedLabel, durationLabel] {
-            label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-            label.textColor = .white
-            label.text = "00:00"
-            label.setContentCompressionResistancePriority(.required, for: .horizontal)
-        }
-        durationLabel.textAlignment = .right
-
-        let controls = UIStackView(arrangedSubviews: [
+        let transportControls = UIStackView(arrangedSubviews: [
             skipBackwardButton,
             playPauseButton,
             skipForwardButton,
-            elapsedLabel,
-            UIView(),
-            durationLabel,
         ])
-        controls.axis = .horizontal
-        controls.alignment = .center
-        controls.spacing = 4
-        controls.translatesAutoresizingMaskIntoConstraints = false
-        bottomBar.contentView.addSubview(controls)
+        transportControls.axis = .horizontal
+        transportControls.alignment = .center
+        transportControls.spacing = 20
+        transportControls.translatesAutoresizingMaskIntoConstraints = false
+        bottomBar.contentView.addSubview(transportControls)
 
         NSLayoutConstraint.activate([
             bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
-            progressSlider.leadingAnchor.constraint(equalTo: bottomBar.contentView.leadingAnchor, constant: 16),
-            progressSlider.trailingAnchor.constraint(equalTo: bottomBar.contentView.trailingAnchor, constant: -16),
-            progressSlider.topAnchor.constraint(equalTo: bottomBar.contentView.topAnchor, constant: 8),
-            controls.leadingAnchor.constraint(equalTo: bottomBar.contentView.leadingAnchor, constant: 12),
-            controls.trailingAnchor.constraint(equalTo: bottomBar.contentView.trailingAnchor, constant: -12),
-            controls.topAnchor.constraint(equalTo: progressSlider.bottomAnchor, constant: 2),
-            controls.bottomAnchor.constraint(equalTo: bottomBar.contentView.bottomAnchor, constant: -8),
-            bottomBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 78),
+
+            timeline.leadingAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.leadingAnchor),
+            timeline.trailingAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.trailingAnchor),
+            timeline.topAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.topAnchor),
+            progressSlider.heightAnchor.constraint(greaterThanOrEqualToConstant: 28),
+
+            transportControls.centerXAnchor.constraint(equalTo: bottomBar.contentView.centerXAnchor),
+            transportControls.topAnchor.constraint(equalTo: timeline.bottomAnchor, constant: 2),
+            transportControls.bottomAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.bottomAnchor),
+            bottomBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 116),
         ])
     }
 
@@ -392,7 +435,9 @@ final class RigelPlayerViewController: UIViewController {
         titleLabel.text = trimmedTitle?.isEmpty == false
             ? trimmedTitle
             : Self.fallbackTitle(for: url)
-        senderLabel.text = sender.map { "via \($0)" }
+        let trimmedSender = sender?.trimmingCharacters(in: .whitespacesAndNewlines)
+        senderLabel.text = trimmedSender.map { "via \($0)" }
+        senderLabel.isHidden = trimmedSender?.isEmpty != false
         guard let avURL = URL(string: url) else {
             events.onError(message: "invalid URL: \(url)")
             return
@@ -525,11 +570,11 @@ final class RigelPlayerViewController: UIViewController {
         }
         showControls()
     }
-
     private func updatePlaybackControls() {
         guard customPlaybackControls, let player, let item = player.currentItem else { return }
         let elapsed = player.currentTime().seconds
-        elapsedLabel.text = Self.formatTime(elapsed)
+        let elapsedText = Self.formatTime(elapsed)
+        elapsedLabel.text = elapsedText
         let duration = item.duration.seconds
         if duration.isFinite, duration > 0 {
             progressSlider.isHidden = false
@@ -538,14 +583,22 @@ final class RigelPlayerViewController: UIViewController {
             } else if !isScrubbing {
                 progressSlider.value = Float(min(max(elapsed / duration, 0), 1))
             }
-            durationLabel.text = Self.formatTime(duration)
+            let durationText = Self.formatTime(duration)
+            durationLabel.text = durationText
+            progressSlider.accessibilityValue = "\(elapsedText) of \(durationText)"
         } else {
             progressSlider.isHidden = true
             durationLabel.text = "—"
+            progressSlider.accessibilityValue = elapsedText
         }
-        let imageName = player.timeControlStatus == .playing ? "pause.fill" : "play.fill"
-        playPauseButton.setImage(UIImage(systemName: imageName), for: .normal)
-        playPauseButton.accessibilityLabel = player.timeControlStatus == .playing ? "Pause" : "Play"
+        let isPlaying = player.timeControlStatus == .playing
+        var configuration = playPauseButton.configuration
+        configuration?.image = UIImage(
+            systemName: isPlaying ? "pause.fill" : "play.fill",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+        )
+        playPauseButton.configuration = configuration
+        playPauseButton.accessibilityLabel = isPlaying ? "Pause" : "Play"
     }
 
     private static func formatTime(_ seconds: Double) -> String {
