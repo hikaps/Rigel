@@ -95,28 +95,28 @@ jobs:
           SOURCE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/altstore/source.json"
           ICON_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
 
+          git fetch origin develop
+          MANIFEST_WORKTREE="$RUNNER_TEMP/manifest"
+          git worktree add --detach "$MANIFEST_WORKTREE" origin/develop
+          MANIFEST_SOURCE="$MANIFEST_WORKTREE/altstore/source.json"
+
           python3 scripts/generate-altstore-source.py \
             --channel stable \
             --ipa "$IPA" \
-            --output altstore/source.json \
+            --output "$MANIFEST_SOURCE" \
             --download-url "$DOWNLOAD_URL" \
             --source-url "$SOURCE_URL" \
             --icon-url "$ICON_URL" \
             --release-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          cp altstore/source.json "$RUNNER_TEMP/source.json"
           gh release delete "$TAG" --yes --cleanup-tag || true
           gh release create "$TAG" "$IPA" \
             --target "$SHA" \
             --title "Rigel ${STABLE_VERSION}" \
             --notes "Stable Rigel ${STABLE_VERSION} from main @ ${SHA:0:7}. This ad-hoc IPA is re-signed by AltStore/SideStore with the installer's Apple ID. The AltStore source is refreshed at ${SOURCE_URL}." \
             --latest=true
-          gh release upload "$TAG" altstore/source.json --clobber
+          gh release upload "$TAG" "$MANIFEST_SOURCE" --clobber
 
-          git fetch origin develop
-          MANIFEST_WORKTREE="$RUNNER_TEMP/manifest"
-          git worktree add --detach "$MANIFEST_WORKTREE" origin/develop
-          cp "$RUNNER_TEMP/source.json" "$MANIFEST_WORKTREE/altstore/source.json"
           git -C "$MANIFEST_WORKTREE" config user.name "github-actions[bot]"
           git -C "$MANIFEST_WORKTREE" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C "$MANIFEST_WORKTREE" add altstore/source.json
