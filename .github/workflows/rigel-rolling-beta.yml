@@ -5,6 +5,10 @@ name: Rigel Rolling Beta Release
 # and refreshes the AltStore/SideStore source manifest at altstore/source.json.
 # AltStore/SideStore re-signs the IPA with the installer's Apple ID.
 
+env:
+  # Set this to the next intended stable release; run numbers remain build-only.
+  BETA_VERSION: "1.1.0"
+
 on:
   push:
     branches: [develop]
@@ -53,7 +57,7 @@ jobs:
 
       - name: Archive unsigned beta app
         env:
-          MARKETING_VERSION: "1.0.${{ github.run_number }}"
+          MARKETING_VERSION: ${{ env.BETA_VERSION }}
           CURRENT_PROJECT_VERSION: "${{ github.run_number }}"
         run: |
           set -euo pipefail
