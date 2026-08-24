@@ -73,5 +73,6 @@ enum BridgeRegistry {
         )
         PlayerBridgeFactory.shared.register(bridge: RigelPlayerBridge())
         RendererBridgeFactory.shared.register(bridge: RigelRendererBridge())
+        ChromecastBridgeFactory.shared.register(bridge: RigelChromecastBridge())
     }
 }

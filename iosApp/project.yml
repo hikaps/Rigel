@@ -70,7 +70,9 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         UIRequiresFullScreen: true
-        NSLocalNetworkUsageDescription: "Rigel discovers TVs on your local network (DLNA, Roku)."
+        NSLocalNetworkUsageDescription: "Rigel discovers TVs on your local network (DLNA, Roku, Chromecast)."
+        NSBonjourServices:
+          - _googlecast._tcp
         AVInitialRouteSharingPolicy: LongFormVideo
         UIBackgroundModes:
           - audio
@@ -151,6 +153,8 @@ targets:
     platform: iOS
     sources:
       - path: ../RigelTests
+    resources:
+      - path: ../RigelTests/Fixtures
     dependencies:
       - target: Rigel
     settings:

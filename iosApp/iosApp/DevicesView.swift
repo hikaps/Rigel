@@ -72,7 +72,7 @@ struct DevicesView: View {
                         .tint(Color.rigelStar)
                         .disabled(ipText.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
-                    Text("Probes DLNA, Kodi JSON-RPC (:8080), and Roku ECP (:8060).")
+                    Text("Probes DLNA, Kodi JSON-RPC (:8080), Roku ECP (:8060), and Chromecast (:8009).")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } header: {
@@ -142,15 +142,7 @@ struct DevicesView: View {
 /// Stable identity per renderer (usn-based), independent of display name —
 /// multiple manual Kodis legitimately share the name "Kodi".
 private extension DiscoveredDevice {
-    var stableId: String {
-        switch target {
-        case let d as CastTargetDlna: return d.device.usn
-        case let r as CastTargetRoku: return r.device.usn
-        case let k as CastTargetKodi: return k.device.usn
-        case let j as CastTargetJellyfinSessionTarget: return j.session.id
-        default: return target.name
-        }
-    }
+    var stableId: String { target.stableId }
 }
 
 private struct DeviceRow: View {
@@ -158,14 +150,7 @@ private struct DeviceRow: View {
     let onCast: () -> Void
     let onRemove: () -> Void
 
-    private var kind: String {
-        switch device.target {
-        case is CastTargetDlna: return "DLNA"
-        case is CastTargetRoku: return "Roku"
-        case is CastTargetKodi: return "Kodi"
-        default: return "Jellyfin"
-        }
-    }
+    private var kind: String { device.target.kindLabel }
 
     var body: some View {
         HStack(spacing: 12) {

@@ -192,7 +192,7 @@ struct HomeView: View {
             }
 
             Label(
-                "AirPlay, DLNA, Roku, and Kodi screens are reachable from Devices.",
+                "AirPlay, DLNA, Roku, Kodi, and Chromecast screens are reachable from Devices.",
                 systemImage: "info.circle"
             )
             .font(.footnote)

@@ -1,6 +1,7 @@
 package app.rigel.settings
 
 import app.rigel.cast.CastTarget
+import app.rigel.cast.chrome.ChromeDevice
 import app.rigel.cast.dlna.DlnaDevice
 import app.rigel.cast.kodi.KodiDevice
 import app.rigel.cast.roku.RokuDevice
@@ -111,22 +112,23 @@ class SettingsStoreTest {
         val dlna = CastTarget.Dlna(DlnaDevice("d1", "http://h/desc.xml", "TV", "/ctl"))
         val roku = CastTarget.Roku(RokuDevice("r1", "http://h:8060/", "Roku"))
         val kodi = CastTarget.Kodi(KodiDevice("k1", "http://h:8080", "Kodi"))
+        val chrome = CastTarget.Chrome(ChromeDevice("c1", "192.168.1.2", 8009, "Chromecast"))
         val jf = CastTarget.JellyfinSessionTarget(JellyfinSession("j1", "iPhone", "Jellyfin"))
         val s = store()
-        for (t in listOf(dlna, roku, kodi, jf)) {
+        for (t in listOf(dlna, roku, kodi, chrome, jf)) {
             s.addManualDevice(manualRow(t))
         }
-        assertEquals(4, s.manualDevices().size)
-        for (t in listOf(dlna, roku, kodi, jf)) {
+        assertEquals(5, s.manualDevices().size)
+        for (t in listOf(dlna, roku, kodi, chrome, jf)) {
             s.removeManualDevice(t)
         }
         assertTrue(s.manualDevices().isEmpty())
     }
-
     private fun manualRow(t: CastTarget): String = when (t) {
         is CastTarget.Dlna -> "dlna|${t.device.usn}|${t.device.location}|${t.device.friendlyName}"
         is CastTarget.Roku -> "roku|${t.device.usn}|${t.device.location}|${t.device.modelName ?: "Roku"}"
         is CastTarget.Kodi -> "kodi|${t.device.usn}|${t.device.endpoint}|${t.device.name ?: "Kodi"}"
+        is CastTarget.Chrome -> "chrome|${t.device.id}|${t.device.host}:${t.device.port}|${t.device.name}"
         is CastTarget.JellyfinSessionTarget -> "jellyfin|${t.session.id}|x|${t.session.deviceName}"
     }
 }

@@ -53,7 +53,11 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Rigel discovers TVs on your local network (DLNA, Roku).</string>
+	<string>Rigel discovers TVs on your local network (DLNA, Roku, Chromecast).</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_googlecast._tcp</string>
+	</array>
 	<key>AVInitialRouteSharingPolicy</key>
 	<string>LongFormVideo</string>
 	<key>UIBackgroundModes</key>

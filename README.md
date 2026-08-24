@@ -12,9 +12,10 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 ## Screens & casting
 
-- Cast to DLNA/UPnP renderers, Kodi, and Roku. Devices are discovered automatically via SSDP or added manually by IP address.
+- Cast to DLNA/UPnP renderers, Kodi, Roku, and Chromecast/Google Cast. Devices are discovered automatically via SSDP, Google Cast mDNS, or added manually by IP address.
 - AirPlay out to Apple TV and AirPlay-2 TVs, picked from the player screen.
 - Remote renderers always receive a LAN-reachable stream URL, never a loopback address.
+- Outbound receiver families share the Kotlin `ReceiverAdapter` registry; inbound UPnP renderer mode remains a separate native bridge.
 
 ## Sources
 
