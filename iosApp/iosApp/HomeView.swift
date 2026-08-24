@@ -89,7 +89,7 @@ struct HomeView: View {
                         .font(.system(size: 34))
                         .foregroundStyle(Color.rigelStar)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(player.filename ?? "Now playing")
+                        Text(player.displayTitle ?? "Now playing")
                             .font(.headline)
                             .foregroundStyle(.primary)
                             .lineLimit(1)

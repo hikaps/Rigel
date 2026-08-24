@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 import ComposeApp
 import AVFoundation
 @testable import Rigel
@@ -51,6 +52,76 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertEqual(model.route, PlaybackRoute.remux)
         XCTAssertEqual(model.playableURL, "http://127.0.0.1:12345/session-x/index.m3u8")
         XCTAssertTrue(model.castActive)
+    }
+
+    func testGenericProxyPlaylistTitleIsVideo() {
+        XCTAssertEqual(
+            RigelPlayerViewController.fallbackTitle(for: "http://127.0.0.1/session-x/index.m3u8"),
+            "Video"
+        )
+        XCTAssertEqual(
+            RigelPlayerViewController.fallbackTitle(for: "http://origin/Arrival.m3u8"),
+            "Arrival"
+        )
+    }
+
+    @MainActor
+    func testHlsPlayerExposesVideoTransportAndTrackControls() {
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let controller = RigelPlayerViewController(events: events)
+        controller.load(
+            url: "http://127.0.0.1/session/index.m3u8",
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false
+        )
+        defer { controller.stopPlayback() }
+
+        let tracks = view(controller.view, withAccessibilityLabel: "Audio and subtitles")
+        let skipBackward = view(controller.view, withAccessibilityLabel: "Back 15 seconds")
+        let skipForward = view(controller.view, withAccessibilityLabel: "Forward 15 seconds")
+        let slider = view(controller.view, withAccessibilityIdentifier: "player.progressSlider")
+        let topBar = view(controller.view, withAccessibilityIdentifier: "player.topBar")
+        let bottomBar = view(controller.view, withAccessibilityIdentifier: "player.bottomBar")
+        XCTAssertNotNil(tracks)
+        XCTAssertNotNil(skipBackward)
+        XCTAssertNotNil(skipForward)
+        XCTAssertNotNil(slider)
+        XCTAssertNotNil(topBar)
+        XCTAssertNotNil(bottomBar)
+        XCTAssertFalse(tracks?.isHidden == true)
+
+        controller.setTrackSelectionEnabled(false)
+        XCTAssertTrue(tracks?.isHidden == true)
+        controller.setTrackSelectionEnabled(true)
+        XCTAssertFalse(tracks?.isHidden == true)
+
+        controller.hideControls()
+        XCTAssertTrue(topBar?.isHidden == true)
+        XCTAssertTrue(bottomBar?.isHidden == true)
+        controller.showControls()
+        XCTAssertFalse(topBar?.isHidden == true)
+        XCTAssertFalse(bottomBar?.isHidden == true)
+    }
+
+    private func view(_ root: UIView, withAccessibilityLabel label: String) -> UIView? {
+        if root.accessibilityLabel == label { return root }
+        for child in root.subviews {
+            if let match = view(child, withAccessibilityLabel: label) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    private func view(_ root: UIView, withAccessibilityIdentifier identifier: String) -> UIView? {
+        if root.accessibilityIdentifier == identifier { return root }
+        for child in root.subviews {
+            if let match = view(child, withAccessibilityIdentifier: identifier) {
+                return match
+            }
+        }
+        return nil
     }
 
     @MainActor

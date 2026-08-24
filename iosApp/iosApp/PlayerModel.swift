@@ -17,6 +17,8 @@ final class PlayerModel: ObservableObject {
     @Published var castActive = false
     @Published var longFormVideoAirPlayEligible = false
     @Published var showPlayer = false
+    private var requestedTitle: String?
+    private var requestedTitleURL: String?
 
     private var observeJob: Kotlinx_coroutines_coreJob?
 
@@ -33,6 +35,16 @@ final class PlayerModel: ObservableObject {
         observeJob?.cancel(cause: nil)
     }
 
+    var displayTitle: String? {
+        if let filename, !filename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return filename
+        }
+        if let requestedTitle, !requestedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return requestedTitle
+        }
+        return nil
+    }
+
     var playableURL: String? { proxyUrl ?? sourceUrl }
 
     var routeLabel: String { route?.name ?? "" }
@@ -40,6 +52,11 @@ final class PlayerModel: ObservableObject {
     var isPlaying: Bool { phase == .playing }
 
     func apply(_ state: PlayerUiState) {
+        if state.phase == .idle ||
+            (requestedTitleURL != nil && requestedTitleURL != state.sourceUrl) {
+            requestedTitle = nil
+            requestedTitleURL = nil
+        }
         phase = state.phase
         sourceUrl = state.sourceUrl
         filename = state.filename
@@ -54,7 +71,20 @@ final class PlayerModel: ObservableObject {
 
     @discardableResult
     func open(url: String) -> Bool {
-        SwiftPlayer.shared.loadRaw(url: url)
+        open(url: url, title: nil)
+    }
+
+    @discardableResult
+    func open(url: String, title: String?) -> Bool {
+        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        requestedTitle = trimmedTitle.flatMap { $0.isEmpty ? nil : $0 }
+        requestedTitleURL = url
+        let accepted = SwiftPlayer.shared.loadRaw(url: url)
+        if !accepted {
+            requestedTitle = nil
+            requestedTitleURL = nil
+        }
+        return accepted
     }
 
     func stop() {
