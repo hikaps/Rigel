@@ -4,6 +4,10 @@ import app.rigel.bridge.DiscoveryBridge
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastTarget
+import app.rigel.cast.chrome.CastWireConnection
+import app.rigel.cast.chrome.ChromeDevice
+import app.rigel.cast.chrome.ChromecastBridge
+import app.rigel.cast.chrome.ChromecastBridgeFactory
 import app.rigel.settings.SettingsStore
 import com.russhwolf.settings.MapSettings
 import io.ktor.client.HttpClient
@@ -29,6 +33,21 @@ class DevicesRepositoryTest {
         }
     }
 
+    private class FakeChromecastBridge(var devices: List<ChromeDevice> = emptyList()) : ChromecastBridge {
+        override fun discover(timeoutMs: Int, onResult: (List<ChromeDevice>) -> Unit) {
+            onResult(devices)
+        }
+
+        override fun open(
+            host: String,
+            port: Int,
+            onFrame: (ByteArray) -> Unit,
+            onOpen: (CastWireConnection?, String?) -> Unit,
+        ) {
+            onOpen(null, "not implemented in repository scan tests")
+        }
+    }
+
     private val discovery = FakeDiscovery()
 
     private val deviceInfoXml = """
@@ -48,7 +67,12 @@ class DevicesRepositoryTest {
         </device></root>
     """.trimIndent()
 
-    private fun repo(engine: MockEngine, settings: SettingsStore): DevicesRepository {
+    private fun repo(
+        engine: MockEngine,
+        settings: SettingsStore,
+        chrome: ChromecastBridge? = null,
+    ): DevicesRepository {
+        ChromecastBridgeFactory.register(chrome)
         RigelBridgeFactory.register(discovery = discovery, probe = null, transcode = null, httpServer = null)
         return DevicesRepository(HttpClient(engine), settings)
     }
@@ -88,19 +112,57 @@ class DevicesRepositoryTest {
     }
 
     @Test
-    fun scanSkipsMediaRendererWhenHostIsNotKodi() = kotlinx.coroutines.test.runTest {
-        // SSDP MediaRenderer devices surface only as Kodi (via the :8080 JSON-RPC probe);
-        // DLNA description fetch happens for manual rows and dlna-targeted probes.
+    fun scanEnrichesDlnaFromMediaRenderer() = kotlinx.coroutines.test.runTest {
+        // DlnaAdapter.fromSsdp fetches the location XML for live MediaRenderer responses
+        // (was previously broken — only manual 'dlna' pseudo-target enriched).
         val engine = MockEngine { request ->
-            if (request.url.encodedPath == "/jsonrpc") respond("", HttpStatusCode.NotFound)
-            else respond("", HttpStatusCode.NotFound)
+            when (request.url.encodedPath) {
+                "/desc.xml" -> respond(dlnaXml, HttpStatusCode.OK)
+                else -> respond("", HttpStatusCode.NotFound)
+            }
         }
         discovery.devices = listOf(
             SsdpDevice("usn-d1", "http://10.0.0.5:1234/desc.xml", "TV", "urn:schemas-upnp-org:device:MediaRenderer:1"),
         )
         val found = repo(engine, SettingsStore(MapSettings(mutableMapOf()))).scan()
-        assertTrue(found.isEmpty())
+        assertEquals(1, found.size)
+        assertIs<CastTarget.Dlna>(found[0].target)
+        assertEquals("Living Room TV", found[0].target.name)
     }
+    @Test
+    fun scanFindsChromecastViaMdnsBridge() = kotlinx.coroutines.test.runTest {
+        discovery.devices = emptyList()
+        val chrome = FakeChromecastBridge(
+            listOf(ChromeDevice("c1", "192.168.1.50", 8009, "Living Room TV")),
+        )
+        val found = repo(
+            MockEngine { respond("", HttpStatusCode.NotFound) },
+            SettingsStore(MapSettings(mutableMapOf())),
+            chrome,
+        ).scan()
+
+        assertEquals(1, found.size)
+        assertEquals("mdns", found.single().via)
+        assertIs<CastTarget.Chrome>(found.single().target)
+        assertEquals("Living Room TV", found.single().target.name)
+    }
+
+    @Test
+    fun scanRehydratesChromecastManualRow() = kotlinx.coroutines.test.runTest {
+        discovery.devices = emptyList()
+        val settings = SettingsStore(MapSettings(mutableMapOf()))
+        settings.addManualDevice("chrome|c1|192.168.1.50:8009|Living Room TV")
+
+        val found = repo(
+            MockEngine { respond("", HttpStatusCode.NotFound) },
+            settings,
+        ).scan()
+
+        assertEquals(1, found.size)
+        assertEquals("manual", found.single().via)
+        assertEquals("c1", (found.single().target as CastTarget.Chrome).device.id)
+    }
+
 
     @Test
     fun scanAddsManualDevices() = kotlinx.coroutines.test.runTest {

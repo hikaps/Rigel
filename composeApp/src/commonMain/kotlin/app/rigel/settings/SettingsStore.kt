@@ -1,6 +1,7 @@
 package app.rigel.settings
 
 import app.rigel.cast.CastTarget
+import app.rigel.cast.ReceiverRegistry
 import com.russhwolf.settings.Settings
 
 enum class RouteOverride { AUTO, DIRECT, ALWAYS_PROXY }
@@ -50,14 +51,7 @@ class SettingsStore(private val settings: Settings) {
     }
 
     fun removeManualDevice(target: CastTarget) {
-        val (kind, usn) = when (target) {
-            is CastTarget.Dlna -> "dlna" to target.device.usn
-            is CastTarget.Roku -> "roku" to target.device.usn
-            is CastTarget.Kodi -> "kodi" to target.device.usn
-            is CastTarget.JellyfinSessionTarget -> "jellyfin" to ""
-        }
-        // Jellyfin session targets have no usn; match the whole kind.
-        val prefix = if (usn.isEmpty()) "$kind|" else "$kind|$usn|"
+        val prefix = ReceiverRegistry.adapterFor(target).removalPrefix(target)
         settings.putString(
             devicesKey,
             manualDevices()
