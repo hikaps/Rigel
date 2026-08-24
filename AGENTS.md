@@ -14,7 +14,7 @@ The root README is user-facing only (features, usage, availability, license); th
 - Before merge, run the affected local checks and wait for the required GitHub CI checks: JVM/Kover, iOS Kotlin simulator tests, and Swift/Xcode simulator tests when applicable.
 - Merge approved feature PRs **on GitHub using squash merge**. Do not replace the GitHub merge with a local merge/fast-forward; the squash commit on `develop` is the integration history.
 - After a PR lands, update local `develop` from `origin/develop`, then remove the merged remote feature branch and its disposable worktree when no longer needed.
-- Periodically cut a release by opening a PR from `develop` into `main`. Merge that release PR only after release checks pass; `main` should contain released, integration-tested state.
+- Periodically cut a release by opening a PR from `develop` into `main`. Merge that release PR on GitHub with a **merge commit**, never squash; preserve the full integration history that produced the release. Merge only after release checks pass.
 
 
 ## Architecture & Data Flow
