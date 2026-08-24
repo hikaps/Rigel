@@ -46,9 +46,14 @@ final class RigelChromecastBridge: NSObject, ChromecastBridge {
         activeDiscovery?.cancel()
         let discoveryID = UUID()
         let discovery = ChromecastDiscovery(timeoutMs: Int(timeoutMs)) { [weak self] devices in
-            guard let self, self.activeDiscoveryID == discoveryID else { return }
-            self.activeDiscovery = nil
-            self.activeDiscoveryID = nil
+            guard let self else {
+                onResult(devices)
+                return
+            }
+            if self.activeDiscoveryID == discoveryID {
+                self.activeDiscovery = nil
+                self.activeDiscoveryID = nil
+            }
             onResult(devices)
         }
         activeDiscoveryID = discoveryID
@@ -135,6 +140,7 @@ private final class ChromecastDiscovery {
         browser = nil
         resolvers.forEach { $0.cancel() }
         resolvers.removeAll()
+        DispatchQueue.main.async { [onResult] in onResult([]) }
     }
 
 
