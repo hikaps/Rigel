@@ -37,6 +37,8 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 Rigel is not on the App Store or TestFlight. The stable release is published from [`main`](https://github.com/hikaps/Rigel/releases) and the rolling beta is published from [`develop`](https://github.com/hikaps/Rigel/releases/tag/beta) as a separate **Rigel Beta** app, so both channels can be installed side by side.
 
+Rolling beta builds use the next intended stable version; the GitHub Actions run number is only their build identifier.
+
 To receive stable and rolling beta updates through AltStore Classic or SideStore, add the source manifest:
 
 `https://raw.githubusercontent.com/hikaps/Rigel/develop/altstore/source.json`
