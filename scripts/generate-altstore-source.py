@@ -109,6 +109,7 @@ def app_entry(args: argparse.Namespace, channel: dict[str, str], version: str, b
         "versions": [
             {
                 "version": version,
+                "buildVersion": build,
                 "date": release_date,
                 "downloadURL": args.download_url,
                 "localizedDescription": channel["version_description"].format(build=build),
