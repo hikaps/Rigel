@@ -1,7 +1,27 @@
 import Foundation
 import AVFoundation
 import AVKit
+import UIKit
 import ComposeApp
+
+private final class PlayerGradientView: UIView {
+    private let gradientLayer = CAGradientLayer()
+
+    init(colors: [UIColor]) {
+        super.init(frame: .zero)
+        gradientLayer.colors = colors.map(\.cgColor)
+        layer.addSublayer(gradientLayer)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        gradientLayer.frame = bounds
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+}
 
 /// AVPlayer host with native title, route, audio/subtitle, and transport controls.
 /// The overlay chrome follows normal player behavior: it appears on interaction
@@ -13,6 +33,9 @@ import ComposeApp
 /// Events fire on the main thread.
 final class RigelPlayerViewController: UIViewController {
     private let events: PlayerEvents
+    /// Assigned by the SwiftUI host so the native control can present the
+    /// app-level renderer picker without expanding the Kotlin event contract.
+    var onCastRequested: (() -> Void)?
     private var player: AVPlayer?
     private var playerVC: AVPlayerViewController?
     private var pollTimer: Timer?
@@ -36,13 +59,20 @@ final class RigelPlayerViewController: UIViewController {
         try audioSession.setActive(true)
     }
 
-    private let topBar = UIVisualEffectView()
+    private let topGradient = PlayerGradientView(
+        colors: [UIColor.black.withAlphaComponent(0.72), .clear]
+    )
+    private let bottomGradient = PlayerGradientView(
+        colors: [.clear, UIColor.black.withAlphaComponent(0.72)]
+    )
+    private let topBar = UIView()
     private let titleLabel = UILabel()
     private let senderLabel = UILabel()
     private let backButton = UIButton(type: .system)
     private let routePicker = AVRoutePickerView()
+    private let castButton = UIButton(type: .system)
     private let tracksButton = UIButton(type: .system)
-    private let bottomBar = UIVisualEffectView()
+    private let bottomBar = UIView()
     private let progressSlider = UISlider()
     private let skipBackwardButton = UIButton(type: .system)
     private let playPauseButton = UIButton(type: .system)
@@ -79,62 +109,62 @@ final class RigelPlayerViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        setupOverlayGradients()
         setupTopBar()
         setupBottomBar()
         setupControlsGesture()
     }
-    /// Liquid Glass chrome on iOS 26; near-transparent dark blur before that.
-    private static func chromeEffect() -> UIVisualEffect {
-        if #available(iOS 26.0, *) {
-            return UIGlassEffect()
+
+    private func setupOverlayGradients() {
+        for gradient in [topGradient, bottomGradient] {
+            gradient.translatesAutoresizingMaskIntoConstraints = false
+            gradient.isUserInteractionEnabled = false
+            view.addSubview(gradient)
         }
-        return UIBlurEffect(style: .systemUltraThinMaterialDark)
+        bottomGradient.alpha = 0
+        NSLayoutConstraint.activate([
+            topGradient.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            topGradient.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            topGradient.topAnchor.constraint(equalTo: view.topAnchor),
+            topGradient.heightAnchor.constraint(equalToConstant: 180),
+
+            bottomGradient.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomGradient.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomGradient.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomGradient.heightAnchor.constraint(equalToConstant: 240),
+        ])
     }
 
-    private static func chromeCorners(_ view: UIView) {
-        view.layer.cornerRadius = 26
-        view.layer.cornerCurve = .continuous
-        view.clipsToBounds = true
-    }
-
-    /// Control-button chrome: Liquid Glass on iOS 26, translucent capsule before.
+    /// Controls use their own hit rectangles; there is no enclosing chrome.
     private static func controlConfiguration(symbolName: String, pointSize: CGFloat) -> UIButton.Configuration {
-        var configuration: UIButton.Configuration
-        if #available(iOS 26.0, *) {
-            configuration = .glass()
-        } else {
-            configuration = .filled()
-            configuration.baseBackgroundColor = .white.withAlphaComponent(0.16)
-            configuration.cornerStyle = .capsule
-        }
+        var configuration = UIButton.Configuration.plain()
         configuration.baseForegroundColor = .white
         configuration.image = UIImage(
             systemName: symbolName,
             withConfiguration: UIImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
         )
-        configuration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10)
+        configuration.contentInsets = .zero
         return configuration
     }
     private func setupTopBar() {
-        topBar.effect = Self.chromeEffect()
-        Self.chromeCorners(topBar)
+        topBar.backgroundColor = .clear
+        topBar.isOpaque = false
         topBar.translatesAutoresizingMaskIntoConstraints = false
         topBar.accessibilityIdentifier = "player.topBar"
+        topBar.layoutMargins = UIEdgeInsets(top: 6, left: 20, bottom: 10, right: 20)
         view.addSubview(topBar)
         NSLayoutConstraint.activate([
             topBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
-
-        topBar.contentView.layoutMargins = UIEdgeInsets(top: 6, left: 12, bottom: 10, right: 12)
 
         backButton.configuration = Self.controlConfiguration(symbolName: "xmark", pointSize: 15)
         backButton.accessibilityLabel = "Close player"
         backButton.accessibilityHint = "Return to Rigel"
         backButton.addTarget(self, action: #selector(backTapped), for: .touchUpInside)
         backButton.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(backButton)
+        topBar.addSubview(backButton)
 
         titleLabel.font = .preferredFont(forTextStyle: .headline)
         titleLabel.adjustsFontForContentSizeCategory = true
@@ -143,7 +173,7 @@ final class RigelPlayerViewController: UIViewController {
         titleLabel.numberOfLines = 1
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(titleLabel)
+        topBar.addSubview(titleLabel)
 
         senderLabel.font = .preferredFont(forTextStyle: .subheadline)
         senderLabel.adjustsFontForContentSizeCategory = true
@@ -151,32 +181,43 @@ final class RigelPlayerViewController: UIViewController {
         senderLabel.lineBreakMode = .byTruncatingTail
         senderLabel.numberOfLines = 1
         senderLabel.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(senderLabel)
+        topBar.addSubview(senderLabel)
 
         routePicker.tintColor = .white
         routePicker.accessibilityLabel = "Playback destination"
         routePicker.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(routePicker)
+        topBar.addSubview(routePicker)
 
+        castButton.configuration = Self.controlConfiguration(symbolName: "rectangle.on.rectangle", pointSize: 17)
+        castButton.accessibilityLabel = "Cast to device"
+        castButton.accessibilityHint = "Choose a network playback device"
+        castButton.addTarget(self, action: #selector(castTapped), for: .touchUpInside)
+        castButton.translatesAutoresizingMaskIntoConstraints = false
+        topBar.addSubview(castButton)
         tracksButton.configuration = Self.controlConfiguration(symbolName: "captions.bubble", pointSize: 17)
         tracksButton.accessibilityLabel = "Audio and subtitles"
         tracksButton.accessibilityHint = "Choose an audio track or subtitle"
         tracksButton.addTarget(self, action: #selector(tracksTapped), for: .touchUpInside)
         tracksButton.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(tracksButton)
+        topBar.addSubview(tracksButton)
 
         NSLayoutConstraint.activate([
-            backButton.leadingAnchor.constraint(equalTo: topBar.contentView.layoutMarginsGuide.leadingAnchor),
-            backButton.topAnchor.constraint(equalTo: topBar.contentView.layoutMarginsGuide.topAnchor),
+            backButton.leadingAnchor.constraint(equalTo: topBar.layoutMarginsGuide.leadingAnchor),
+            backButton.topAnchor.constraint(equalTo: topBar.layoutMarginsGuide.topAnchor),
             backButton.widthAnchor.constraint(equalToConstant: 44),
             backButton.heightAnchor.constraint(equalToConstant: 44),
 
-            routePicker.trailingAnchor.constraint(equalTo: topBar.contentView.layoutMarginsGuide.trailingAnchor),
+            routePicker.trailingAnchor.constraint(equalTo: topBar.layoutMarginsGuide.trailingAnchor),
             routePicker.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             routePicker.widthAnchor.constraint(equalToConstant: 44),
             routePicker.heightAnchor.constraint(equalToConstant: 44),
 
-            tracksButton.trailingAnchor.constraint(equalTo: routePicker.leadingAnchor, constant: -4),
+            castButton.trailingAnchor.constraint(equalTo: routePicker.leadingAnchor, constant: -4),
+            castButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            castButton.widthAnchor.constraint(equalToConstant: 44),
+            castButton.heightAnchor.constraint(equalToConstant: 44),
+
+            tracksButton.trailingAnchor.constraint(equalTo: castButton.leadingAnchor, constant: -4),
             tracksButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             tracksButton.widthAnchor.constraint(equalToConstant: 44),
             tracksButton.heightAnchor.constraint(equalToConstant: 44),
@@ -195,13 +236,13 @@ final class RigelPlayerViewController: UIViewController {
     }
 
     private func setupBottomBar() {
-        bottomBar.effect = Self.chromeEffect()
-        Self.chromeCorners(bottomBar)
+        bottomBar.backgroundColor = .clear
+        bottomBar.isOpaque = false
         bottomBar.accessibilityIdentifier = "player.bottomBar"
         bottomBar.translatesAutoresizingMaskIntoConstraints = false
         bottomBar.isHidden = true
+        bottomBar.layoutMargins = UIEdgeInsets(top: 10, left: 20, bottom: 10, right: 20)
         view.addSubview(bottomBar)
-        bottomBar.contentView.layoutMargins = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
 
         progressSlider.minimumValue = 0
         progressSlider.maximumValue = 1
@@ -234,7 +275,7 @@ final class RigelPlayerViewController: UIViewController {
         timeline.alignment = .center
         timeline.spacing = 10
         timeline.translatesAutoresizingMaskIntoConstraints = false
-        bottomBar.contentView.addSubview(timeline)
+        bottomBar.addSubview(timeline)
 
         let buttons: [(UIButton, String, String, Selector)] = [
             (skipBackwardButton, "gobackward.15", "Back 15 seconds", #selector(skipBackwardTapped)),
@@ -252,15 +293,13 @@ final class RigelPlayerViewController: UIViewController {
             }
         }
 
-        var playConfiguration = UIButton.Configuration.filled()
+        var playConfiguration = UIButton.Configuration.plain()
         playConfiguration.image = UIImage(
             systemName: "play.fill",
-            withConfiguration: UIImage.SymbolConfiguration(pointSize: 24, weight: .semibold)
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .semibold)
         )
-        playConfiguration.baseBackgroundColor = .white
-        playConfiguration.baseForegroundColor = .black
-        playConfiguration.cornerStyle = .capsule
-        playConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 18, leading: 18, bottom: 18, trailing: 18)
+        playConfiguration.baseForegroundColor = .white
+        playConfiguration.contentInsets = .zero
         playPauseButton.configuration = playConfiguration
         playPauseButton.widthAnchor.constraint(equalToConstant: 64).isActive = true
         playPauseButton.heightAnchor.constraint(equalToConstant: 64).isActive = true
@@ -275,21 +314,21 @@ final class RigelPlayerViewController: UIViewController {
         transportControls.alignment = .center
         transportControls.spacing = 28
         transportControls.translatesAutoresizingMaskIntoConstraints = false
-        bottomBar.contentView.addSubview(transportControls)
+        bottomBar.addSubview(transportControls)
 
         NSLayoutConstraint.activate([
-            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
 
-            timeline.leadingAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.leadingAnchor),
-            timeline.trailingAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.trailingAnchor),
-            timeline.topAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.topAnchor),
+            timeline.leadingAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.leadingAnchor),
+            timeline.trailingAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.trailingAnchor),
+            timeline.topAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.topAnchor),
             progressSlider.heightAnchor.constraint(greaterThanOrEqualToConstant: 28),
 
-            transportControls.centerXAnchor.constraint(equalTo: bottomBar.contentView.centerXAnchor),
+            transportControls.centerXAnchor.constraint(equalTo: bottomBar.centerXAnchor),
             transportControls.topAnchor.constraint(equalTo: timeline.bottomAnchor, constant: 2),
-            transportControls.bottomAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.bottomAnchor),
+            transportControls.bottomAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.bottomAnchor),
             bottomBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 116),
         ])
     }
@@ -325,6 +364,8 @@ final class RigelPlayerViewController: UIViewController {
         ) {
             self.topBar.alpha = 1
             self.bottomBar.alpha = 1
+            self.topGradient.alpha = 1
+            self.bottomGradient.alpha = self.customPlaybackControls ? 1 : 0
         }
         scheduleControlsHide()
     }
@@ -340,6 +381,8 @@ final class RigelPlayerViewController: UIViewController {
             animations: {
                 self.topBar.alpha = 0
                 self.bottomBar.alpha = 0
+                self.topGradient.alpha = 0
+                self.bottomGradient.alpha = 0
             },
             completion: { _ in
                 if !self.controlsVisible {
@@ -363,6 +406,10 @@ final class RigelPlayerViewController: UIViewController {
 
     @objc private func backTapped() {
         events.onBack()
+    }
+    @objc private func castTapped() {
+        showControls()
+        onCastRequested?()
     }
     /// FFmpeg HLS proxy sessions currently contain only their selected audio
     /// stream and no subtitle renditions. Keep the selector out of that UI
@@ -675,6 +722,8 @@ final class RigelPlayerViewController: UIViewController {
         topBar.isHidden = false
         topBar.alpha = 1
         bottomBar.alpha = 1
+        topGradient.alpha = 1
+        bottomGradient.alpha = 0
         customPlaybackControls = false
         isScrubbing = false
         pendingScrubValue = nil
