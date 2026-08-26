@@ -20,6 +20,7 @@ data class IntakeRequest(
     val subtitleUrls: List<String>,
     val successCallbackUrl: String?,
     val xSource: String? = null,
+    val title: String? = null,
 )
 
 object UrlIntake {

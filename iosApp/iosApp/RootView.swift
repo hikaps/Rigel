@@ -14,7 +14,7 @@ struct RootView: View {
     @State private var tab = Tab.home
 
     enum Tab: Hashable {
-        case home, devices, sources, settings
+        case home, devices, sources, history, settings
     }
 
     var body: some View {
@@ -33,6 +33,10 @@ struct RootView: View {
             SourcesView()
                 .tabItem { Label("Sources", systemImage: "video") }
                 .tag(Tab.sources)
+
+            HistoryView()
+                .tabItem { Label("History", systemImage: "clock.fill") }
+                .tag(Tab.history)
 
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }

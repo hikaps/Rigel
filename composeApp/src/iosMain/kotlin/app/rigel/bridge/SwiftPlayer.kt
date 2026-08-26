@@ -22,7 +22,7 @@ object SwiftPlayer {
     fun observe(onChange: (PlayerUiState) -> Unit): Job =
         scope.launch { RigelCore.controller.uiState.collect { onChange(it) } }
 
-    fun loadRaw(url: String): Boolean = RigelCore.controller.loadRaw(url)
+    fun loadRaw(url: String, title: String? = null): Boolean = RigelCore.controller.loadRaw(url, title)
 
     fun stop() = RigelCore.controller.stopPlayback()
 

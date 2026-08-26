@@ -69,20 +69,22 @@ class PlayerController(
 
     private var successCallbackUrl: String? = null
 
-    fun loadRaw(rawUrl: String): Boolean {
+    fun loadRaw(rawUrl: String, title: String? = null): Boolean {
         val request = UrlIntake.parse(rawUrl)
         if (request == null) {
             invalidatePendingWork()
             _uiState.value = PlayerUiState(phase = PlayerPhase.ERROR, error = "Unrecognized URL: $rawUrl")
             return false
         }
-        loadRequest(request)
+        loadRequest(request.copy(title = title))
         return true
     }
+
 
     fun loadRequest(request: IntakeRequest) {
         invalidatePendingWork()
         successCallbackUrl = request.successCallbackUrl
+        settings.addToLinkHistory(request.sourceUrl, request.title ?: request.filename)
         directFallbackUsed = false
         val generation = loadGeneration
         _uiState.value = PlayerUiState(

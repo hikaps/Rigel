@@ -9,6 +9,7 @@ import app.rigel.source.jellyfin.JellyfinSession
 import com.russhwolf.settings.MapSettings
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SettingsStoreTest {
@@ -124,6 +125,75 @@ class SettingsStoreTest {
         }
         assertTrue(s.manualDevices().isEmpty())
     }
+    @Test
+    fun linkHistoryEmptyByDefault() {
+        assertEquals(emptyList<LinkHistoryEntry>(), store().linkHistory())
+    }
+
+    @Test
+    fun addToLinkHistoryNewestFirst() {
+        val s = store()
+        s.addToLinkHistory("http://a", null)
+        s.addToLinkHistory("http://b", null)
+        assertEquals(
+            listOf(
+                LinkHistoryEntry("http://b", null),
+                LinkHistoryEntry("http://a", null),
+            ),
+            s.linkHistory(),
+        )
+    }
+
+    @Test
+    fun addToLinkHistoryDeduplicatesMovingToFront() {
+        val s = store()
+        s.addToLinkHistory("http://a", null)
+        s.addToLinkHistory("http://b", null)
+        s.addToLinkHistory("http://a", null)
+        assertEquals(
+            listOf(
+                LinkHistoryEntry("http://a", null),
+                LinkHistoryEntry("http://b", null),
+            ),
+            s.linkHistory(),
+        )
+    }
+
+    @Test
+    fun addToLinkHistoryCapsAtFifty() {
+        val s = store()
+        repeat(60) { index -> s.addToLinkHistory("http://$index", null) }
+        assertEquals(50, s.linkHistory().size)
+        assertEquals("http://59", s.linkHistory().first().url)
+        assertFalse(s.linkHistory().any { it.url == "http://0" })
+    }
+
+    @Test
+    fun addToLinkHistoryStoresSanitizedTitle() {
+        val s = store()
+        s.addToLinkHistory("http://h/v.mp4", "Movie | One\n")
+        assertEquals(
+            listOf(LinkHistoryEntry("http://h/v.mp4", "Movie   One")),
+            s.linkHistory(),
+        )
+    }
+
+    @Test
+    fun addToLinkHistoryRoundTripsPipeUrlWithoutTitle() {
+        val s = store()
+        s.addToLinkHistory("http://h/a|b", null)
+        assertEquals(listOf(LinkHistoryEntry("http://h/a|b", null)), s.linkHistory())
+    }
+
+    @Test
+    fun clearLinkHistoryEmpties() {
+        val s = store()
+        s.addToLinkHistory("http://a", null)
+        s.addToLinkHistory("http://b", null)
+        s.clearLinkHistory()
+        assertEquals(emptyList<LinkHistoryEntry>(), s.linkHistory())
+    }
+
     private fun manualRow(t: CastTarget): String = when (t) {
         is CastTarget.Dlna -> "dlna|${t.device.usn}|${t.device.location}|${t.device.friendlyName}"
         is CastTarget.Roku -> "roku|${t.device.usn}|${t.device.location}|${t.device.modelName ?: "Roku"}"
