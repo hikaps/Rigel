@@ -27,6 +27,7 @@ enum PlayerOrientation {
 /// playing; shows probing/proxy/error states while Kotlin prepares the stream.
 struct PlayerHostView: View {
     @EnvironmentObject private var player: PlayerModel
+    @State private var showCastPicker = false
 
     private struct LoadSignature: Equatable {
         let url: String
@@ -51,13 +52,16 @@ struct PlayerHostView: View {
                 player.stop()
             }
         }
+        .sheet(isPresented: $showCastPicker) {
+            DevicesView()
+        }
     }
 
     @ViewBuilder
     private var content: some View {
         switch player.phase.name {
         case "IDLE":
-            stateCard {
+            stateContent {
                 Image(systemName: "play.rectangle.fill")
                     .font(.system(size: 42, weight: .medium))
                     .symbolRenderingMode(.hierarchical)
@@ -79,13 +83,14 @@ struct PlayerHostView: View {
                 } label: {
                     Label("Back to Rigel", systemImage: "chevron.left")
                 }
-                .buttonStyle(.bordered)
-                .tint(Color.rigelStar)
-                .controlSize(.large)
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.rigelStar)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
             }
         case "PROBING", "PREPARING_PROXY":
             let preparingProxy = player.phase.name == "PREPARING_PROXY"
-            stateCard {
+            stateContent {
                 Image(systemName: preparingProxy ? "gearshape.2.fill" : "magnifyingglass")
                     .font(.system(size: 34, weight: .medium))
                     .symbolRenderingMode(.hierarchical)
@@ -113,17 +118,15 @@ struct PlayerHostView: View {
                     Label(player.routeLabel, systemImage: "arrow.triangle.branch")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(Color.rigelStar)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.rigelStarDim.opacity(0.8), in: Capsule())
                 }
 
                 Button("Cancel", role: .cancel) {
                     player.stop()
                 }
-                .buttonStyle(.bordered)
-                .tint(.white)
-                .controlSize(.large)
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.8))
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
             }
         case "PLAYING":
             if let url = player.playableURL {
@@ -135,11 +138,12 @@ struct PlayerHostView: View {
                     isProxy: player.proxyUrl != nil,
                     onReady: {},
                     onError: { player.reportError($0) },
-                    onBack: { player.stop() }
+                    onBack: { player.stop() },
+                    onCast: { showCastPicker = true }
                 )
                 .ignoresSafeArea()
             } else {
-                stateCard {
+                stateContent {
                     ProgressView()
                         .tint(.white)
                         .controlSize(.large)
@@ -149,7 +153,7 @@ struct PlayerHostView: View {
                 }
             }
         default: // ERROR
-            stateCard {
+            stateContent {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 36, weight: .medium))
                     .symbolRenderingMode(.hierarchical)
@@ -175,53 +179,35 @@ struct PlayerHostView: View {
                         Label("Try with proxy", systemImage: "arrow.triangle.2.circlepath")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.rigelStar)
-                    .controlSize(.large)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.rigelStar)
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
 
                     Button("Close", role: .cancel) {
                         player.stop()
                     }
-                    .buttonStyle(.bordered)
-                    .tint(.white)
-                    .controlSize(.large)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
                 }
+                .frame(maxWidth: 280)
             }
         }
     }
 
     @ViewBuilder
-    private func stateCard<Content: View>(
+    private func stateContent<Content: View>(
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(spacing: 20, content: content)
-            .padding(28)
-            .frame(maxWidth: 420)
-            .modifier(CardChrome())
             .padding(.horizontal, 24)
-    }
-    /// Liquid Glass card on iOS 26; ultra-thin material with a hairline border
-    /// before that.
-    private struct CardChrome: ViewModifier {
-        func body(content: Content) -> some View {
-            if #available(iOS 26.0, *) {
-                content.glassEffect(
-                    .regular,
-                    in: RoundedRectangle(cornerRadius: 28, style: .continuous)
-                )
-            } else {
-                content
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 28, style: .continuous)
-                            .strokeBorder(.white.opacity(0.14), lineWidth: 1)
-                    }
-            }
-        }
+            .frame(maxWidth: 420)
     }
 }
 
-/// Hosts RigelPlayerViewController (AVPlayerViewController + native top bar).
+/// Hosts RigelPlayerViewController (AVPlayerViewController + transparent overlay controls).
 /// Load is called only when the URL/title/sender signature actually changes,
 /// so SwiftUI state updates never reload the player. The guard lives in the
 /// Coordinator (never mutate @State during view updates).
@@ -234,6 +220,7 @@ struct PlayerView: UIViewControllerRepresentable {
     let onReady: () -> Void
     let onError: (String) -> Void
     let onBack: () -> Void
+    let onCast: () -> Void
 
     final class Coordinator {
         var loaded: (
@@ -302,6 +289,9 @@ struct PlayerView: UIViewControllerRepresentable {
             onBack: onBack
         )
         let created = bridge.createPlayerViewController(events: events)
+        if let player = created as? RigelPlayerViewController {
+            player.onCastRequested = onCast
+        }
         origin.controller = created as? RigelPlayerViewController
         context.coordinator.errorOrigin = origin
         return created

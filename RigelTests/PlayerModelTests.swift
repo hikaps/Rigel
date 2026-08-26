@@ -66,7 +66,7 @@ final class PlayerModelTests: XCTestCase {
     }
 
     @MainActor
-    func testHlsPlayerExposesVideoTransportAndTrackControls() {
+    func testHlsPlayerExposesVideoTransportTrackAndCastControls() {
         let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
         let controller = RigelPlayerViewController(events: events)
         controller.load(
@@ -84,6 +84,8 @@ final class PlayerModelTests: XCTestCase {
         let slider = view(controller.view, withAccessibilityIdentifier: "player.progressSlider")
         let topBar = view(controller.view, withAccessibilityIdentifier: "player.topBar")
         let bottomBar = view(controller.view, withAccessibilityIdentifier: "player.bottomBar")
+        let playPause = view(controller.view, withAccessibilityLabel: "Play")
+        let cast = view(controller.view, withAccessibilityLabel: "Cast to device")
         XCTAssertNotNil(close)
         XCTAssertNotNil(tracks)
         XCTAssertNotNil(skipBackward)
@@ -93,7 +95,19 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertEqual(slider?.accessibilityHint, "Adjust playback position")
         XCTAssertNotNil(topBar)
         XCTAssertNotNil(bottomBar)
+        XCTAssertNotNil(playPause)
+        XCTAssertNotNil(cast)
+        XCTAssertEqual(topBar?.backgroundColor, .clear)
+        XCTAssertEqual(bottomBar?.backgroundColor, .clear)
+        XCTAssertEqual(topBar?.layer.cornerRadius, 0)
+        XCTAssertEqual(bottomBar?.layer.cornerRadius, 0)
+        XCTAssertEqual((close as? UIButton)?.configuration?.background.backgroundColor, .clear)
+        XCTAssertEqual((playPause as? UIButton)?.configuration?.background.backgroundColor, .clear)
         XCTAssertFalse(tracks?.isHidden == true)
+        var castRequested = false
+        controller.onCastRequested = { castRequested = true }
+        (cast as? UIButton)?.sendActions(for: .touchUpInside)
+        XCTAssertTrue(castRequested)
 
         controller.setTrackSelectionEnabled(false)
         XCTAssertTrue(tracks?.isHidden == true)
