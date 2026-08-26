@@ -315,7 +315,7 @@ class PlayerController(
 /** Exposed to Swift (RigelIntake.shared.handle(url:)) for onOpenURL. */
 object RigelIntake {
     private var controller: PlayerController? = null
-    private val pending = mutableListOf<String>()
+    private val pending = mutableListOf<Pair<String, String?>>()
 
     private fun current(): PlayerController = controller ?: app.rigel.RigelCore.controller
 
@@ -323,13 +323,15 @@ object RigelIntake {
         this.controller = controller
         val queued = pending.toList()
         pending.clear()
-        for (url in queued) handle(url)
+        for ((url, title) in queued) handle(url, title)
     }
 
-    fun handle(url: String): Boolean {
-        val ok = current().loadRaw(url)
+    fun handle(url: String): Boolean = handle(url, null)
+
+    fun handle(url: String, title: String?): Boolean {
+        val ok = current().loadRaw(url, title)
         if (!ok && controller == null) {
-            pending += url
+            pending += url to title
             return true
         }
         return ok

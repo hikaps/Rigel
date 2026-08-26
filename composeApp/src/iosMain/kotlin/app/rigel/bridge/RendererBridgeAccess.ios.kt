@@ -17,8 +17,8 @@ actual object RendererBridgeAccess {
 
 /** DLNA-renderer receive mode: control-point pushes map onto the normal intake pipeline. */
 object RendererEventsImpl : RendererEvents {
-    override fun onSetUri(uri: String) {
-        app.rigel.player.RigelIntake.handle(uri)
+    override fun onSetUri(uri: String, title: String?) {
+        app.rigel.player.RigelIntake.handle(uri, title)
     }
 
     override fun onPlay() {

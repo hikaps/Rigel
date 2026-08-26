@@ -7,7 +7,7 @@ package app.rigel.bridge
  * responder must join the multicast group); start() reports the failure.
  */
 interface RendererEvents {
-    fun onSetUri(uri: String)
+    fun onSetUri(uri: String, title: String?)
     fun onPlay()
     fun onPause()
     fun onStop()
