@@ -79,7 +79,7 @@ final class PlayerModel: ObservableObject {
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         requestedTitle = trimmedTitle.flatMap { $0.isEmpty ? nil : $0 }
         requestedTitleURL = url
-        let accepted = SwiftPlayer.shared.loadRaw(url: url)
+        let accepted = SwiftPlayer.shared.loadRaw(url: url, title: trimmedTitle)
         if !accepted {
             requestedTitle = nil
             requestedTitleURL = nil

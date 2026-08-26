@@ -69,20 +69,22 @@ class PlayerController(
 
     private var successCallbackUrl: String? = null
 
-    fun loadRaw(rawUrl: String): Boolean {
+    fun loadRaw(rawUrl: String, title: String? = null): Boolean {
         val request = UrlIntake.parse(rawUrl)
         if (request == null) {
             invalidatePendingWork()
             _uiState.value = PlayerUiState(phase = PlayerPhase.ERROR, error = "Unrecognized URL: $rawUrl")
             return false
         }
-        loadRequest(request)
+        loadRequest(request.copy(title = title))
         return true
     }
+
 
     fun loadRequest(request: IntakeRequest) {
         invalidatePendingWork()
         successCallbackUrl = request.successCallbackUrl
+        settings.addToLinkHistory(request.sourceUrl, request.title ?: request.filename)
         directFallbackUsed = false
         val generation = loadGeneration
         _uiState.value = PlayerUiState(
@@ -313,7 +315,7 @@ class PlayerController(
 /** Exposed to Swift (RigelIntake.shared.handle(url:)) for onOpenURL. */
 object RigelIntake {
     private var controller: PlayerController? = null
-    private val pending = mutableListOf<String>()
+    private val pending = mutableListOf<Pair<String, String?>>()
 
     private fun current(): PlayerController = controller ?: app.rigel.RigelCore.controller
 
@@ -321,13 +323,15 @@ object RigelIntake {
         this.controller = controller
         val queued = pending.toList()
         pending.clear()
-        for (url in queued) handle(url)
+        for ((url, title) in queued) handle(url, title)
     }
 
-    fun handle(url: String): Boolean {
-        val ok = current().loadRaw(url)
+    fun handle(url: String): Boolean = handle(url, null)
+
+    fun handle(url: String, title: String?): Boolean {
+        val ok = current().loadRaw(url, title)
         if (!ok && controller == null) {
-            pending += url
+            pending += url to title
             return true
         }
         return ok

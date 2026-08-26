@@ -217,8 +217,7 @@ final class UpnpRendererService {
                 currentUri = uri
                 let title = extractTag(requestText, "dc:title")
                 let events = self.events
-                DispatchQueue.main.async { events?.onSetUri(uri: uri) }
-                _ = title
+                DispatchQueue.main.async { events?.onSetUri(uri: uri, title: title) }
             }
             return soapResponse("SetAVTransportURIResponse")
         case "Play":

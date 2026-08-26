@@ -7,6 +7,7 @@ import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.TranscodeBridge
 import app.rigel.gateway.PlaybackRoute
 import app.rigel.intake.IntakeRequest
+import app.rigel.settings.LinkHistoryEntry
 import app.rigel.settings.RouteOverride
 import app.rigel.settings.SettingsStore
 import com.russhwolf.settings.MapSettings
@@ -120,6 +121,36 @@ class PlayerControllerTest {
         val accepted = c.loadRaw("http://h/v.mp4")
         assertTrue(accepted)
         assertEquals(PlayerPhase.PROBING, c.uiState.value.phase)
+    }
+
+    @Test
+    fun loadRawRecordsLinkInHistory() {
+        val settings = SettingsStore(MapSettings(mutableMapOf()))
+        val c = controller(settings)
+        assertTrue(c.loadRaw("http://h/v.mp4"))
+        assertEquals(
+            listOf(LinkHistoryEntry("http://h/v.mp4", null)),
+            settings.linkHistory(),
+        )
+    }
+
+    @Test
+    fun loadRawWithTitleRecordsTitle() {
+        val settings = SettingsStore(MapSettings(mutableMapOf()))
+        val c = controller(settings)
+        assertTrue(c.loadRaw("http://h/v.mp4", title = "My Movie"))
+        assertEquals(
+            listOf(LinkHistoryEntry("http://h/v.mp4", "My Movie")),
+            settings.linkHistory(),
+        )
+    }
+
+    @Test
+    fun rejectedUrlNotRecorded() {
+        val settings = SettingsStore(MapSettings(mutableMapOf()))
+        val c = controller(settings)
+        assertFalse(c.loadRaw("not a url"))
+        assertTrue(settings.linkHistory().isEmpty())
     }
 
     @Test
