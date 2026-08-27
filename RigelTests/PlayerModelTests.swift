@@ -64,6 +64,8 @@ final class PlayerModelTests: XCTestCase {
 
         model.apply(state(probe: probe(durationMs: nil)))
         XCTAssertNil(model.probeDurationMs)
+        model.apply(state(probe: probe(durationMs: 600_000, isLive: true)))
+        XCTAssertNil(model.probeDurationMs)
     }
 
 
@@ -139,7 +141,8 @@ final class PlayerModelTests: XCTestCase {
             title: nil,
             sender: nil,
             longFormVideoAirPlayEligible: false,
-            durationSeconds: 600
+            durationSeconds: 600,
+            isProxy: true
         )
         defer { controller.stopPlayback() }
 
@@ -155,6 +158,28 @@ final class PlayerModelTests: XCTestCase {
     }
 
     @MainActor
+    func testDirectHlsLoadKeepsNativeDurationBehavior() {
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let controller = RigelPlayerViewController(events: events)
+        controller.load(
+            url: "http://127.0.0.1/session/index.m3u8",
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false,
+            durationSeconds: 600,
+            isProxy: false
+        )
+        defer { controller.stopPlayback() }
+
+        let slider = view(controller.view, withAccessibilityIdentifier: "player.progressSlider") as? UISlider
+        let duration = label(controller.view, withText: "—")
+        XCTAssertNotNil(slider)
+        XCTAssertTrue(slider?.isHidden ?? false)
+        XCTAssertEqual(duration?.text, "—")
+    }
+
+
+    @MainActor
     func testProxyLoadWithoutKnownDurationHidesSeekTimeline() {
         let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
         let controller = RigelPlayerViewController(events: events)
@@ -162,7 +187,8 @@ final class PlayerModelTests: XCTestCase {
             url: "http://127.0.0.1/session/index.m3u8",
             title: nil,
             sender: nil,
-            longFormVideoAirPlayEligible: false
+            longFormVideoAirPlayEligible: false,
+            isProxy: true
         )
         defer { controller.stopPlayback() }
 

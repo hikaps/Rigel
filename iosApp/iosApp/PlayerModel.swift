@@ -69,7 +69,11 @@ final class PlayerModel: ObservableObject {
         subtitleUrls = state.subtitleUrls
         castActive = state.castActive
         longFormVideoAirPlayEligible = state.longFormVideoAirPlayEligible
-        probeDurationMs = state.probe?.durationMs?.doubleValue
+        if let probe = state.probe, !probe.isLive {
+            probeDurationMs = probe.durationMs?.doubleValue
+        } else {
+            probeDurationMs = nil
+        }
         showPlayer = state.phase != .idle
     }
 

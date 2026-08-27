@@ -325,7 +325,8 @@ struct PlayerView: UIViewControllerRepresentable {
                 sender: sender,
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
                 subtitleUrls: subtitleUrls,
-                durationMs: probeDurationMs.map { KotlinLong(longLong: Int64($0)) }
+                durationMs: probeDurationMs.map { KotlinLong(longLong: Int64($0)) },
+                isProxy: isProxy
             )
             context.coordinator.loaded = (
                 url,

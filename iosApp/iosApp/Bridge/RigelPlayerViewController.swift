@@ -92,7 +92,9 @@ final class RigelPlayerViewController: UIViewController {
     private var sidecarGeneration = 0
     private var isScrubbing = false
     private var knownDurationSeconds: Double?
+    private var isProxyPlayback = false
     private var pendingScrubValue: Float?
+    private var scrubSeekInFlight = false
     private var scrubGeneration = 0
 
     private var customPlaybackControls = false
@@ -635,7 +637,8 @@ final class RigelPlayerViewController: UIViewController {
         sender: String?,
         longFormVideoAirPlayEligible: Bool,
         subtitleUrls: [String] = [],
-        durationSeconds: Double? = nil
+        durationSeconds: Double? = nil,
+        isProxy: Bool = false
     ) {
         NSLog("[RigelPlayer] load %@ longFormVideo=%d", url, longFormVideoAirPlayEligible ? 1 : 0)
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -668,6 +671,7 @@ final class RigelPlayerViewController: UIViewController {
         notifiedPlaying = false
         isScrubbing = false
         knownDurationSeconds = durationSeconds
+        isProxyPlayback = isProxy
         pendingScrubValue = nil
         customPlaybackControls = Self.isHLSURL(url)
         bottomBar.isHidden = !customPlaybackControls
@@ -707,11 +711,17 @@ final class RigelPlayerViewController: UIViewController {
         startPolling()
         updatePlaybackControls()
     }
-    /// AVPlayer duration when finite; the probe's known duration otherwise
-    /// (a growing HLS playlist is reported as live until ENDLIST appears).
+    /// Proxy output keeps the full probed VOD duration while its HLS playlist
+    /// grows; direct HLS uses AVPlayer's native duration behavior.
     private func effectiveDuration(_ item: AVPlayerItem) -> Double {
+        if isProxyPlayback,
+           let knownDurationSeconds,
+           knownDurationSeconds.isFinite,
+           knownDurationSeconds > 0 {
+            return knownDurationSeconds
+        }
         let reported = item.duration.seconds
-        return reported.isFinite && reported > 0 ? reported : (knownDurationSeconds ?? .nan)
+        return reported.isFinite && reported > 0 ? reported : .nan
     }
     @objc private func playPauseTapped() {
         showControls()
@@ -734,6 +744,9 @@ final class RigelPlayerViewController: UIViewController {
 
     private func seek(by offset: Double) {
         showControls()
+        pendingScrubValue = nil
+        scrubSeekInFlight = false
+        scrubGeneration &+= 1
         guard let player else { return }
         let current = player.currentTime().seconds
         let start = current.isFinite ? max(0, current) : 0
@@ -747,6 +760,7 @@ final class RigelPlayerViewController: UIViewController {
 
     @objc private func progressTouchDown() {
         scrubGeneration &+= 1
+        scrubSeekInFlight = false
         isScrubbing = true
         pendingScrubValue = progressSlider.value
         controlsHideTimer?.invalidate()
@@ -761,10 +775,9 @@ final class RigelPlayerViewController: UIViewController {
     }
 
     @objc private func progressTouchUp() {
-        let value = pendingScrubValue ?? progressSlider.value
-        let generation = scrubGeneration
         isScrubbing = false
-        guard let player, let item = player.currentItem else {
+        pendingScrubValue = pendingScrubValue ?? progressSlider.value
+        guard let item = player?.currentItem else {
             pendingScrubValue = nil
             showControls()
             return
@@ -775,16 +788,35 @@ final class RigelPlayerViewController: UIViewController {
             showControls()
             return
         }
+        submitPendingScrub()
+        showControls()
+    }
+    private func submitPendingScrub() {
+        guard !isScrubbing,
+              !scrubSeekInFlight,
+              let value = pendingScrubValue,
+              let player,
+              let item = player.currentItem,
+              item.status != .failed else { return }
+        let duration = effectiveDuration(item)
+        guard duration.isFinite, duration > 0 else { return }
         let target = Double(value) * duration
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self, weak player] _ in
+        let generation = scrubGeneration
+        scrubSeekInFlight = true
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self, weak player] finished in
             DispatchQueue.main.async {
                 guard let self, let player, self.player === player, self.scrubGeneration == generation else { return }
-                self.pendingScrubValue = nil
-                self.updatePlaybackControls()
-                self.scheduleControlsHide()
+                self.scrubSeekInFlight = false
+                if finished {
+                    self.pendingScrubValue = nil
+                    self.updatePlaybackControls()
+                    self.scheduleControlsHide()
+                } else {
+                    self.showControls()
+                    self.updatePlaybackControls()
+                }
             }
         }
-        showControls()
     }
     private func updatePlaybackControls() {
         guard customPlaybackControls, let player, let item = player.currentItem else { return }
@@ -855,7 +887,9 @@ final class RigelPlayerViewController: UIViewController {
         customPlaybackControls = false
         isScrubbing = false
         knownDurationSeconds = nil
+        isProxyPlayback = false
         pendingScrubValue = nil
+        scrubSeekInFlight = false
         scrubGeneration &+= 1
         bottomBar.isHidden = true
         audioGroup = nil
@@ -899,6 +933,8 @@ final class RigelPlayerViewController: UIViewController {
             loadTrackGroups(for: item)
         }
         updatePlaybackControls()
+        // A failed seek remains pending; retry after the HLS playlist refreshes.
+        submitPendingScrub()
         updateSidecarSubtitle()
         if player.timeControlStatus == .playing {
             if controlsVisible, controlsHideTimer == nil {
@@ -948,7 +984,8 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         sender: String?,
         longFormVideoAirPlayEligible: Bool,
         subtitleUrls: [String],
-        durationMs: KotlinLong?
+        durationMs: KotlinLong?,
+        isProxy: Bool
     ) {
         vc?.load(
             url: url,
@@ -956,7 +993,8 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
             sender: sender,
             longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
             subtitleUrls: subtitleUrls,
-            durationSeconds: durationMs.map { $0.doubleValue / 1000.0 }
+            durationSeconds: durationMs.map { $0.doubleValue / 1000.0 },
+            isProxy: isProxy
         )
     }
 
