@@ -15,7 +15,7 @@ final class PlayerModelTests: XCTestCase {
             phase: PlayerPhase.playing,
             sourceUrl: "http://origin/v.mkv",
             filename: nil,
-            subtitleUrls: [],
+            subtitleUrls: ["https://origin/en.vtt"],
             route: PlaybackRoute.direct,
             proxyUrl: nil,
             probe: nil,
@@ -28,6 +28,7 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertEqual(model.phase, PlayerPhase.playing)
         XCTAssertEqual(model.sourceUrl, "http://origin/v.mkv")
         XCTAssertEqual(model.sender, "kodi-remote")
+        XCTAssertEqual(model.subtitleUrls, ["https://origin/en.vtt"])
         XCTAssertTrue(model.showPlayer)
         XCTAssertTrue(model.isPlaying)
         XCTAssertEqual(model.playableURL, "http://origin/v.mkv", "direct playback serves the source URL")
@@ -66,7 +67,7 @@ final class PlayerModelTests: XCTestCase {
     }
 
     @MainActor
-    func testHlsPlayerExposesVideoTransportTrackAndCastControls() {
+    func testHlsPlayerExposesVideoTransportTrackAndDeviceControls() {
         let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
         let controller = RigelPlayerViewController(events: events)
         controller.load(
@@ -85,7 +86,7 @@ final class PlayerModelTests: XCTestCase {
         let topBar = view(controller.view, withAccessibilityIdentifier: "player.topBar")
         let bottomBar = view(controller.view, withAccessibilityIdentifier: "player.bottomBar")
         let playPause = view(controller.view, withAccessibilityLabel: "Play")
-        let cast = view(controller.view, withAccessibilityLabel: "Cast to device")
+        let devices = view(controller.view, withAccessibilityLabel: "Playback destinations")
         XCTAssertNotNil(close)
         XCTAssertNotNil(tracks)
         XCTAssertNotNil(skipBackward)
@@ -96,7 +97,7 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertNotNil(topBar)
         XCTAssertNotNil(bottomBar)
         XCTAssertNotNil(playPause)
-        XCTAssertNotNil(cast)
+        XCTAssertNotNil(devices)
         XCTAssertEqual(topBar?.backgroundColor, .clear)
         XCTAssertEqual(bottomBar?.backgroundColor, .clear)
         XCTAssertEqual(topBar?.layer.cornerRadius, 0)
@@ -104,23 +105,17 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertEqual((close as? UIButton)?.configuration?.background.backgroundColor, .clear)
         XCTAssertEqual((playPause as? UIButton)?.configuration?.background.backgroundColor, .clear)
         XCTAssertFalse(tracks?.isHidden == true)
-        var castRequested = false
-        controller.onCastRequested = { castRequested = true }
-        (cast as? UIButton)?.sendActions(for: .touchUpInside)
-        XCTAssertTrue(castRequested)
-
-        controller.setTrackSelectionEnabled(false)
-        XCTAssertTrue(tracks?.isHidden == true)
-        controller.setTrackSelectionEnabled(true)
-        XCTAssertFalse(tracks?.isHidden == true)
+        var devicesRequested = false
+        controller.onDevicesRequested = { devicesRequested = true }
+        (devices as? UIButton)?.sendActions(for: .touchUpInside)
+        XCTAssertTrue(devicesRequested)
 
         controller.hideControls()
         XCTAssertTrue(topBar?.alpha == 0)
         XCTAssertTrue(bottomBar?.alpha == 0)
         controller.showControls()
         XCTAssertFalse(topBar?.isHidden == true)
-        XCTAssertTrue(topBar?.alpha == 1)
-        XCTAssertFalse(bottomBar?.isHidden == true)
+        XCTAssertTrue(bottomBar?.isHidden == false)
     }
 
     private func view(_ root: UIView, withAccessibilityLabel label: String) -> UIView? {

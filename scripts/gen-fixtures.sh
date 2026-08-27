@@ -14,6 +14,14 @@ ffmpeg -hide_banner -loglevel error -y \
   -f lavfi -i "testsrc=duration=2:size=320x240:rate=10" \
   -f lavfi -i "sine=frequency=440:duration=2" \
   -c:v libx264 -pix_fmt yuv420p -c:a dca -strict -2 -shortest "$OUT/fixture_dts.mkv"
+# 2s MKV (H264+AAC+AAC) — exercises alternate-audio proxy renditions
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc=duration=2:size=320x240:rate=10" \
+  -f lavfi -i "sine=frequency=440:duration=2" \
+  -f lavfi -i "sine=frequency=880:duration=2" \
+  -map 0:v -map 1:a -map 2:a \
+  -metadata:s:a:0 language=eng -metadata:s:a:1 language=fre \
+  -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$OUT/fixture_multi.mkv"
 # 2s HLS (H264+AAC, 2 segments) — bundled as RigelTests resources
 # (fixture_hls/ is referenced by project.pbxproj; without these files the
 # Swift test target's resource phase fails on fresh checkouts)

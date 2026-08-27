@@ -14,6 +14,7 @@ final class PlayerModel: ObservableObject {
     @Published var proxyUrl: String?
     @Published var error: String?
     @Published var sender: String?
+    @Published var subtitleUrls: [String] = []
     @Published var castActive = false
     @Published var longFormVideoAirPlayEligible = false
     @Published var showPlayer = false
@@ -64,6 +65,7 @@ final class PlayerModel: ObservableObject {
         proxyUrl = state.proxyUrl
         error = state.error
         sender = state.sender
+        subtitleUrls = state.subtitleUrls
         castActive = state.castActive
         longFormVideoAirPlayEligible = state.longFormVideoAirPlayEligible
         showPlayer = state.phase != .idle
