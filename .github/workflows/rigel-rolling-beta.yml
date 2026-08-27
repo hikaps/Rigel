@@ -6,8 +6,9 @@ name: Rigel Rolling Beta Release
 # AltStore/SideStore re-signs the IPA with the installer's Apple ID.
 
 env:
-  # Set this to the next intended stable release; run numbers remain build-only.
-  BETA_VERSION: "1.1.0"
+  # SideStore currently compares semantic versions, not source buildVersion.
+  # Keep beta builds on the current stable major/minor; each run becomes the patch version.
+  BETA_VERSION_PREFIX: "1.0"
 
 on:
   push:
@@ -57,10 +58,10 @@ jobs:
 
       - name: Archive unsigned beta app
         env:
-          MARKETING_VERSION: ${{ env.BETA_VERSION }}
           CURRENT_PROJECT_VERSION: "${{ github.run_number }}"
         run: |
           set -euo pipefail
+          MARKETING_VERSION="${BETA_VERSION_PREFIX}.${CURRENT_PROJECT_VERSION}"
           xcodebuild archive \
             -project iosApp/Rigel.xcodeproj \
             -scheme Rigel \
