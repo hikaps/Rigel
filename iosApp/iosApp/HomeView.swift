@@ -192,7 +192,7 @@ struct HomeView: View {
             }
 
             Label(
-                "AirPlay, DLNA, Roku, Kodi, and Chromecast screens are reachable from Devices.",
+                "Play a stream, then send it to an AirPlay, DLNA, Roku, Kodi, or Chromecast screen from the player.",
                 systemImage: "info.circle"
             )
             .font(.footnote)
