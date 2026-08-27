@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Generate an AltStore/SideStore-compatible source from an exported IPA."""
+"""Generate an AltStore/SideStore-compatible source from an exported IPA.
+
+SideStore currently uses the IPA's semantic version for update detection and
+does not detect a change to ``buildVersion`` alone.
+"""
 
 from __future__ import annotations
 

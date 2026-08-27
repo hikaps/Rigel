@@ -16,6 +16,8 @@ The root README is user-facing only (features, usage, availability, license); th
 - After a PR lands, update local `develop` from `origin/develop`, then remove the merged remote feature branch and its disposable worktree when no longer needed.
 - Periodically cut a release by opening a PR from `develop` into `main`. Merge that release PR on GitHub with a **merge commit**, never squash; preserve the full integration history that produced the release. Merge only after release checks pass.
 
+- **AltStore/SideStore beta versions:** SideStore currently detects updates from the semantic `version` and ignores a `buildVersion`-only change. The rolling beta workflow must set the IPA and generated manifest version to `<beta major>.<beta minor>.<github.run_number>` while keeping `buildVersion` equal to the run number. Keep that semantic version monotonic after distribution; a deliberate reset requires beta users to reinstall. Stable releases use the normal `STABLE_VERSION` value in the stable workflow.
+
 
 ## Architecture & Data Flow
 
