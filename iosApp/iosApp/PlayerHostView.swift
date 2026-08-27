@@ -33,6 +33,7 @@ struct PlayerHostView: View {
         let url: String
         let title: String?
         let sender: String?
+        let probeDurationMs: Double?
     }
 
     var body: some View {
@@ -137,6 +138,7 @@ struct PlayerHostView: View {
                     subtitleUrls: player.subtitleUrls,
                     longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
                     isProxy: player.proxyUrl != nil,
+                    probeDurationMs: player.probeDurationMs,
                     onReady: {},
                     onError: { player.reportError($0) },
                     onBack: { player.stop() },
@@ -219,6 +221,7 @@ struct PlayerView: UIViewControllerRepresentable {
     let subtitleUrls: [String]
     let longFormVideoAirPlayEligible: Bool
     let isProxy: Bool
+    let probeDurationMs: Double?
     let onReady: () -> Void
     let onError: (String) -> Void
     let onBack: () -> Void
@@ -231,7 +234,8 @@ struct PlayerView: UIViewControllerRepresentable {
             sender: String?,
             subtitleUrls: [String],
             longFormVideoAirPlayEligible: Bool,
-            isProxy: Bool
+            isProxy: Bool,
+            probeDurationMs: Double?
         )?
         /// Strongly retains the error origin so the closure's weak capture
         /// outlives makeUIViewController; otherwise the box deallocates and
@@ -313,13 +317,15 @@ struct PlayerView: UIViewControllerRepresentable {
             loaded?.sender != sender ||
             loaded?.subtitleUrls != subtitleUrls ||
             loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible ||
-            loaded?.isProxy != isProxy {
+            loaded?.isProxy != isProxy ||
+            loaded?.probeDurationMs != probeDurationMs {
             bridge.load(
                 url: url,
                 title: title,
                 sender: sender,
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
-                subtitleUrls: subtitleUrls
+                subtitleUrls: subtitleUrls,
+                durationMs: probeDurationMs.map { KotlinLong(longLong: Int64($0)) }
             )
             context.coordinator.loaded = (
                 url,
@@ -327,7 +333,8 @@ struct PlayerView: UIViewControllerRepresentable {
                 sender,
                 subtitleUrls,
                 longFormVideoAirPlayEligible,
-                isProxy
+                isProxy,
+                probeDurationMs
             )
         }
     }

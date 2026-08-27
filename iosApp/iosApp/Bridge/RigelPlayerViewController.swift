@@ -25,9 +25,10 @@ private final class PlayerGradientView: UIView {
 
 /// AVPlayer host with native title, route, audio/subtitle, and transport controls.
 /// The overlay chrome follows normal player behavior: it appears on interaction
-/// and fades while playback runs. HLS proxy playlists are presented with
-/// Rigel's own transport bar because an in-progress VOD playlist is reported by
-/// AVPlayer as live and would otherwise hide seeking and skip controls.
+/// and fades while playback runs. HLS proxy playlists use Rigel's own
+/// transport bar because an in-progress VOD playlist is reported by AVPlayer
+/// as live; its probe duration supplies the full timeline until ENDLIST appears,
+/// and seeks past generated segments buffer until the exporter catches up.
 /// Direct VOD media keeps AVPlayer's controls. AirPlay video handoff and PiP
 /// come from AVPlayerViewController.
 /// Events fire on the main thread.
@@ -90,6 +91,7 @@ final class RigelPlayerViewController: UIViewController {
     private var activeSidecarSubtitleIndex: Int?
     private var sidecarGeneration = 0
     private var isScrubbing = false
+    private var knownDurationSeconds: Double?
     private var pendingScrubValue: Float?
     private var scrubGeneration = 0
 
@@ -632,7 +634,8 @@ final class RigelPlayerViewController: UIViewController {
         title: String?,
         sender: String?,
         longFormVideoAirPlayEligible: Bool,
-        subtitleUrls: [String] = []
+        subtitleUrls: [String] = [],
+        durationSeconds: Double? = nil
     ) {
         NSLog("[RigelPlayer] load %@ longFormVideo=%d", url, longFormVideoAirPlayEligible ? 1 : 0)
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -664,6 +667,7 @@ final class RigelPlayerViewController: UIViewController {
         disposed = false
         notifiedPlaying = false
         isScrubbing = false
+        knownDurationSeconds = durationSeconds
         pendingScrubValue = nil
         customPlaybackControls = Self.isHLSURL(url)
         bottomBar.isHidden = !customPlaybackControls
@@ -701,6 +705,13 @@ final class RigelPlayerViewController: UIViewController {
         // play() from polling: that would override a user's pause.
         p.play()
         startPolling()
+        updatePlaybackControls()
+    }
+    /// AVPlayer duration when finite; the probe's known duration otherwise
+    /// (a growing HLS playlist is reported as live until ENDLIST appears).
+    private func effectiveDuration(_ item: AVPlayerItem) -> Double {
+        let reported = item.duration.seconds
+        return reported.isFinite && reported > 0 ? reported : (knownDurationSeconds ?? .nan)
     }
     @objc private func playPauseTapped() {
         showControls()
@@ -726,7 +737,7 @@ final class RigelPlayerViewController: UIViewController {
         guard let player else { return }
         let current = player.currentTime().seconds
         let start = current.isFinite ? max(0, current) : 0
-        let duration = player.currentItem?.duration.seconds ?? .nan
+        let duration = player.currentItem.map(effectiveDuration) ?? .nan
         let target = duration.isFinite && duration > 0
             ? min(max(0, start + offset), duration)
             : max(0, start + offset)
@@ -758,7 +769,7 @@ final class RigelPlayerViewController: UIViewController {
             showControls()
             return
         }
-        let duration = item.duration.seconds
+        let duration = effectiveDuration(item)
         guard duration.isFinite, duration > 0 else {
             pendingScrubValue = nil
             showControls()
@@ -780,7 +791,7 @@ final class RigelPlayerViewController: UIViewController {
         let elapsed = player.currentTime().seconds
         let elapsedText = Self.formatTime(elapsed)
         elapsedLabel.text = elapsedText
-        let duration = item.duration.seconds
+        let duration = effectiveDuration(item)
         if duration.isFinite, duration > 0 {
             progressSlider.isHidden = false
             if let pendingScrubValue {
@@ -843,6 +854,7 @@ final class RigelPlayerViewController: UIViewController {
         bottomGradient.alpha = 0
         customPlaybackControls = false
         isScrubbing = false
+        knownDurationSeconds = nil
         pendingScrubValue = nil
         scrubGeneration &+= 1
         bottomBar.isHidden = true
@@ -935,14 +947,16 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         title: String?,
         sender: String?,
         longFormVideoAirPlayEligible: Bool,
-        subtitleUrls: [String]
+        subtitleUrls: [String],
+        durationMs: KotlinLong?
     ) {
         vc?.load(
             url: url,
             title: title,
             sender: sender,
             longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
-            subtitleUrls: subtitleUrls
+            subtitleUrls: subtitleUrls,
+            durationSeconds: durationMs.map { $0.doubleValue / 1000.0 }
         )
     }
 

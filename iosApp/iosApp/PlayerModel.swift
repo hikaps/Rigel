@@ -17,6 +17,7 @@ final class PlayerModel: ObservableObject {
     @Published var subtitleUrls: [String] = []
     @Published var castActive = false
     @Published var longFormVideoAirPlayEligible = false
+    @Published var probeDurationMs: Double?
     @Published var showPlayer = false
     private var requestedTitle: String?
     private var requestedTitleURL: String?
@@ -68,6 +69,7 @@ final class PlayerModel: ObservableObject {
         subtitleUrls = state.subtitleUrls
         castActive = state.castActive
         longFormVideoAirPlayEligible = state.longFormVideoAirPlayEligible
+        probeDurationMs = state.probe?.durationMs?.doubleValue
         showPlayer = state.phase != .idle
     }
 

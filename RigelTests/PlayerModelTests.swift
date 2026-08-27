@@ -55,6 +55,18 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertTrue(model.castActive)
     }
 
+    @MainActor
+    func testProbeDurationMapsToModel() {
+        let model = PlayerModel()
+        model.apply(state(probe: probe(durationMs: 600_000)))
+
+        XCTAssertEqual(model.probeDurationMs, 600_000.0)
+
+        model.apply(state(probe: probe(durationMs: nil)))
+        XCTAssertNil(model.probeDurationMs)
+    }
+
+
     func testGenericProxyPlaylistTitleIsVideo() {
         XCTAssertEqual(
             RigelPlayerViewController.fallbackTitle(for: "http://127.0.0.1/session-x/index.m3u8"),
@@ -118,6 +130,50 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertTrue(bottomBar?.isHidden == false)
     }
 
+    @MainActor
+    func testProxyLoadWithKnownDurationShowsSeekTimeline() {
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let controller = RigelPlayerViewController(events: events)
+        controller.load(
+            url: "http://127.0.0.1/session/index.m3u8",
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false,
+            durationSeconds: 600
+        )
+        defer { controller.stopPlayback() }
+
+        let slider = view(controller.view, withAccessibilityIdentifier: "player.progressSlider") as? UISlider
+        let elapsed = label(controller.view, withText: "00:00")
+        let duration = label(controller.view, withText: "10:00")
+        XCTAssertNotNil(slider)
+        XCTAssertFalse(slider?.isHidden ?? true)
+        XCTAssertEqual(slider?.value ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(elapsed?.text, "00:00")
+        XCTAssertEqual(duration?.text, "10:00")
+        XCTAssertEqual(slider?.accessibilityValue, "00:00 of 10:00")
+    }
+
+    @MainActor
+    func testProxyLoadWithoutKnownDurationHidesSeekTimeline() {
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let controller = RigelPlayerViewController(events: events)
+        controller.load(
+            url: "http://127.0.0.1/session/index.m3u8",
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false
+        )
+        defer { controller.stopPlayback() }
+
+        let slider = view(controller.view, withAccessibilityIdentifier: "player.progressSlider") as? UISlider
+        let duration = label(controller.view, withText: "—")
+        XCTAssertNotNil(slider)
+        XCTAssertTrue(slider?.isHidden ?? false)
+        XCTAssertEqual(duration?.text, "—")
+    }
+
+
     private func view(_ root: UIView, withAccessibilityLabel label: String) -> UIView? {
         if root.accessibilityLabel == label { return root }
         for child in root.subviews {
@@ -128,6 +184,16 @@ final class PlayerModelTests: XCTestCase {
         return nil
     }
 
+
+    private func label(_ root: UIView, withText text: String) -> UILabel? {
+        if let label = root as? UILabel, label.text == text { return label }
+        for child in root.subviews {
+            if let match = label(child, withText: text) {
+                return match
+            }
+        }
+        return nil
+    }
     private func view(_ root: UIView, withAccessibilityIdentifier identifier: String) -> UIView? {
         if root.accessibilityIdentifier == identifier { return root }
         for child in root.subviews {
