@@ -27,7 +27,7 @@ enum PlayerOrientation {
 /// playing; shows probing/proxy/error states while Kotlin prepares the stream.
 struct PlayerHostView: View {
     @EnvironmentObject private var player: PlayerModel
-    @State private var showCastPicker = false
+    @State private var showDevicesPicker = false
 
     private struct LoadSignature: Equatable {
         let url: String
@@ -52,7 +52,7 @@ struct PlayerHostView: View {
                 player.stop()
             }
         }
-        .sheet(isPresented: $showCastPicker) {
+        .sheet(isPresented: $showDevicesPicker) {
             DevicesView()
         }
     }
@@ -134,12 +134,13 @@ struct PlayerHostView: View {
                     url: url,
                     title: player.displayTitle,
                     sender: player.sender,
+                    subtitleUrls: player.subtitleUrls,
                     longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
                     isProxy: player.proxyUrl != nil,
                     onReady: {},
                     onError: { player.reportError($0) },
                     onBack: { player.stop() },
-                    onCast: { showCastPicker = true }
+                    onDevices: { showDevicesPicker = true }
                 )
                 .ignoresSafeArea()
             } else {
@@ -215,18 +216,20 @@ struct PlayerView: UIViewControllerRepresentable {
     let url: String
     let title: String?
     let sender: String?
+    let subtitleUrls: [String]
     let longFormVideoAirPlayEligible: Bool
     let isProxy: Bool
     let onReady: () -> Void
     let onError: (String) -> Void
     let onBack: () -> Void
-    let onCast: () -> Void
+    let onDevices: () -> Void
 
     final class Coordinator {
         var loaded: (
             url: String,
             title: String?,
             sender: String?,
+            subtitleUrls: [String],
             longFormVideoAirPlayEligible: Bool,
             isProxy: Bool
         )?
@@ -290,7 +293,7 @@ struct PlayerView: UIViewControllerRepresentable {
         )
         let created = bridge.createPlayerViewController(events: events)
         if let player = created as? RigelPlayerViewController {
-            player.onCastRequested = onCast
+            player.onDevicesRequested = onDevices
         }
         origin.controller = created as? RigelPlayerViewController
         context.coordinator.errorOrigin = origin
@@ -308,16 +311,24 @@ struct PlayerView: UIViewControllerRepresentable {
         if loaded?.url != url ||
             loaded?.title != title ||
             loaded?.sender != sender ||
+            loaded?.subtitleUrls != subtitleUrls ||
             loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible ||
             loaded?.isProxy != isProxy {
             bridge.load(
                 url: url,
                 title: title,
                 sender: sender,
-                longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
+                longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
+                subtitleUrls: subtitleUrls
             )
-            (uiViewController as? RigelPlayerViewController)?.setTrackSelectionEnabled(!isProxy)
-            context.coordinator.loaded = (url, title, sender, longFormVideoAirPlayEligible, isProxy)
+            context.coordinator.loaded = (
+                url,
+                title,
+                sender,
+                subtitleUrls,
+                longFormVideoAirPlayEligible,
+                isProxy
+            )
         }
     }
 }

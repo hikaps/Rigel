@@ -1,9 +1,11 @@
 import Foundation
 
-/// Local ffmpeg remux/transcode → HLS session. Writes segments + playlist into
-/// Documents/proxy/<sessionId>/ and signals readiness when the playlist exists.
-/// REMUX: video stream-copy; audio copy when AAC/MP3/FLAC/ALAC else decode→AAC.
-/// TRANSCODE: video decode→VideoToolbox H.264, audio decode→AAC.
+/// Local ffmpeg remux/transcode → HLS session. Writes a master playlist,
+/// variant playlists, and segments into Documents/proxy/<sessionId>/ and
+/// signals readiness when enough media is available.
+/// REMUX: video stream-copy; each audio stream is copied when AAC/MP3/FLAC/ALAC
+/// or decoded→AAC otherwise. TRANSCODE: video decode→VideoToolbox H.264,
+/// each audio stream decode→AAC.
 final class RigelHlsExporter {
     final class Session {
         let queue: DispatchQueue
@@ -106,7 +108,7 @@ final class RigelHlsExporter {
     private static func sourceTimestampOrigin90k(
         _ ctx: UnsafeMutablePointer<AVFormatContext>,
         videoIndex: Int32?,
-        audioIndex: Int32?
+        audioIndices: [Int32]
     ) -> Int64 {
         let commonTimeBase = AVRational(num: 1, den: 90_000)
         var origin: Int64?
@@ -117,7 +119,11 @@ final class RigelHlsExporter {
                 commonTimeBase
             )
         }
-        for index in [videoIndex, audioIndex].compactMap({ $0 }) {
+        var indices = audioIndices
+        if let videoIndex {
+            indices.insert(videoIndex, at: 0)
+        }
+        for index in indices {
             guard let stream = ctx.pointee.streams[Int(index)],
                   stream.pointee.start_time != Int64.min else { continue }
             let timeBase = stream.pointee.time_base
@@ -126,6 +132,29 @@ final class RigelHlsExporter {
             origin = origin.map { min($0, start) } ?? start
         }
         return origin ?? 0
+    }
+
+    private static func streamMetadataValue(_ metadata: OpaquePointer?, key: String) -> String? {
+        var result: String?
+        key.withCString { keyPointer in
+            guard let entry = av_dict_get(metadata, keyPointer, nil, 0),
+                  let value = entry.pointee.value else { return }
+            result = String(cString: value)
+        }
+        return result
+    }
+
+    private static func hlsLanguage(for metadata: OpaquePointer?) -> String? {
+        guard let value = streamMetadataValue(metadata, key: "language") else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.count <= 8,
+              trimmed.unicodeScalars.allSatisfy({
+                  ($0.value >= 65 && $0.value <= 90) || ($0.value >= 97 && $0.value <= 122)
+              }) else {
+            return nil
+        }
+        return trimmed
     }
 
     private static func run(
@@ -139,11 +168,12 @@ final class RigelHlsExporter {
     ) {
         let outDir = sessionDir(sessionId: sessionId)
         try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
-        let playlistPath = outDir.appendingPathComponent("index.m3u8").path
+        let legacyPlaylistPath = outDir.appendingPathComponent("index.m3u8").path
 
         var ifmt: UnsafeMutablePointer<AVFormatContext>? = nil
         var ofmt: UnsafeMutablePointer<AVFormatContext>? = nil
-        var audioChain: AudioChain? = nil
+        var audioChains: [Int32: AudioChain] = [:]
+        var passthroughAudioIndices: Set<Int32> = []
         var videoChain: VideoChain? = nil
         var pendingAudioPackets: [UnsafeMutablePointer<AVPacket>] = []
         var notified = false
@@ -168,7 +198,7 @@ final class RigelHlsExporter {
                 var packetPointer: UnsafeMutablePointer<AVPacket>? = packet
                 av_packet_free(&packetPointer)
             }
-            cleanup(ifmt: ifmt, ofmt: ofmt, audio: audioChain, video: videoChain)
+            cleanup(ifmt: ifmt, ofmt: ofmt, audio: Array(audioChains.values), video: videoChain)
         }
 
         guard openInput(url: sourceUrl, headers: headers, fmt: &ifmt), let ctx = ifmt else {
@@ -176,26 +206,12 @@ final class RigelHlsExporter {
             return
         }
 
-        guard avformat_alloc_output_context2(&ofmt, nil, "hls", playlistPath) >= 0, let out = ofmt else {
-            reportFailure("failed to create HLS output context")
-            return
-        }
-
-        av_opt_set(out.pointee.priv_data, "hls_time", "4", 0)
-        av_opt_set(out.pointee.priv_data, "hls_list_size", "0", 0)
-        av_opt_set(out.pointee.priv_data, "hls_flags", "independent_segments", 0)
-        av_opt_set(
-            out.pointee.priv_data,
-            "hls_segment_filename",
-            outDir.appendingPathComponent("seg%05d.ts").path,
-            0
-        )
-
         let inCount = Int(ctx.pointee.nb_streams)
         var selectedVideoIndex: Int32?
         var selectedVideoIsDefault = false
-        var selectedAudioIndex: Int32?
-        var selectedAudioIsDefault = false
+        var selectedAudioIndices: [Int32] = []
+        var defaultAudioIndex: Int32?
+        var foundDefaultAudio = false
         for i in 0..<inCount {
             guard let stream = ctx.pointee.streams[i], let codecpar = stream.pointee.codecpar else { continue }
             let inputIndex = Int32(i)
@@ -209,25 +225,57 @@ final class RigelHlsExporter {
                     selectedVideoIsDefault = isDefault
                 }
             case AVMEDIA_TYPE_AUDIO:
-                if selectedAudioIndex == nil || (isDefault && !selectedAudioIsDefault) {
-                    selectedAudioIndex = inputIndex
-                    selectedAudioIsDefault = isDefault
+                selectedAudioIndices.append(inputIndex)
+                if defaultAudioIndex == nil || (isDefault && !foundDefaultAudio) {
+                    defaultAudioIndex = inputIndex
+                    foundDefaultAudio = isDefault
                 }
             default:
                 break
             }
         }
+
+        let outputAudioIndices: [Int32]
+        if selectedVideoIndex == nil {
+            outputAudioIndices = defaultAudioIndex.map { [$0] } ?? []
+        } else {
+            outputAudioIndices = selectedAudioIndices
+        }
+        let hasMasterPlaylist = selectedVideoIndex != nil
+        let variantCount = hasMasterPlaylist ? outputAudioIndices.count + 1 : 1
+        let playlistPath = hasMasterPlaylist
+            ? outDir.appendingPathComponent("variant_%v.m3u8").path
+            : legacyPlaylistPath
+        guard avformat_alloc_output_context2(&ofmt, nil, "hls", playlistPath) >= 0, let out = ofmt else {
+            reportFailure("failed to create HLS output context")
+            return
+        }
+
+        av_opt_set(out.pointee.priv_data, "hls_time", "4", 0)
+        av_opt_set(out.pointee.priv_data, "hls_list_size", "0", 0)
+        av_opt_set(out.pointee.priv_data, "hls_flags", "independent_segments", 0)
+        av_opt_set(
+            out.pointee.priv_data,
+            "hls_segment_filename",
+            hasMasterPlaylist
+                ? outDir.appendingPathComponent("seg%v_%05d.ts").path
+                : outDir.appendingPathComponent("seg%05d.ts").path,
+            0
+        )
+
+        var outputInputIndices = outputAudioIndices
+        if let selectedVideoIndex {
+            outputInputIndices.insert(selectedVideoIndex, at: 0)
+        }
         let timestampOrigin90k = sourceTimestampOrigin90k(
             ctx,
             videoIndex: selectedVideoIndex,
-            audioIndex: selectedAudioIndex
+            audioIndices: outputAudioIndices
         )
 
         var streamMap: [Int32: Int32] = [:]
-        for i in 0..<inCount {
-            let inputIndex = Int32(i)
-            guard inputIndex == selectedVideoIndex || inputIndex == selectedAudioIndex,
-                  let inStream = ctx.pointee.streams[i],
+        for inputIndex in outputInputIndices {
+            guard let inStream = ctx.pointee.streams[Int(inputIndex)],
                   let codecpar = inStream.pointee.codecpar,
                   let outStream = avformat_new_stream(out, nil) else { continue }
             let outIndex = outStream.pointee.index
@@ -249,18 +297,24 @@ final class RigelHlsExporter {
                     )
                 }
             case AVMEDIA_TYPE_AUDIO:
+                if let language = streamMetadataValue(inStream.pointee.metadata, key: "language") {
+                    language.withCString { value in
+                        av_dict_set(&outStream.pointee.metadata, "language", value, 0)
+                    }
+                }
                 if mode == "remux", let name = codecName(codecpar.pointee.codec_id),
                    passthroughAudio.contains(name) {
+                    passthroughAudioIndices.insert(inputIndex)
                     if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
                         outStream.pointee.codecpar.pointee.codec_tag = 0
                         outStream.pointee.time_base = inStream.pointee.time_base
                     }
-                } else {
-                    audioChain = makeAudioChain(
-                        inputStream: inStream,
-                        outputStream: outStream,
-                        timestampOrigin90k: timestampOrigin90k
-                    )
+                } else if let chain = makeAudioChain(
+                    inputStream: inStream,
+                    outputStream: outStream,
+                    timestampOrigin90k: timestampOrigin90k
+                ) {
+                    audioChains[inputIndex] = chain
                 }
             default:
                 break
@@ -270,6 +324,42 @@ final class RigelHlsExporter {
         if mode != "remux", selectedVideoIndex != nil, videoChain == nil {
             reportFailure("failed to initialize video transcoder")
             return
+        }
+
+        if hasMasterPlaylist {
+            var streamMapEntries: [String] = []
+            if outputAudioIndices.isEmpty {
+                streamMapEntries.append("v:0")
+            } else {
+                streamMapEntries.append("v:0,agroup:aud")
+                for (audioNumber, inputIndex) in outputAudioIndices.enumerated() {
+                    var entry = "a:\(audioNumber),agroup:aud"
+                    if inputIndex == defaultAudioIndex {
+                        entry += ",default:yes"
+                    }
+                    if let language = hlsLanguage(
+                        for: ctx.pointee.streams[Int(inputIndex)]?.pointee.metadata
+                    ) {
+                        entry += ",language:\(language)"
+                    } else {
+                        entry += ",name:Audio-\(audioNumber + 1)"
+                    }
+                    streamMapEntries.append(entry)
+                }
+            }
+            av_opt_set(
+                out.pointee.priv_data,
+                "var_stream_map",
+                streamMapEntries.joined(separator: " "),
+                0
+            )
+            av_opt_set(
+                out.pointee.priv_data,
+                "master_pl_name",
+                "index.m3u8",
+                0
+            )
+            av_opt_set(out.pointee.priv_data, "master_pl_publish_rate", "1", 0)
         }
 
         // Some demuxers leave codecpar.format unset. Prime the decoder until
@@ -334,7 +424,7 @@ final class RigelHlsExporter {
                     case .needMoreInput, .initialized:
                         break
                     }
-                } else if primePacket.stream_index == selectedAudioIndex,
+                } else if outputAudioIndices.contains(primePacket.stream_index),
                           let buffered = av_packet_alloc(),
                           av_packet_ref(buffered, &primePacket) >= 0 {
                     primingAudioBytes += Int64(max(0, buffered.pointee.size))
@@ -355,14 +445,24 @@ final class RigelHlsExporter {
                 reportFailure("video decoder produced no usable frame")
                 return
             }
-            if primingAudioEvicted,
-               let audioIndex = selectedAudioIndex,
-               let audioInStream = ctx.pointee.streams[Int(audioIndex)],
-               let ringHeadPTS = audioRingHeadPTS90k(pendingAudioPackets, timeBase: audioInStream.pointee.time_base) {
-                // Rebase both chains onto the retained tail so replayed audio
-                // and the first video frames share one continuous timeline.
-                chain.timestampOrigin90k = ringHeadPTS
-                audioChain?.timestampOrigin90k = ringHeadPTS
+            if primingAudioEvicted {
+                var audioTimeBases: [Int32: AVRational] = [:]
+                for audioIndex in outputAudioIndices {
+                    if let audioStream = ctx.pointee.streams[Int(audioIndex)] {
+                        audioTimeBases[audioIndex] = audioStream.pointee.time_base
+                    }
+                }
+                if let ringHeadPTS = audioRingHeadPTS90k(
+                    pendingAudioPackets,
+                    timeBases: audioTimeBases
+                ) {
+                    // Rebase every chain onto the retained tail so replayed
+                    // audio and the first decoded video share one timeline.
+                    chain.timestampOrigin90k = ringHeadPTS
+                    for audioChain in audioChains.values {
+                        audioChain.timestampOrigin90k = ringHeadPTS
+                    }
+                }
             }
         }
         let headerRet = avformat_write_header(out, nil)
@@ -386,9 +486,9 @@ final class RigelHlsExporter {
             if let outIdx = streamMap[inIdx],
                let inStream = ctx.pointee.streams[Int(inIdx)],
                let outStream = out.pointee.streams[Int(outIdx)] {
-                if let chain = audioChain, chain.inputIndex == inIdx {
+                if let chain = audioChains[inIdx] {
                     writeTranscodedAudio(chain: chain, packet: buffered, out: out, outStream: outStream)
-                } else {
+                } else if passthroughAudioIndices.contains(inIdx) {
                     writeRemuxPacket(buffered, inStream: inStream, outStream: outStream, out: out)
                 }
             }
@@ -418,9 +518,9 @@ final class RigelHlsExporter {
                     writeRemuxPacket(&pkt, inStream: inStream, outStream: outStream, out: out)
                 }
             case AVMEDIA_TYPE_AUDIO:
-                if let chain = audioChain, chain.inputIndex == inIdx {
+                if let chain = audioChains[inIdx] {
                     writeTranscodedAudio(chain: chain, packet: &pkt, out: out, outStream: outStream)
-                } else {
+                } else if passthroughAudioIndices.contains(inIdx) {
                     writeRemuxPacket(&pkt, inStream: inStream, outStream: outStream, out: out)
                 }
             default:
@@ -431,7 +531,12 @@ final class RigelHlsExporter {
                 break
             }
             if !notified &&
-                playlistReady(playlistPath: playlistPath, outDir: outDir, final: false) {
+                playlistReady(
+                    playlistPath: playlistPath,
+                    outDir: outDir,
+                    variantCount: variantCount,
+                    final: false
+                ) {
                 notified = publishReady(
                     session: session,
                     sessionId: sessionId,
@@ -442,9 +547,10 @@ final class RigelHlsExporter {
         }
 
         if terminalError == nil && !isCancelled(session) {
-            if let chain = audioChain,
-               let outIndex = streamMap[chain.inputIndex],
-               let outStream = out.pointee.streams[Int(outIndex)] {
+            for audioIndex in outputAudioIndices {
+                guard let chain = audioChains[audioIndex],
+                      let outIndex = streamMap[chain.inputIndex],
+                      let outStream = out.pointee.streams[Int(outIndex)] else { continue }
                 flushTranscodedAudio(chain: chain, out: out, outStream: outStream)
             }
             if let chain = videoChain, chain.initialized,
@@ -462,7 +568,13 @@ final class RigelHlsExporter {
             return
         }
         av_write_trailer(out)
-        if !notified && playlistReady(playlistPath: playlistPath, outDir: outDir, final: true) {
+        if !notified &&
+            playlistReady(
+                playlistPath: playlistPath,
+                outDir: outDir,
+                variantCount: variantCount,
+                final: true
+            ) {
             notified = publishReady(
                 session: session,
                 sessionId: sessionId,
@@ -472,7 +584,32 @@ final class RigelHlsExporter {
         }
     }
 
-    private static func playlistReady(playlistPath: String, outDir: URL, final: Bool) -> Bool {
+    private static func playlistReady(
+        playlistPath: String,
+        outDir: URL,
+        variantCount: Int,
+        final: Bool
+    ) -> Bool {
+        let masterPath = outDir.appendingPathComponent("index.m3u8").path
+        if let master = try? String(contentsOfFile: masterPath, encoding: .utf8),
+           master.contains("#EXT-X-STREAM-INF"),
+           FileManager.default.fileExists(atPath: outDir.appendingPathComponent("seg0_00000.ts").path) {
+            if final { return true }
+            guard FileManager.default.fileExists(
+                atPath: outDir.appendingPathComponent("seg0_00001.ts").path
+            ) else {
+                return false
+            }
+            for variant in 1..<variantCount {
+                guard FileManager.default.fileExists(
+                    atPath: outDir.appendingPathComponent("seg\(variant)_00000.ts").path
+                ) else {
+                    return false
+                }
+            }
+            return true
+        }
+
         guard let playlist = try? String(contentsOfFile: playlistPath, encoding: .utf8),
               playlist.contains("#EXTINF"),
               FileManager.default.fileExists(atPath: outDir.appendingPathComponent("seg00000.ts").path) else {
@@ -1067,31 +1204,42 @@ final class RigelHlsExporter {
         }
         return chain.initialized ? .initialized : .fatal
     }
-    /// Derives a 90 kHz origin for the retained audio tail. Scans to the
-    /// first usable PTS/DTS and subtracts known durations of earlier packets;
-    /// a timestamp-less head must not disable the tail rebase.
+    /// Derives a 90 kHz origin for the retained audio tail. Scans each
+    /// stream to its first usable PTS/DTS and subtracts known durations of
+    /// earlier timestamp-less packets before returning the earliest stream
+    /// head. A timestamp-less head must not disable the tail rebase.
     static func audioRingHeadPTS90k(
         _ packets: [UnsafeMutablePointer<AVPacket>],
-        timeBase: AVRational
+        timeBases: [Int32: AVRational]
     ) -> Int64? {
-        guard timeBase.num != 0, timeBase.den != 0 else { return nil }
-        var durationBefore: Int64 = 0
+        let commonTimeBase = AVRational(num: 1, den: 90_000)
+        var durationBefore: [Int32: Int64] = [:]
+        var heads: [Int32: Int64] = [:]
         for packet in packets {
+            let streamIndex = packet.pointee.stream_index
+            guard let timeBase = timeBases[streamIndex],
+                  timeBase.num != 0,
+                  timeBase.den != 0 else {
+                continue
+            }
             let timestamp = packet.pointee.pts != Int64.min
                 ? packet.pointee.pts
                 : packet.pointee.dts
-            if timestamp != Int64.min {
-                return av_rescale_q(
-                    timestamp - durationBefore,
+            if timestamp != Int64.min, heads[streamIndex] == nil {
+                heads[streamIndex] = av_rescale_q(
+                    timestamp - (durationBefore[streamIndex] ?? 0),
                     timeBase,
-                    AVRational(num: 1, den: 90_000)
+                    commonTimeBase
                 )
             }
-            if packet.pointee.duration > 0 {
-                durationBefore = min(Int64.max, durationBefore + packet.pointee.duration)
+            if heads[streamIndex] == nil, packet.pointee.duration > 0 {
+                durationBefore[streamIndex] = min(
+                    Int64.max,
+                    (durationBefore[streamIndex] ?? 0) + packet.pointee.duration
+                )
             }
         }
-        return nil
+        return heads.values.min()
     }
     enum PrimingReadResult {
         case ok
@@ -1392,19 +1540,19 @@ final class RigelHlsExporter {
     private static func cleanup(
         ifmt: UnsafeMutablePointer<AVFormatContext>?,
         ofmt: UnsafeMutablePointer<AVFormatContext>?,
-        audio: AudioChain?,
+        audio: [AudioChain],
         video: VideoChain?
     ) {
         var ifmtPtr: UnsafeMutablePointer<AVFormatContext>? = ifmt
         avformat_close_input(&ifmtPtr)
         if let ofmt { avformat_free_context(ofmt) }
-        if let audio {
-            av_audio_fifo_free(audio.fifo)
-            var swr: OpaquePointer? = audio.swr
+        for audioChain in audio {
+            av_audio_fifo_free(audioChain.fifo)
+            var swr: OpaquePointer? = audioChain.swr
             swr_free(&swr)
-            var dec: UnsafeMutablePointer<AVCodecContext>? = audio.decCtx
+            var dec: UnsafeMutablePointer<AVCodecContext>? = audioChain.decCtx
             avcodec_free_context(&dec)
-            var enc: UnsafeMutablePointer<AVCodecContext>? = audio.encCtx
+            var enc: UnsafeMutablePointer<AVCodecContext>? = audioChain.encCtx
             avcodec_free_context(&enc)
         }
         video?.release()

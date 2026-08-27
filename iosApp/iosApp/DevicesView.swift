@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 import ComposeApp
 
 struct DevicesView: View {
@@ -12,17 +13,10 @@ struct DevicesView: View {
         NavigationStack {
             List {
                 Section("Screen") {
-                    Label {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("AirPlay receivers")
-                                .font(.body)
-                            Text("Apple TV, AirPlay-2 TVs, MacBooks — pick the output from the player screen.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                    } icon: {
-                        Image(systemName: "airplayvideo")
-                            .foregroundStyle(Color.rigelStar)
+                    HStack {
+                        Label("AirPlay & Bluetooth", systemImage: "airplayvideo")
+                        Spacer()
+                        RoutePickerRow()
                     }
                 }
 
@@ -188,4 +182,16 @@ private struct DeviceRow: View {
         }
         .padding(.vertical, 2)
     }
+}
+
+struct RoutePickerRow: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let picker = AVRoutePickerView()
+        picker.tintColor = .white
+        picker.activeTintColor = .white
+        picker.prioritizesVideoDevices = true
+        return picker
+    }
+
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }

@@ -15,7 +15,7 @@ interface PlayerEvents {
 
 interface NativePlayerBridge {
     fun createPlayerViewController(events: PlayerEvents): UIViewController
-    fun load(url: String, title: String?, sender: String?, longFormVideoAirPlayEligible: Boolean)
+    fun load(url: String, title: String?, sender: String?, longFormVideoAirPlayEligible: Boolean, subtitleUrls: List<String>)
     fun stop()
 }
 

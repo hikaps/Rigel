@@ -120,6 +120,56 @@ final class ProbeTest: XCTestCase {
         XCTAssertNil(error)
     }
 
+    func testMultiAudioRemuxPublishesAlternateAudioMaster() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_multi", withExtension: "mkv"))
+        let sessionId = "test-multi-audio-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "multi-audio session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 15)
+
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "multi-audio session did not produce a playlist")
+        XCTAssertNil(error)
+        let master = try String(contentsOf: outputDir.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        XCTAssertTrue(master.contains("#EXT-X-MEDIA:TYPE=AUDIO"))
+        XCTAssertTrue(master.contains("LANGUAGE=\"eng\""))
+        XCTAssertTrue(master.contains("LANGUAGE=\"fre\""))
+        XCTAssertTrue(master.contains("DEFAULT=YES"))
+        for variant in 0...2 {
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: outputDir.appendingPathComponent("variant_\(variant).m3u8").path
+                )
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: outputDir.appendingPathComponent("seg\(variant)_00000.ts").path
+                )
+            )
+        }
+    }
+
     func testHighFrameRateTimestampRepairPreservesCadence() {
         func step(_ candidate: Int64?, _ prev: Int64?, _ prevRaw: Int64?, _ offset: Int64, _ fd: Int64)
             -> (repaired: Int64, offset: Int64, lastRaw: Int64?) {
@@ -185,39 +235,43 @@ final class ProbeTest: XCTestCase {
     func testAudioRingHeadPTS() {
         let timeBase = AVRational(num: 1, den: 90_000)
         var packets: [UnsafeMutablePointer<AVPacket>] = []
-        for (i, pts) in [Int64(4_500), 9_000, 13_500].enumerated() {
+        for pts in [Int64(4_500), 9_000, 13_500] {
             guard let packet = av_packet_alloc() else { return XCTFail("alloc failed") }
             packet.pointee.pts = pts
-            packet.pointee.stream_index = Int32(i)
+            packet.pointee.stream_index = 0
             packets.append(packet)
         }
         defer { packets.forEach { var p: UnsafeMutablePointer<AVPacket>? = $0; av_packet_free(&p) } }
-        // Head is the oldest retained packet.
-        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase), 4_500)
-        // Both unset yields nil.
+        let timeBases: [Int32: AVRational] = [0: timeBase]
+        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBases: timeBases), 4_500)
+
         for packet in packets {
             packet.pointee.pts = Int64.min
             packet.pointee.dts = Int64.min
         }
-        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase))
+        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBases: timeBases))
+
         packets[0].pointee.duration = 50
         packets[1].pointee.pts = 100
         XCTAssertEqual(
-            RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: AVRational(num: 1, den: 1_000)),
+            RigelHlsExporter.audioRingHeadPTS90k(
+                packets,
+                timeBases: [0: AVRational(num: 1, den: 1_000)]
+            ),
             4_500
         )
-        // Empty ring yields nil.
-        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k([], timeBase: timeBase), nil)
-        // Missing PTS falls back to DTS so the rebase is not skipped.
+
+        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k([], timeBases: timeBases))
+
         packets[0].pointee.pts = Int64.min
         packets[0].pointee.dts = 9_000
         packets[0].pointee.duration = 0
-        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase), 9_000)
-        // Both unset yields nil.
+        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBases: timeBases), 9_000)
+
         packets[0].pointee.dts = Int64.min
         packets[1].pointee.pts = Int64.min
         packets[1].pointee.dts = Int64.min
-        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase))
+        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBases: timeBases))
     }
 
     func testPrimingReadClassification() {

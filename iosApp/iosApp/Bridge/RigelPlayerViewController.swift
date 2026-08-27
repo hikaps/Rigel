@@ -34,8 +34,8 @@ private final class PlayerGradientView: UIView {
 final class RigelPlayerViewController: UIViewController {
     private let events: PlayerEvents
     /// Assigned by the SwiftUI host so the native control can present the
-    /// app-level renderer picker without expanding the Kotlin event contract.
-    var onCastRequested: (() -> Void)?
+    /// app-level destination picker without expanding the Kotlin event contract.
+    var onDevicesRequested: (() -> Void)?
     private var player: AVPlayer?
     private var playerVC: AVPlayerViewController?
     private var pollTimer: Timer?
@@ -69,8 +69,7 @@ final class RigelPlayerViewController: UIViewController {
     private let titleLabel = UILabel()
     private let senderLabel = UILabel()
     private let backButton = UIButton(type: .system)
-    private let routePicker = AVRoutePickerView()
-    private let castButton = UIButton(type: .system)
+    private let devicesButton = UIButton(type: .system)
     private let tracksButton = UIButton(type: .system)
     private let bottomBar = UIView()
     private let progressSlider = UISlider()
@@ -79,10 +78,17 @@ final class RigelPlayerViewController: UIViewController {
     private let skipForwardButton = UIButton(type: .system)
     private let elapsedLabel = UILabel()
     private let durationLabel = UILabel()
+    private let subtitleLabel = UILabel()
     private var audioGroup: AVMediaSelectionGroup?
     private var subtitleGroup: AVMediaSelectionGroup?
     private var trackGroupsLoadedFor: AVPlayerItem?
-    private var trackSelectionEnabled = true
+    private struct SidecarSubtitle {
+        let name: String
+        let cues: [SubtitleParser.Cue]
+    }
+    private var sidecarSubtitles: [SidecarSubtitle] = []
+    private var activeSidecarSubtitleIndex: Int?
+    private var sidecarGeneration = 0
     private var isScrubbing = false
     private var pendingScrubValue: Float?
     private var scrubGeneration = 0
@@ -112,6 +118,24 @@ final class RigelPlayerViewController: UIViewController {
         setupOverlayGradients()
         setupTopBar()
         setupBottomBar()
+        // Sidecar subtitles are an in-app overlay and are not captured by
+        // AVPlayerViewController's PiP or AirPlay handoff.
+        subtitleLabel.font = .preferredFont(forTextStyle: .title3)
+        subtitleLabel.textColor = .white
+        subtitleLabel.numberOfLines = 0
+        subtitleLabel.textAlignment = .center
+        subtitleLabel.layer.shadowColor = UIColor.black.cgColor
+        subtitleLabel.layer.shadowRadius = 3
+        subtitleLabel.layer.shadowOpacity = 1
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.isHidden = true
+        view.addSubview(subtitleLabel)
+        NSLayoutConstraint.activate([
+            subtitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 40),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -40),
+            subtitleLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            subtitleLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -100),
+        ])
         setupControlsGesture()
     }
 
@@ -183,17 +207,12 @@ final class RigelPlayerViewController: UIViewController {
         senderLabel.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(senderLabel)
 
-        routePicker.tintColor = .white
-        routePicker.accessibilityLabel = "Playback destination"
-        routePicker.translatesAutoresizingMaskIntoConstraints = false
-        topBar.addSubview(routePicker)
-
-        castButton.configuration = Self.controlConfiguration(symbolName: "rectangle.on.rectangle", pointSize: 17)
-        castButton.accessibilityLabel = "Cast to device"
-        castButton.accessibilityHint = "Choose a network playback device"
-        castButton.addTarget(self, action: #selector(castTapped), for: .touchUpInside)
-        castButton.translatesAutoresizingMaskIntoConstraints = false
-        topBar.addSubview(castButton)
+        devicesButton.configuration = Self.controlConfiguration(symbolName: "airplayvideo", pointSize: 17)
+        devicesButton.accessibilityLabel = "Playback destinations"
+        devicesButton.accessibilityHint = "Choose AirPlay or a network device"
+        devicesButton.addTarget(self, action: #selector(devicesTapped), for: .touchUpInside)
+        devicesButton.translatesAutoresizingMaskIntoConstraints = false
+        topBar.addSubview(devicesButton)
         tracksButton.configuration = Self.controlConfiguration(symbolName: "captions.bubble", pointSize: 17)
         tracksButton.accessibilityLabel = "Audio and subtitles"
         tracksButton.accessibilityHint = "Choose an audio track or subtitle"
@@ -207,17 +226,12 @@ final class RigelPlayerViewController: UIViewController {
             backButton.widthAnchor.constraint(equalToConstant: 44),
             backButton.heightAnchor.constraint(equalToConstant: 44),
 
-            routePicker.trailingAnchor.constraint(equalTo: topBar.layoutMarginsGuide.trailingAnchor),
-            routePicker.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            routePicker.widthAnchor.constraint(equalToConstant: 44),
-            routePicker.heightAnchor.constraint(equalToConstant: 44),
+            devicesButton.trailingAnchor.constraint(equalTo: topBar.layoutMarginsGuide.trailingAnchor),
+            devicesButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            devicesButton.widthAnchor.constraint(equalToConstant: 44),
+            devicesButton.heightAnchor.constraint(equalToConstant: 44),
 
-            castButton.trailingAnchor.constraint(equalTo: routePicker.leadingAnchor, constant: -4),
-            castButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            castButton.widthAnchor.constraint(equalToConstant: 44),
-            castButton.heightAnchor.constraint(equalToConstant: 44),
-
-            tracksButton.trailingAnchor.constraint(equalTo: castButton.leadingAnchor, constant: -4),
+            tracksButton.trailingAnchor.constraint(equalTo: devicesButton.leadingAnchor, constant: -4),
             tracksButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
             tracksButton.widthAnchor.constraint(equalToConstant: 44),
             tracksButton.heightAnchor.constraint(equalToConstant: 44),
@@ -407,22 +421,9 @@ final class RigelPlayerViewController: UIViewController {
     @objc private func backTapped() {
         events.onBack()
     }
-    @objc private func castTapped() {
+    @objc private func devicesTapped() {
         showControls()
-        onCastRequested?()
-    }
-    /// FFmpeg HLS proxy sessions currently contain only their selected audio
-    /// stream and no subtitle renditions. Keep the selector out of that UI
-    /// rather than presenting a control that can never change the track.
-    func setTrackSelectionEnabled(_ enabled: Bool) {
-        trackSelectionEnabled = enabled
-        tracksButton.isHidden = !enabled
-        tracksButton.isUserInteractionEnabled = enabled
-        if !enabled {
-            audioGroup = nil
-            subtitleGroup = nil
-            trackGroupsLoadedFor = nil
-        }
+        onDevicesRequested?()
     }
 
     static func fallbackTitle(for rawURL: String) -> String {
@@ -458,10 +459,12 @@ final class RigelPlayerViewController: UIViewController {
             }
         }
         if let subtitleGroup, !subtitleGroup.options.isEmpty {
-            if subtitleGroup.allowsEmptySelection {
+            if subtitleGroup.allowsEmptySelection && sidecarSubtitles.isEmpty {
                 alert.addAction(UIAlertAction(title: "Subtitles: Off", style: .default) { [weak self] _ in
                     guard let self else { return }
+                    self.activeSidecarSubtitleIndex = nil
                     self.player?.currentItem?.select(nil, in: subtitleGroup)
+                    self.updateSidecarSubtitle()
                     self.updateTrackButton()
                 })
             }
@@ -469,8 +472,41 @@ final class RigelPlayerViewController: UIViewController {
                 let selected = player?.currentItem?.currentMediaSelection.selectedMediaOption(in: subtitleGroup) === option
                 let title = "\(selected ? "✓ " : "")Subtitles: \(option.displayName)"
                 alert.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
-                    self?.player?.currentItem?.select(option, in: subtitleGroup)
-                    self?.updateTrackButton()
+                    guard let self else { return }
+                    self.activeSidecarSubtitleIndex = nil
+                    self.player?.currentItem?.select(option, in: subtitleGroup)
+                    self.updateSidecarSubtitle()
+                    self.updateTrackButton()
+                })
+            }
+        }
+        if !sidecarSubtitles.isEmpty {
+            let offSelected = activeSidecarSubtitleIndex == nil
+            alert.addAction(UIAlertAction(
+                title: "\(offSelected ? "✓ " : "")Subtitles: Off",
+                style: .default
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.activeSidecarSubtitleIndex = nil
+                if let group = self.subtitleGroup {
+                    self.player?.currentItem?.select(nil, in: group)
+                }
+                self.updateSidecarSubtitle()
+                self.updateTrackButton()
+            })
+            for (index, sidecar) in sidecarSubtitles.enumerated() {
+                let selected = activeSidecarSubtitleIndex == index
+                alert.addAction(UIAlertAction(
+                    title: "\(selected ? "✓ " : "")Subtitles: \(sidecar.name)",
+                    style: .default
+                ) { [weak self] _ in
+                    guard let self, index < self.sidecarSubtitles.count else { return }
+                    self.activeSidecarSubtitleIndex = index
+                    if let group = self.subtitleGroup {
+                        self.player?.currentItem?.select(nil, in: group)
+                    }
+                    self.updateSidecarSubtitle()
+                    self.updateTrackButton()
                 })
             }
         }
@@ -486,7 +522,7 @@ final class RigelPlayerViewController: UIViewController {
     }
 
     private func loadTrackGroups(for item: AVPlayerItem) {
-        guard trackSelectionEnabled, trackGroupsLoadedFor !== item else { return }
+        guard trackGroupsLoadedFor !== item else { return }
         let asset = item.asset
         let key = "availableMediaCharacteristicsWithMediaSelectionOptions"
         asset.loadValuesAsynchronously(forKeys: [key]) { [weak self, weak item] in
@@ -507,7 +543,7 @@ final class RigelPlayerViewController: UIViewController {
 
     private func updateTrackButton() {
         let audioCount = audioGroup?.options.count ?? 0
-        let subtitleCount = subtitleGroup?.options.count ?? 0
+        let subtitleCount = (subtitleGroup?.options.count ?? 0) + sidecarSubtitles.count
         if audioCount == 0 && subtitleCount == 0 {
             tracksButton.accessibilityValue = "No alternate tracks"
         } else {
@@ -516,8 +552,88 @@ final class RigelPlayerViewController: UIViewController {
         }
     }
 
+    private func loadSidecarSubtitles(_ urls: [String]) {
+        let limitedURLs = Array(urls.prefix(16))
+        if urls.count > limitedURLs.count {
+            NSLog("[RigelPlayer] ignoring %ld sidecar subtitle URLs over the limit", urls.count - limitedURLs.count)
+        }
+        let generation = sidecarGeneration
+        for (index, rawURL) in limitedURLs.enumerated() {
+            guard let url = URL(string: rawURL) else {
+                NSLog("[RigelPlayer] sidecar %@ failed: invalid URL", rawURL)
+                continue
+            }
+            let extensionName = url.pathExtension.lowercased()
+            if extensionName == "ass" {
+                NSLog("[RigelPlayer] sidecar %@ skipped: ASS is unsupported", rawURL)
+                continue
+            }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 10
+            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                guard let self else { return }
+                guard error == nil,
+                      let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode),
+                      let data,
+                      let text = String(data: data, encoding: .utf8) else {
+                    let detail = error?.localizedDescription ?? "HTTP request failed"
+                    NSLog("[RigelPlayer] sidecar %@ failed: %@", rawURL, detail)
+                    return
+                }
+                var cues = extensionName == "vtt"
+                    ? SubtitleParser.parseVTT(text)
+                    : SubtitleParser.parseSRT(text)
+                cues.sort { $0.start < $1.start }
+                guard !cues.isEmpty else {
+                    NSLog("[RigelPlayer] sidecar %@ failed: no valid cues", rawURL)
+                    return
+                }
+                let name = Self.sidecarName(for: url, fallback: "Subtitles \(index + 1)")
+                DispatchQueue.main.async {
+                    guard self.sidecarGeneration == generation, !self.disposed else { return }
+                    self.sidecarSubtitles.append(SidecarSubtitle(name: name, cues: cues))
+                    self.updateTrackButton()
+                    NSLog("[RigelPlayer] sidecar %@ ok", rawURL)
+                }
+            }.resume()
+        }
+    }
 
-    func load(url: String, title: String?, sender: String?, longFormVideoAirPlayEligible: Bool) {
+    private static func sidecarName(for url: URL, fallback: String) -> String {
+        let decoded = url.deletingPathExtension().lastPathComponent.removingPercentEncoding ?? ""
+        let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    private func updateSidecarSubtitle() {
+        guard let index = activeSidecarSubtitleIndex,
+              sidecarSubtitles.indices.contains(index),
+              let player else {
+            subtitleLabel.text = nil
+            subtitleLabel.isHidden = true
+            return
+        }
+        let seconds = player.currentTime().seconds
+        guard seconds.isFinite else {
+            subtitleLabel.text = nil
+            subtitleLabel.isHidden = true
+            return
+        }
+        let cue = sidecarSubtitles[index].cues.first {
+            $0.start <= seconds && seconds < $0.end
+        }
+        subtitleLabel.text = cue?.text
+        subtitleLabel.isHidden = cue == nil
+    }
+
+    func load(
+        url: String,
+        title: String?,
+        sender: String?,
+        longFormVideoAirPlayEligible: Bool,
+        subtitleUrls: [String] = []
+    ) {
         NSLog("[RigelPlayer] load %@ longFormVideo=%d", url, longFormVideoAirPlayEligible ? 1 : 0)
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         titleLabel.text = trimmedTitle?.isEmpty == false
@@ -558,14 +674,15 @@ final class RigelPlayerViewController: UIViewController {
         audioGroup = nil
         subtitleGroup = nil
         trackGroupsLoadedFor = nil
-        tracksButton.isHidden = !trackSelectionEnabled
-        tracksButton.accessibilityValue = trackSelectionEnabled ? "Loading tracks" : nil
+        tracksButton.isHidden = false
+        tracksButton.accessibilityValue = "Loading tracks"
         showControls()
 
         let item = AVPlayerItem(url: avURL)
         let p = AVPlayer(playerItem: item)
         p.allowsExternalPlayback = true
         player = p
+        loadSidecarSubtitles(subtitleUrls)
 
         let vc = AVPlayerViewController()
         vc.player = p
@@ -732,6 +849,11 @@ final class RigelPlayerViewController: UIViewController {
         audioGroup = nil
         subtitleGroup = nil
         trackGroupsLoadedFor = nil
+        sidecarGeneration &+= 1
+        sidecarSubtitles.removeAll()
+        activeSidecarSubtitleIndex = nil
+        subtitleLabel.text = nil
+        subtitleLabel.isHidden = true
         tracksButton.accessibilityValue = nil
     }
 
@@ -765,6 +887,7 @@ final class RigelPlayerViewController: UIViewController {
             loadTrackGroups(for: item)
         }
         updatePlaybackControls()
+        updateSidecarSubtitle()
         if player.timeControlStatus == .playing {
             if controlsVisible, controlsHideTimer == nil {
                 scheduleControlsHide()
@@ -811,13 +934,15 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         url: String,
         title: String?,
         sender: String?,
-        longFormVideoAirPlayEligible: Bool
+        longFormVideoAirPlayEligible: Bool,
+        subtitleUrls: [String]
     ) {
         vc?.load(
             url: url,
             title: title,
             sender: sender,
-            longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
+            longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
+            subtitleUrls: subtitleUrls
         )
     }
 
