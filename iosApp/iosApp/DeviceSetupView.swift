@@ -110,6 +110,9 @@ struct DeviceSetupView: View {
                 if let target {
                     self.notice = "Added \(target.name)"
                     self.ipText = ""
+                    if !self.manualDevices.contains(where: { $0.target.stableId == target.stableId }) {
+                        self.manualDevices.append(DiscoveredDevice(target: target, via: "manual"))
+                    }
                     self.onAdded()
                 } else {
                     self.notice = "No renderer found at \(ip)"
