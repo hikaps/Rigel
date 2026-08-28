@@ -107,9 +107,10 @@ final class PlayerModelTests: XCTestCase {
     }
 
     @MainActor
-    func testHlsPlayerExposesVideoTransportTrackAndDeviceControls() {
+    func testHlsPlayerExposesSeparateTrackAndDeviceControls() {
         let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
         let controller = RigelPlayerViewController(events: events)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
         controller.load(
             url: "http://127.0.0.1/session/index.m3u8",
             title: nil,
@@ -117,9 +118,11 @@ final class PlayerModelTests: XCTestCase {
             longFormVideoAirPlayEligible: false
         )
         defer { controller.stopPlayback() }
+        controller.view.layoutIfNeeded()
 
         let close = view(controller.view, withAccessibilityLabel: "Close player")
-        let tracks = view(controller.view, withAccessibilityLabel: "Audio and subtitles")
+        let audio = view(controller.view, withAccessibilityLabel: "Audio track")
+        let subtitles = view(controller.view, withAccessibilityLabel: "Subtitles")
         let skipBackward = view(controller.view, withAccessibilityLabel: "Back 15 seconds")
         let skipForward = view(controller.view, withAccessibilityLabel: "Forward 15 seconds")
         let slider = view(controller.view, withAccessibilityIdentifier: "player.progressSlider")
@@ -128,7 +131,8 @@ final class PlayerModelTests: XCTestCase {
         let playPause = view(controller.view, withAccessibilityLabel: "Play")
         let devices = view(controller.view, withAccessibilityLabel: "Playback destinations")
         XCTAssertNotNil(close)
-        XCTAssertNotNil(tracks)
+        XCTAssertNotNil(audio)
+        XCTAssertNotNil(subtitles)
         XCTAssertNotNil(skipBackward)
         XCTAssertNotNil(skipForward)
         XCTAssertNotNil(slider)
@@ -138,13 +142,18 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertNotNil(bottomBar)
         XCTAssertNotNil(playPause)
         XCTAssertNotNil(devices)
+        if let audio, let subtitles, let devices {
+            XCTAssertLessThan(audio.frame.maxX, subtitles.frame.minX)
+            XCTAssertLessThan(subtitles.frame.maxX, devices.frame.minX)
+        }
         XCTAssertEqual(topBar?.backgroundColor, .clear)
         XCTAssertEqual(bottomBar?.backgroundColor, .clear)
         XCTAssertEqual(topBar?.layer.cornerRadius, 0)
         XCTAssertEqual(bottomBar?.layer.cornerRadius, 0)
         XCTAssertEqual((close as? UIButton)?.configuration?.background.backgroundColor, .clear)
         XCTAssertEqual((playPause as? UIButton)?.configuration?.background.backgroundColor, .clear)
-        XCTAssertFalse(tracks?.isHidden == true)
+        XCTAssertFalse(audio?.isHidden == true)
+        XCTAssertFalse(subtitles?.isHidden == true)
         var devicesRequested = false
         controller.onDevicesRequested = { devicesRequested = true }
         (devices as? UIButton)?.sendActions(for: .touchUpInside)
