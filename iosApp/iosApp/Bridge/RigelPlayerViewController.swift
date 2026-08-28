@@ -673,10 +673,16 @@ final class RigelPlayerViewController: UIViewController {
                 guard error == nil,
                       let http = response as? HTTPURLResponse,
                       (200..<300).contains(http.statusCode),
-                      let data,
-                      let text = String(data: data, encoding: .utf8) else {
+                      let data else {
                     let detail = error?.localizedDescription ?? "HTTP request failed"
                     NSLog("[RigelPlayer] sidecar %@ failed: %@", rawURL, detail)
+                    return
+                }
+                guard let text = SubtitleParser.decode(
+                    data: data,
+                    encodingName: http.textEncodingName
+                ) else {
+                    NSLog("[RigelPlayer] sidecar %@ failed: unsupported text encoding", rawURL)
                     return
                 }
                 var cues = extensionName == "vtt"
@@ -1170,6 +1176,10 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
             isProxy: isProxy,
             startOffsetSeconds: Double(startOffsetMs) / 1000.0
         )
+    }
+
+    func isCurrent(viewController: RigelPlayerViewController) -> Bool {
+        vc === viewController
     }
 
     func stop() {

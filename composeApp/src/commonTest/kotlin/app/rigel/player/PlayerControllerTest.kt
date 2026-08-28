@@ -205,7 +205,10 @@ class PlayerControllerTest {
         val firstSession = hlsSessionIds.single()
 
         c.seek(45_000, 60_000)
-        assertEquals(PlayerPhase.PREPARING_PROXY, c.uiState.value.phase)
+        assertEquals(PlayerPhase.BUFFERING, c.uiState.value.phase)
+        assertEquals("http://127.0.0.1:8090/hls/s1/out.m3u8", c.uiState.value.proxyUrl)
+        c.reportError("stale proxy failure")
+        assertEquals(PlayerPhase.BUFFERING, c.uiState.value.phase)
         advanceUntilIdle()
 
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)

@@ -23,7 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlin.random.Random
 
-enum class PlayerPhase { IDLE, PROBING, PREPARING_PROXY, PLAYING, ERROR }
+enum class PlayerPhase { IDLE, PROBING, PREPARING_PROXY, BUFFERING, PLAYING, ERROR }
 
 data class PlayerUiState(
     val phase: PlayerPhase = PlayerPhase.IDLE,
@@ -118,7 +118,7 @@ class PlayerController(
 
     fun seek(positionMs: Long, durationMs: Long) {
         val current = _uiState.value
-        if (current.phase != PlayerPhase.PLAYING) return
+        if (current.phase != PlayerPhase.PLAYING && current.phase != PlayerPhase.BUFFERING) return
         val duration = durationMs.takeIf { it > 0 } ?: current.probe?.durationMs
         val target = if (duration != null && duration > 0) {
             positionMs.coerceIn(0, duration)
@@ -142,8 +142,7 @@ class PlayerController(
         val generation = loadGeneration
         directFallbackUsed = false
         _uiState.value = current.copy(
-            phase = PlayerPhase.PREPARING_PROXY,
-            proxyUrl = null,
+            phase = PlayerPhase.BUFFERING,
             error = null,
             startPositionMs = target,
         )
@@ -342,7 +341,10 @@ class PlayerController(
         val current = _uiState.value
         // Errors from the player being replaced must not clobber an in-flight
         // proxy build. prepareProxy owns the eventual success/failure state.
-        if (current.phase == PlayerPhase.PREPARING_PROXY || current.phase == PlayerPhase.PROBING) return
+        if (current.phase == PlayerPhase.PREPARING_PROXY ||
+            current.phase == PlayerPhase.PROBING ||
+            current.phase == PlayerPhase.BUFFERING
+        ) return
         if (!directFallbackUsed && current.phase == PlayerPhase.PLAYING &&
             current.route == PlaybackRoute.DIRECT && current.proxyUrl == null && current.probe != null
         ) {

@@ -84,4 +84,41 @@ final class SubtitleParserTests: XCTestCase {
 
         XCTAssertTrue(SubtitleParser.parseVTT(text).isEmpty)
     }
+    func testDecodeSupportsAsciiUnicodeAndLegacySubtitleBytes() {
+        XCTAssertEqual(
+            SubtitleParser.decode(data: Data("ASCII subtitle".utf8)),
+            "ASCII subtitle"
+        )
+
+        let utf16Text = "Café — 日本語"
+        var utf16 = Data([0xFF, 0xFE])
+        utf16.append(contentsOf: utf16Text.data(using: .utf16LittleEndian) ?? Data())
+        XCTAssertEqual(
+            SubtitleParser.decode(data: utf16)?
+                .replacingOccurrences(of: "\u{feff}", with: ""),
+            utf16Text
+        )
+
+        let windows1252 = Data([
+            0x43, 0x61, 0x66, 0xE9, 0x20, 0x96, 0x20, 0x64, 0xE9, 0x6A, 0xE0,
+        ])
+        XCTAssertEqual(
+            SubtitleParser.decode(data: windows1252, encodingName: "windows-1252"),
+            "Café – déjà"
+        )
+    }
+
+    func testSRTDecodesNumericAndNamedEntities() {
+        let text = """
+        1
+        00:00:00,000 --> 00:00:02,000
+        Caf&#xE9; &mdash; &#233;
+        """
+
+        XCTAssertEqual(
+            SubtitleParser.parseSRT(text),
+            [.init(start: 0, end: 2, text: "Café — é")]
+        )
+    }
+
 }

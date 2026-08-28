@@ -1060,9 +1060,9 @@ final class RigelHlsExporter {
             guard let rect = rects[index] else { continue }
             let raw: String?
             if let ass = rect.pointee.ass {
-                raw = String(cString: ass)
+                raw = SubtitleParser.decodeCString(UnsafePointer(ass))
             } else if let text = rect.pointee.text {
-                raw = String(cString: text)
+                raw = SubtitleParser.decodeCString(UnsafePointer(text))
             } else {
                 raw = nil
             }
