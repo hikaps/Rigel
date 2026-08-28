@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import AVKit
 import UIKit
+import SwiftUI
 import ComposeApp
 
 private final class PlayerGradientView: UIView {
@@ -75,8 +76,10 @@ final class RigelPlayerViewController: UIViewController {
     private let titleLabel = UILabel()
     private let senderLabel = UILabel()
     private let backButton = UIButton(type: .system)
+    private let audioButton = UIButton(type: .system)
     private let devicesButton = UIButton(type: .system)
     private let tracksButton = UIButton(type: .system)
+    private let trackButtonsStack = UIStackView()
     private let bottomBar = UIView()
     private let progressSlider = UISlider()
     private let skipBackwardButton = UIButton(type: .system)
@@ -217,18 +220,32 @@ final class RigelPlayerViewController: UIViewController {
         senderLabel.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(senderLabel)
 
+        audioButton.configuration = Self.controlConfiguration(symbolName: "waveform", pointSize: 17)
+        audioButton.accessibilityLabel = "Audio track"
+        audioButton.accessibilityHint = "Choose an audio track"
+        audioButton.addTarget(self, action: #selector(audioTapped), for: .touchUpInside)
+        audioButton.translatesAutoresizingMaskIntoConstraints = false
+
+        tracksButton.configuration = Self.controlConfiguration(symbolName: "captions.bubble", pointSize: 17)
+        tracksButton.accessibilityLabel = "Subtitles"
+        tracksButton.accessibilityHint = "Choose a subtitle track"
+        tracksButton.addTarget(self, action: #selector(subtitlesTapped), for: .touchUpInside)
+        tracksButton.translatesAutoresizingMaskIntoConstraints = false
+
         devicesButton.configuration = Self.controlConfiguration(symbolName: "airplayvideo", pointSize: 17)
         devicesButton.accessibilityLabel = "Playback destinations"
         devicesButton.accessibilityHint = "Choose AirPlay or a network device"
         devicesButton.addTarget(self, action: #selector(devicesTapped), for: .touchUpInside)
         devicesButton.translatesAutoresizingMaskIntoConstraints = false
-        topBar.addSubview(devicesButton)
-        tracksButton.configuration = Self.controlConfiguration(symbolName: "captions.bubble", pointSize: 17)
-        tracksButton.accessibilityLabel = "Audio and subtitles"
-        tracksButton.accessibilityHint = "Choose an audio track or subtitle"
-        tracksButton.addTarget(self, action: #selector(tracksTapped), for: .touchUpInside)
-        tracksButton.translatesAutoresizingMaskIntoConstraints = false
-        topBar.addSubview(tracksButton)
+
+        trackButtonsStack.axis = .horizontal
+        trackButtonsStack.alignment = .center
+        trackButtonsStack.spacing = 4
+        trackButtonsStack.translatesAutoresizingMaskIntoConstraints = false
+        trackButtonsStack.addArrangedSubview(audioButton)
+        trackButtonsStack.addArrangedSubview(tracksButton)
+        trackButtonsStack.addArrangedSubview(devicesButton)
+        topBar.addSubview(trackButtonsStack)
 
         NSLayoutConstraint.activate([
             backButton.leadingAnchor.constraint(equalTo: topBar.layoutMarginsGuide.leadingAnchor),
@@ -236,18 +253,19 @@ final class RigelPlayerViewController: UIViewController {
             backButton.widthAnchor.constraint(equalToConstant: 44),
             backButton.heightAnchor.constraint(equalToConstant: 44),
 
-            devicesButton.trailingAnchor.constraint(equalTo: topBar.layoutMarginsGuide.trailingAnchor),
-            devicesButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            trackButtonsStack.trailingAnchor.constraint(equalTo: topBar.layoutMarginsGuide.trailingAnchor),
+            trackButtonsStack.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            trackButtonsStack.heightAnchor.constraint(equalToConstant: 44),
+
+            audioButton.widthAnchor.constraint(equalToConstant: 44),
+            audioButton.heightAnchor.constraint(equalToConstant: 44),
+            tracksButton.widthAnchor.constraint(equalToConstant: 44),
+            tracksButton.heightAnchor.constraint(equalToConstant: 44),
             devicesButton.widthAnchor.constraint(equalToConstant: 44),
             devicesButton.heightAnchor.constraint(equalToConstant: 44),
 
-            tracksButton.trailingAnchor.constraint(equalTo: devicesButton.leadingAnchor, constant: -4),
-            tracksButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            tracksButton.widthAnchor.constraint(equalToConstant: 44),
-            tracksButton.heightAnchor.constraint(equalToConstant: 44),
-
             titleLabel.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 8),
-            titleLabel.trailingAnchor.constraint(equalTo: tracksButton.leadingAnchor, constant: -8),
+            titleLabel.trailingAnchor.constraint(equalTo: trackButtonsStack.leadingAnchor, constant: -8),
             titleLabel.topAnchor.constraint(equalTo: backButton.topAnchor, constant: 2),
 
             senderLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
@@ -455,81 +473,150 @@ final class RigelPlayerViewController: UIViewController {
         return url.pathExtension.lowercased() == "m3u8"
     }
 
-    @objc private func tracksTapped() {
+    @objc private func audioTapped() {
         showControls()
-        let alert = UIAlertController(title: "Audio & Subtitles", message: nil, preferredStyle: .actionSheet)
-        if let audioGroup, !audioGroup.options.isEmpty {
-            for option in audioGroup.options {
-                let selected = player?.currentItem?.currentMediaSelection.selectedMediaOption(in: audioGroup) === option
-                let title = "\(selected ? "✓ " : "")Audio: \(option.displayName)"
-                alert.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
-                    self?.player?.currentItem?.select(option, in: audioGroup)
-                    self?.updateTrackButton()
-                })
-            }
+        guard let group = audioGroup, !group.options.isEmpty else {
+            presentTrackPicker(
+                title: "Audio",
+                options: [],
+                emptyMessage: trackGroupsLoadedFor == nil
+                    ? "Audio tracks are still loading."
+                    : "No alternate audio tracks are available."
+            )
+            return
         }
-        if let subtitleGroup, !subtitleGroup.options.isEmpty {
-            if subtitleGroup.allowsEmptySelection && sidecarSubtitles.isEmpty {
-                alert.addAction(UIAlertAction(title: "Subtitles: Off", style: .default) { [weak self] _ in
-                    guard let self else { return }
-                    self.activeSidecarSubtitleIndex = nil
-                    self.player?.currentItem?.select(nil, in: subtitleGroup)
-                    self.updateSidecarSubtitle()
-                    self.updateTrackButton()
-                })
+        let selected = player?.currentItem?.currentMediaSelection.selectedMediaOption(in: group)
+        let options = group.options.enumerated().map { index, option in
+            TrackPickerOption(
+                id: "audio-\(index)",
+                title: option.displayName,
+                isSelected: selected === option,
+                select: { [weak self] in
+                    guard let self,
+                          let item = self.player?.currentItem,
+                          let currentGroup = self.audioGroup,
+                          currentGroup.options.indices.contains(index) else { return }
+                    item.select(currentGroup.options[index], in: currentGroup)
+                    self.updateTrackButtons()
+                }
+            )
+        }
+        presentTrackPicker(
+            title: "Audio",
+            options: options,
+            emptyMessage: "No alternate audio tracks are available."
+        )
+    }
+
+    @objc private func subtitlesTapped() {
+        showControls()
+        var options: [TrackPickerOption] = []
+        if let group = subtitleGroup, !group.options.isEmpty {
+            let selectedNative = player?.currentItem?.currentMediaSelection.selectedMediaOption(in: group)
+            if group.allowsEmptySelection && sidecarSubtitles.isEmpty {
+                options.append(
+                    TrackPickerOption(
+                        id: "subtitles-off",
+                        title: "Off",
+                        isSelected: selectedNative == nil,
+                        select: { [weak self] in
+                            guard let self else { return }
+                            self.activeSidecarSubtitleIndex = nil
+                            self.player?.currentItem?.select(nil, in: group)
+                            self.updateSidecarSubtitle()
+                            self.updateTrackButtons()
+                        }
+                    )
+                )
             }
-            for option in subtitleGroup.options {
-                let selected = player?.currentItem?.currentMediaSelection.selectedMediaOption(in: subtitleGroup) === option
-                let title = "\(selected ? "✓ " : "")Subtitles: \(option.displayName)"
-                alert.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
-                    guard let self else { return }
-                    self.activeSidecarSubtitleIndex = nil
-                    self.player?.currentItem?.select(option, in: subtitleGroup)
-                    self.updateSidecarSubtitle()
-                    self.updateTrackButton()
-                })
+            for (index, option) in group.options.enumerated() {
+                options.append(
+                    TrackPickerOption(
+                        id: "subtitle-\(index)",
+                        title: option.displayName,
+                        isSelected: activeSidecarSubtitleIndex == nil && selectedNative === option,
+                        select: { [weak self] in
+                            guard let self,
+                                  let item = self.player?.currentItem,
+                                  let currentGroup = self.subtitleGroup,
+                                  currentGroup.options.indices.contains(index) else { return }
+                            self.activeSidecarSubtitleIndex = nil
+                            item.select(currentGroup.options[index], in: currentGroup)
+                            self.updateSidecarSubtitle()
+                            self.updateTrackButtons()
+                        }
+                    )
+                )
             }
         }
         if !sidecarSubtitles.isEmpty {
-            let offSelected = activeSidecarSubtitleIndex == nil
-            alert.addAction(UIAlertAction(
-                title: "\(offSelected ? "✓ " : "")Subtitles: Off",
-                style: .default
-            ) { [weak self] _ in
-                guard let self else { return }
-                self.activeSidecarSubtitleIndex = nil
-                if let group = self.subtitleGroup {
-                    self.player?.currentItem?.select(nil, in: group)
-                }
-                self.updateSidecarSubtitle()
-                self.updateTrackButton()
-            })
-            for (index, sidecar) in sidecarSubtitles.enumerated() {
-                let selected = activeSidecarSubtitleIndex == index
-                let label = sidecar.language ?? sidecar.name
-                alert.addAction(UIAlertAction(
-                    title: "\(selected ? "✓ " : "")Subtitles: \(label)",
-                    style: .default
-                ) { [weak self] _ in
-                    guard let self, index < self.sidecarSubtitles.count else { return }
-                    self.activeSidecarSubtitleIndex = index
-                    if let group = self.subtitleGroup {
-                        self.player?.currentItem?.select(nil, in: group)
+            let nativeSelected = subtitleGroup.flatMap {
+                player?.currentItem?.currentMediaSelection.selectedMediaOption(in: $0)
+            } != nil
+            options.append(
+                TrackPickerOption(
+                    id: "sidecar-off",
+                    title: "Off",
+                    isSelected: activeSidecarSubtitleIndex == nil && !nativeSelected,
+                    select: { [weak self] in
+                        guard let self else { return }
+                        self.activeSidecarSubtitleIndex = nil
+                        if let group = self.subtitleGroup {
+                            self.player?.currentItem?.select(nil, in: group)
+                        }
+                        self.updateSidecarSubtitle()
+                        self.updateTrackButtons()
                     }
-                    self.updateSidecarSubtitle()
-                    self.updateTrackButton()
-                })
+                )
+            )
+            for (index, sidecar) in sidecarSubtitles.enumerated() {
+                let label = sidecar.language ?? sidecar.name
+                options.append(
+                    TrackPickerOption(
+                        id: "sidecar-\(index)",
+                        title: label,
+                        isSelected: activeSidecarSubtitleIndex == index,
+                        select: { [weak self] in
+                            guard let self, self.sidecarSubtitles.indices.contains(index) else { return }
+                            self.activeSidecarSubtitleIndex = index
+                            if let group = self.subtitleGroup {
+                                self.player?.currentItem?.select(nil, in: group)
+                            }
+                            self.updateSidecarSubtitle()
+                            self.updateTrackButtons()
+                        }
+                    )
+                )
             }
         }
-        if alert.actions.isEmpty {
-            alert.message = "No alternate audio or subtitle tracks are available."
+        presentTrackPicker(
+            title: "Subtitles",
+            options: options,
+            emptyMessage: trackGroupsLoadedFor == nil
+                ? "Subtitle tracks are still loading."
+                : "No subtitle tracks are available."
+        )
+    }
+
+    private func presentTrackPicker(
+        title: String,
+        options: [TrackPickerOption],
+        emptyMessage: String
+    ) {
+        let picker = UIHostingController(
+            rootView: TrackPickerSheet(
+                title: title,
+                options: options,
+                emptyMessage: emptyMessage
+            )
+        )
+        picker.modalPresentationStyle = .pageSheet
+        picker.view.backgroundColor = .systemBackground
+        if let sheet = picker.sheetPresentationController {
+            sheet.detents = [.medium(), .large()]
+            sheet.prefersGrabberVisible = true
         }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        if let popover = alert.popoverPresentationController {
-            popover.sourceView = tracksButton
-            popover.sourceRect = tracksButton.bounds
-        }
-        present(alert, animated: true)
+        present(picker, animated: true)
     }
 
     private func loadTrackGroups(for item: AVPlayerItem) {
@@ -547,20 +634,20 @@ final class RigelPlayerViewController: UIViewController {
                 self.audioGroup = audio
                 self.subtitleGroup = subtitles
                 self.trackGroupsLoadedFor = item
-                self.updateTrackButton()
+                self.updateTrackButtons()
             }
         }
     }
 
-    private func updateTrackButton() {
+    private func updateTrackButtons() {
         let audioCount = audioGroup?.options.count ?? 0
         let subtitleCount = (subtitleGroup?.options.count ?? 0) + sidecarSubtitles.count
-        if audioCount == 0 && subtitleCount == 0 {
-            tracksButton.accessibilityValue = "No alternate tracks"
-        } else {
-            tracksButton.accessibilityValue = "\(audioCount) audio, \(subtitleCount) subtitle"
-                + (subtitleCount == 1 ? "" : "s")
-        }
+        audioButton.accessibilityValue = audioCount == 0
+            ? "No alternate audio tracks"
+            : "\(audioCount) audio track" + (audioCount == 1 ? "" : "s")
+        tracksButton.accessibilityValue = subtitleCount == 0
+            ? "No subtitle tracks"
+            : "\(subtitleCount) subtitle track" + (subtitleCount == 1 ? "" : "s")
     }
     private func loadSidecarSubtitles(_ tracks: [SubtitleTrack]) {
         let limitedTracks = Array(tracks.prefix(16))
@@ -614,7 +701,7 @@ final class RigelPlayerViewController: UIViewController {
                             cues: cues,
                         )
                     )
-                    self.updateTrackButton()
+                    self.updateTrackButtons()
                     NSLog("[RigelPlayer] sidecar %@ ok", rawURL)
                 }
             }.resume()
@@ -699,8 +786,10 @@ final class RigelPlayerViewController: UIViewController {
         audioGroup = nil
         subtitleGroup = nil
         trackGroupsLoadedFor = nil
+        audioButton.isHidden = false
         tracksButton.isHidden = false
-        tracksButton.accessibilityValue = "Loading tracks"
+        audioButton.accessibilityValue = "Loading audio tracks"
+        tracksButton.accessibilityValue = "Loading subtitle tracks"
         showControls()
 
         let item = AVPlayerItem(url: avURL)
@@ -924,6 +1013,7 @@ final class RigelPlayerViewController: UIViewController {
         activeSidecarSubtitleIndex = nil
         subtitleLabel.text = nil
         subtitleLabel.isHidden = true
+        audioButton.accessibilityValue = nil
         tracksButton.accessibilityValue = nil
     }
 
@@ -989,6 +1079,66 @@ final class RigelPlayerViewController: UIViewController {
             break
         }
     }
+private struct TrackPickerOption: Identifiable {
+    let id: String
+    let title: String
+    let isSelected: Bool
+    let select: () -> Void
+}
+
+private struct TrackPickerSheet: View {
+    let title: String
+    let options: [TrackPickerOption]
+    let emptyMessage: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if options.isEmpty {
+                    VStack {
+                        Spacer()
+                        Text(emptyMessage)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    List(options) { option in
+                        Button {
+                            option.select()
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Text(option.title)
+                                Spacer()
+                                if option.isSelected {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(.tint)
+                                        .fontWeight(.semibold)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityValue(option.isSelected ? "Selected" : "")
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
 }
 
 final class RigelPlayerBridge: NSObject, NativePlayerBridge {

@@ -14,9 +14,11 @@ struct DevicesView: View {
                 Section {
                     HStack {
                         Text("AirPlay & Bluetooth")
-                        Spacer()
+                        Spacer(minLength: 8)
                         RoutePickerRow()
+                            .frame(width: 44, height: 44)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 } header: {
                     Text("AirPlay")
                 } footer: {
