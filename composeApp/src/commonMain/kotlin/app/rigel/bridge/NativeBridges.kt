@@ -12,6 +12,12 @@ data class SsdpDevice(
     val server: String?,
     val searchTarget: String,
 )
+data class SubtitleTrack(
+    val url: String,
+    val language: String? = null,
+    val title: String? = null,
+)
+
 
 data class ProbeResult(
     val container: String,
@@ -39,6 +45,8 @@ interface TranscodeBridge {
         sourceUrl: String,
         headers: Map<String, String>,
         mode: String,
+        startOffsetMs: Long,
+        subtitleTracks: List<SubtitleTrack>,
         onReady: (relativePlaylistPath: String?, errorMsg: String?) -> Unit,
         onError: (errorMsg: String) -> Unit,
     )

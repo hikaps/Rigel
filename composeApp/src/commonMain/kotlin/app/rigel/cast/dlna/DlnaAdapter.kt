@@ -28,10 +28,24 @@ object DlnaAdapter : ReceiverAdapter {
     ): String {
         val device = (target as CastTarget.Dlna).device
         val renderer = DlnaRenderer(client)
-        renderer.setAvTransportUri(device, url, title)
-        renderer.play(device)
-        return "Sent to ${target.name}"
+        val uriAccepted = renderer.setAvTransportUri(device, url, title)
+        val playbackStarted = uriAccepted && renderer.play(device)
+        return if (playbackStarted) {
+            "Sent to ${target.name}"
+        } else {
+            "DLNA rejected the URL"
+        }
     }
+
+    override suspend fun seek(
+        target: CastTarget,
+        positionMs: Long,
+        durationMs: Long,
+        client: HttpClient,
+    ): Boolean = runCatching {
+        DlnaRenderer(client).seek((target as CastTarget.Dlna).device, positionMs)
+    }.getOrDefault(false)
+
 
     /**
      * Bug fix: live MediaRenderer SSDP responses now enrich into DLNA targets.

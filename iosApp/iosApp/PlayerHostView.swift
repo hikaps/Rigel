@@ -34,7 +34,9 @@ struct PlayerHostView: View {
         let title: String?
         let sender: String?
         let probeDurationMs: Double?
+        let startPositionMs: Int64
     }
+
 
     var body: some View {
         ZStack {
@@ -135,14 +137,21 @@ struct PlayerHostView: View {
                     url: url,
                     title: player.displayTitle,
                     sender: player.sender,
-                    subtitleUrls: player.subtitleUrls,
+                    subtitleTracks: player.subtitleTracks,
                     longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
                     isProxy: player.proxyUrl != nil,
                     probeDurationMs: player.probeDurationMs,
+                    startPositionMs: player.startPositionMs,
                     onReady: {},
                     onError: { player.reportError($0) },
                     onBack: { player.stop() },
-                    onDevices: { showDevicesPicker = true }
+                    onDevices: { showDevicesPicker = true },
+                    onSeek: {
+                        player.seek(
+                            positionSeconds: $0,
+                            durationSeconds: (player.probeDurationMs ?? 0) / 1000
+                        )
+                    }
                 )
                 .ignoresSafeArea()
             } else {
@@ -218,24 +227,27 @@ struct PlayerView: UIViewControllerRepresentable {
     let url: String
     let title: String?
     let sender: String?
-    let subtitleUrls: [String]
+    let subtitleTracks: [SubtitleTrack]
     let longFormVideoAirPlayEligible: Bool
     let isProxy: Bool
     let probeDurationMs: Double?
+    let startPositionMs: Int64
     let onReady: () -> Void
     let onError: (String) -> Void
     let onBack: () -> Void
     let onDevices: () -> Void
+    let onSeek: (Double) -> Void
 
     final class Coordinator {
         var loaded: (
             url: String,
             title: String?,
             sender: String?,
-            subtitleUrls: [String],
+            subtitleTracks: [SubtitleTrack],
             longFormVideoAirPlayEligible: Bool,
             isProxy: Bool,
-            probeDurationMs: Double?
+            probeDurationMs: Double?,
+            startPositionMs: Int64
         )?
         /// Strongly retains the error origin so the closure's weak capture
         /// outlives makeUIViewController; otherwise the box deallocates and
@@ -298,6 +310,7 @@ struct PlayerView: UIViewControllerRepresentable {
         let created = bridge.createPlayerViewController(events: events)
         if let player = created as? RigelPlayerViewController {
             player.onDevicesRequested = onDevices
+            player.onSeekRequested = onSeek
         }
         origin.controller = created as? RigelPlayerViewController
         context.coordinator.errorOrigin = origin
@@ -308,34 +321,39 @@ struct PlayerView: UIViewControllerRepresentable {
         weak var controller: RigelPlayerViewController?
     }
 
-
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        if let player = uiViewController as? RigelPlayerViewController {
+            player.onSeekRequested = onSeek
+        }
         guard let bridge = PlayerBridgeFactory.shared.create() else { return }
         let loaded = context.coordinator.loaded
         if loaded?.url != url ||
             loaded?.title != title ||
             loaded?.sender != sender ||
-            loaded?.subtitleUrls != subtitleUrls ||
+            loaded?.subtitleTracks != subtitleTracks ||
             loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible ||
             loaded?.isProxy != isProxy ||
-            loaded?.probeDurationMs != probeDurationMs {
+            loaded?.probeDurationMs != probeDurationMs ||
+            loaded?.startPositionMs != startPositionMs {
             bridge.load(
                 url: url,
                 title: title,
                 sender: sender,
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
-                subtitleUrls: subtitleUrls,
+                subtitleTracks: subtitleTracks,
                 durationMs: probeDurationMs.map { KotlinLong(longLong: Int64($0)) },
-                isProxy: isProxy
+                isProxy: isProxy,
+                startOffsetMs: startPositionMs
             )
             context.coordinator.loaded = (
                 url,
                 title,
                 sender,
-                subtitleUrls,
+                subtitleTracks,
                 longFormVideoAirPlayEligible,
                 isProxy,
-                probeDurationMs
+                probeDurationMs,
+                startPositionMs
             )
         }
     }

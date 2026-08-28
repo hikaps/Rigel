@@ -37,8 +37,13 @@ final class RigelPlayerViewController: UIViewController {
     /// Assigned by the SwiftUI host so the native control can present the
     /// app-level destination picker without expanding the Kotlin event contract.
     var onDevicesRequested: (() -> Void)?
+    /// Called with an absolute media position for remote seek forwarding or
+    /// proxy session restart.
+    var onSeekRequested: ((Double) -> Void)?
+
     private var player: AVPlayer?
     private var playerVC: AVPlayerViewController?
+    private var timeJumpObserver: NSObjectProtocol?
     private var pollTimer: Timer?
     private var disposed = false
     private var audioSessionActivated = false
@@ -85,6 +90,7 @@ final class RigelPlayerViewController: UIViewController {
     private var trackGroupsLoadedFor: AVPlayerItem?
     private struct SidecarSubtitle {
         let name: String
+        let language: String?
         let cues: [SubtitleParser.Cue]
     }
     private var sidecarSubtitles: [SidecarSubtitle] = []
@@ -92,9 +98,9 @@ final class RigelPlayerViewController: UIViewController {
     private var sidecarGeneration = 0
     private var isScrubbing = false
     private var knownDurationSeconds: Double?
+    private var startOffsetSeconds: Double = 0
     private var isProxyPlayback = false
     private var pendingScrubValue: Float?
-    private var scrubSeekInFlight = false
     private var scrubGeneration = 0
 
     private var customPlaybackControls = false
@@ -500,8 +506,9 @@ final class RigelPlayerViewController: UIViewController {
             })
             for (index, sidecar) in sidecarSubtitles.enumerated() {
                 let selected = activeSidecarSubtitleIndex == index
+                let label = sidecar.language ?? sidecar.name
                 alert.addAction(UIAlertAction(
-                    title: "\(selected ? "✓ " : "")Subtitles: \(sidecar.name)",
+                    title: "\(selected ? "✓ " : "")Subtitles: \(label)",
                     style: .default
                 ) { [weak self] _ in
                     guard let self, index < self.sidecarSubtitles.count else { return }
@@ -555,14 +562,14 @@ final class RigelPlayerViewController: UIViewController {
                 + (subtitleCount == 1 ? "" : "s")
         }
     }
-
-    private func loadSidecarSubtitles(_ urls: [String]) {
-        let limitedURLs = Array(urls.prefix(16))
-        if urls.count > limitedURLs.count {
-            NSLog("[RigelPlayer] ignoring %ld sidecar subtitle URLs over the limit", urls.count - limitedURLs.count)
+    private func loadSidecarSubtitles(_ tracks: [SubtitleTrack]) {
+        let limitedTracks = Array(tracks.prefix(16))
+        if tracks.count > limitedTracks.count {
+            NSLog("[RigelPlayer] ignoring %ld sidecar subtitle URLs over the limit", tracks.count - limitedTracks.count)
         }
         let generation = sidecarGeneration
-        for (index, rawURL) in limitedURLs.enumerated() {
+        for (index, track) in limitedTracks.enumerated() {
+            let rawURL = track.url
             guard let url = URL(string: rawURL) else {
                 NSLog("[RigelPlayer] sidecar %@ failed: invalid URL", rawURL)
                 continue
@@ -593,10 +600,20 @@ final class RigelPlayerViewController: UIViewController {
                     NSLog("[RigelPlayer] sidecar %@ failed: no valid cues", rawURL)
                     return
                 }
-                let name = Self.sidecarName(for: url, fallback: "Subtitles \(index + 1)")
+                let title = track.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let name = title?.isEmpty == false
+                    ? title!
+                    : Self.sidecarName(for: url, fallback: "Subtitles \(index + 1)")
+                let language = track.language?.trimmingCharacters(in: .whitespacesAndNewlines)
                 DispatchQueue.main.async {
                     guard self.sidecarGeneration == generation, !self.disposed else { return }
-                    self.sidecarSubtitles.append(SidecarSubtitle(name: name, cues: cues))
+                    self.sidecarSubtitles.append(
+                        SidecarSubtitle(
+                            name: name,
+                            language: language?.isEmpty == false ? language : nil,
+                            cues: cues,
+                        )
+                    )
                     self.updateTrackButton()
                     NSLog("[RigelPlayer] sidecar %@ ok", rawURL)
                 }
@@ -612,13 +629,12 @@ final class RigelPlayerViewController: UIViewController {
 
     private func updateSidecarSubtitle() {
         guard let index = activeSidecarSubtitleIndex,
-              sidecarSubtitles.indices.contains(index),
-              let player else {
+              sidecarSubtitles.indices.contains(index) else {
             subtitleLabel.text = nil
             subtitleLabel.isHidden = true
             return
         }
-        let seconds = player.currentTime().seconds
+        let seconds = mediaSeconds
         guard seconds.isFinite else {
             subtitleLabel.text = nil
             subtitleLabel.isHidden = true
@@ -636,9 +652,10 @@ final class RigelPlayerViewController: UIViewController {
         title: String?,
         sender: String?,
         longFormVideoAirPlayEligible: Bool,
-        subtitleUrls: [String] = [],
+        subtitleTracks: [SubtitleTrack] = [],
         durationSeconds: Double? = nil,
-        isProxy: Bool = false
+        isProxy: Bool = false,
+        startOffsetSeconds: Double = 0
     ) {
         NSLog("[RigelPlayer] load %@ longFormVideo=%d", url, longFormVideoAirPlayEligible ? 1 : 0)
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -668,9 +685,9 @@ final class RigelPlayerViewController: UIViewController {
         }
 
         disposed = false
-        notifiedPlaying = false
         isScrubbing = false
         knownDurationSeconds = durationSeconds
+        self.startOffsetSeconds = max(0, startOffsetSeconds.isFinite ? startOffsetSeconds : 0)
         isProxyPlayback = isProxy
         pendingScrubValue = nil
         customPlaybackControls = Self.isHLSURL(url)
@@ -690,7 +707,19 @@ final class RigelPlayerViewController: UIViewController {
         let p = AVPlayer(playerItem: item)
         p.allowsExternalPlayback = true
         player = p
-        loadSidecarSubtitles(subtitleUrls)
+        if !customPlaybackControls {
+            timeJumpObserver = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name.AVPlayerItemTimeJumped,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, !self.disposed else { return }
+                self.onSeekRequested?(self.mediaSeconds)
+            }
+        }
+        if !isProxyPlayback {
+            loadSidecarSubtitles(subtitleTracks)
+        }
 
         let vc = AVPlayerViewController()
         vc.player = p
@@ -734,33 +763,50 @@ final class RigelPlayerViewController: UIViewController {
         updatePlaybackControls()
     }
 
+
+    private var mediaSeconds: Double {
+        let current = player?.currentTime().seconds ?? 0
+        guard current.isFinite else { return startOffsetSeconds }
+        return max(0, startOffsetSeconds + current)
+    }
+
+    private func performSeek(absoluteTarget: Double) {
+        showControls()
+        pendingScrubValue = nil
+        scrubGeneration &+= 1
+        guard let player, let item = player.currentItem, item.status != .failed else { return }
+        let duration = effectiveDuration(item)
+        guard duration.isFinite, duration > 0 else { return }
+        let target = min(max(absoluteTarget, 0), duration)
+        if isProxyPlayback {
+            onSeekRequested?(target)
+            return
+        }
+        let generation = scrubGeneration
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self, weak player] finished in
+            DispatchQueue.main.async {
+                guard let self, let player, self.player === player, self.scrubGeneration == generation else { return }
+                if finished {
+                    self.updatePlaybackControls()
+                    self.scheduleControlsHide()
+                } else {
+                    self.updatePlaybackControls()
+                }
+            }
+        }
+        onSeekRequested?(target)
+    }
+
     @objc private func skipBackwardTapped() {
-        seek(by: -15)
+        performSeek(absoluteTarget: mediaSeconds - 15)
     }
 
     @objc private func skipForwardTapped() {
-        seek(by: 15)
-    }
-
-    private func seek(by offset: Double) {
-        showControls()
-        pendingScrubValue = nil
-        scrubSeekInFlight = false
-        scrubGeneration &+= 1
-        guard let player else { return }
-        let current = player.currentTime().seconds
-        let start = current.isFinite ? max(0, current) : 0
-        let duration = player.currentItem.map(effectiveDuration) ?? .nan
-        let target = duration.isFinite && duration > 0
-            ? min(max(0, start + offset), duration)
-            : max(0, start + offset)
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
-        updatePlaybackControls()
+        performSeek(absoluteTarget: mediaSeconds + 15)
     }
 
     @objc private func progressTouchDown() {
         scrubGeneration &+= 1
-        scrubSeekInFlight = false
         isScrubbing = true
         pendingScrubValue = progressSlider.value
         controlsHideTimer?.invalidate()
@@ -788,39 +834,13 @@ final class RigelPlayerViewController: UIViewController {
             showControls()
             return
         }
-        submitPendingScrub()
+        let target = Double(pendingScrubValue ?? progressSlider.value) * duration
+        performSeek(absoluteTarget: target)
         showControls()
-    }
-    private func submitPendingScrub() {
-        guard !isScrubbing,
-              !scrubSeekInFlight,
-              let value = pendingScrubValue,
-              let player,
-              let item = player.currentItem,
-              item.status != .failed else { return }
-        let duration = effectiveDuration(item)
-        guard duration.isFinite, duration > 0 else { return }
-        let target = Double(value) * duration
-        let generation = scrubGeneration
-        scrubSeekInFlight = true
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self, weak player] finished in
-            DispatchQueue.main.async {
-                guard let self, let player, self.player === player, self.scrubGeneration == generation else { return }
-                self.scrubSeekInFlight = false
-                if finished {
-                    self.pendingScrubValue = nil
-                    self.updatePlaybackControls()
-                    self.scheduleControlsHide()
-                } else {
-                    self.showControls()
-                    self.updatePlaybackControls()
-                }
-            }
-        }
     }
     private func updatePlaybackControls() {
         guard customPlaybackControls, let player, let item = player.currentItem else { return }
-        let elapsed = player.currentTime().seconds
+        let elapsed = mediaSeconds
         let elapsedText = Self.formatTime(elapsed)
         elapsedLabel.text = elapsedText
         let duration = effectiveDuration(item)
@@ -877,6 +897,10 @@ final class RigelPlayerViewController: UIViewController {
         playerVC = nil
         player = nil
         controlsHideTimer?.invalidate()
+        if let observer = timeJumpObserver {
+            NotificationCenter.default.removeObserver(observer)
+            timeJumpObserver = nil
+        }
         controlsHideTimer = nil
         controlsVisible = true
         topBar.isHidden = false
@@ -887,9 +911,9 @@ final class RigelPlayerViewController: UIViewController {
         customPlaybackControls = false
         isScrubbing = false
         knownDurationSeconds = nil
+        startOffsetSeconds = 0
         isProxyPlayback = false
         pendingScrubValue = nil
-        scrubSeekInFlight = false
         scrubGeneration &+= 1
         bottomBar.isHidden = true
         audioGroup = nil
@@ -933,8 +957,6 @@ final class RigelPlayerViewController: UIViewController {
             loadTrackGroups(for: item)
         }
         updatePlaybackControls()
-        // A failed seek remains pending; retry after the HLS playlist refreshes.
-        submitPendingScrub()
         updateSidecarSubtitle()
         if player.timeControlStatus == .playing {
             if controlsVisible, controlsHideTimer == nil {
@@ -983,18 +1005,20 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         title: String?,
         sender: String?,
         longFormVideoAirPlayEligible: Bool,
-        subtitleUrls: [String],
+        subtitleTracks: [SubtitleTrack],
         durationMs: KotlinLong?,
-        isProxy: Bool
+        isProxy: Bool,
+        startOffsetMs: Int64
     ) {
         vc?.load(
             url: url,
             title: title,
             sender: sender,
             longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
-            subtitleUrls: subtitleUrls,
+            subtitleTracks: subtitleTracks,
             durationSeconds: durationMs.map { $0.doubleValue / 1000.0 },
-            isProxy: isProxy
+            isProxy: isProxy,
+            startOffsetSeconds: Double(startOffsetMs) / 1000.0
         )
     }
 

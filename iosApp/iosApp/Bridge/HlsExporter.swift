@@ -1,4 +1,6 @@
 import Foundation
+import ComposeApp
+
 
 /// Local ffmpeg remux/transcode → HLS session. Writes a master playlist,
 /// variant playlists, and segments into Documents/proxy/<sessionId>/ and
@@ -9,15 +11,68 @@ import Foundation
 final class RigelHlsExporter {
     final class Session {
         let queue: DispatchQueue
+        let startOffsetMs: Int64
+        let subtitleTracks: [SubtitleTrack]
         var cancel = false
         var finished = false
         var readinessClaimed = false
         var readinessDelivered = false
 
-        init(queue: DispatchQueue) {
+        init(
+            queue: DispatchQueue,
+            startOffsetMs: Int64,
+            subtitleTracks: [SubtitleTrack]
+        ) {
             self.queue = queue
+            self.startOffsetMs = startOffsetMs
+            self.subtitleTracks = subtitleTracks
         }
     }
+
+    private struct SubtitleInput {
+        let sourceID: Int
+        let context: UnsafeMutablePointer<AVFormatContext>
+        let streamIndex: Int32
+        let timeBase: AVRational
+        let language: String?
+        let title: String?
+    }
+
+    private final class SubtitleOutput {
+        let input: SubtitleInput
+        let ordinal: Int
+        let outputStream: UnsafeMutablePointer<AVStream>
+        let chain: SubtitleChain?
+        let videoOrdinal: Int
+
+        init(
+            input: SubtitleInput,
+            ordinal: Int,
+            outputStream: UnsafeMutablePointer<AVStream>,
+            chain: SubtitleChain?,
+            videoOrdinal: Int
+        ) {
+            self.input = input
+            self.ordinal = ordinal
+            self.outputStream = outputStream
+            self.chain = chain
+            self.videoOrdinal = videoOrdinal
+        }
+    }
+
+    private final class SubtitleChain {
+        let decCtx: UnsafeMutablePointer<AVCodecContext>
+
+        init(decCtx: UnsafeMutablePointer<AVCodecContext>) {
+            self.decCtx = decCtx
+        }
+
+        func release() {
+            var dec: UnsafeMutablePointer<AVCodecContext>? = decCtx
+            avcodec_free_context(&dec)
+        }
+    }
+
 
     private static var sessions: [String: Session] = [:]
     private static let lock = NSLock()
@@ -33,11 +88,17 @@ final class RigelHlsExporter {
         sourceUrl: String,
         headers: [String: String],
         mode: String,
+        startOffsetMs: Int64,
+        subtitleTracks: [SubtitleTrack],
         onReady: @escaping (String?, String?) -> Void,
         onError: @escaping (String) -> Void
     ) {
         let queue = DispatchQueue(label: "rigel-hls-\(sessionId)")
-        let session = Session(queue: queue)
+        let session = Session(
+            queue: queue,
+            startOffsetMs: startOffsetMs,
+            subtitleTracks: subtitleTracks
+        )
         lock.lock(); sessions[sessionId] = session; lock.unlock()
         queue.async {
             run(
@@ -172,6 +233,9 @@ final class RigelHlsExporter {
 
         var ifmt: UnsafeMutablePointer<AVFormatContext>? = nil
         var ofmt: UnsafeMutablePointer<AVFormatContext>? = nil
+        var subtitleInputs: [SubtitleInput] = []
+        var subtitleOutputs: [SubtitleOutput] = []
+        var videoOutputStreams: [UnsafeMutablePointer<AVStream>] = []
         var audioChains: [Int32: AudioChain] = [:]
         var passthroughAudioIndices: Set<Int32> = []
         var videoChain: VideoChain? = nil
@@ -198,14 +262,27 @@ final class RigelHlsExporter {
                 var packetPointer: UnsafeMutablePointer<AVPacket>? = packet
                 av_packet_free(&packetPointer)
             }
-            cleanup(ifmt: ifmt, ofmt: ofmt, audio: Array(audioChains.values), video: videoChain)
+            cleanup(
+                ifmt: ifmt,
+                ofmt: ofmt,
+                audio: Array(audioChains.values),
+                video: videoChain,
+                subtitleInputs: subtitleInputs,
+                subtitles: subtitleOutputs.compactMap(\.chain)
+            )
         }
 
         guard openInput(url: sourceUrl, headers: headers, fmt: &ifmt), let ctx = ifmt else {
             reportFailure("failed to open source: \(sourceUrl)")
             return
         }
-
+        if session.startOffsetMs > 0 {
+            let targetUs = session.startOffsetMs.multipliedReportingOverflow(by: 1_000).partialValue
+            let seekResult = avformat_seek_file(ctx, -1, 0, targetUs, Int64.max, 0)
+            if seekResult < 0 {
+                NSLog("[RigelPlayer] failed to seek source to %lld ms", session.startOffsetMs)
+            }
+        }
         let inCount = Int(ctx.pointee.nb_streams)
         var selectedVideoIndex: Int32?
         var selectedVideoIsDefault = false
@@ -230,9 +307,62 @@ final class RigelHlsExporter {
                     defaultAudioIndex = inputIndex
                     foundDefaultAudio = isDefault
                 }
+            case AVMEDIA_TYPE_SUBTITLE:
+                if isBitmapSubtitle(codecpar.pointee.codec_id) {
+                    NSLog("[RigelHlsExporter] skipping bitmap subtitle stream %d", inputIndex)
+                } else {
+                    subtitleInputs.append(
+                        SubtitleInput(
+                            sourceID: 0,
+                            context: ctx,
+                            streamIndex: inputIndex,
+                            timeBase: stream.pointee.time_base,
+                            language: hlsLanguage(for: stream.pointee.metadata),
+                            title: streamMetadataValue(stream.pointee.metadata, key: "title"),
+                        )
+                    )
+                }
             default:
                 break
             }
+        }
+
+        for (offset, track) in session.subtitleTracks.enumerated() {
+            var subtitleFmt: UnsafeMutablePointer<AVFormatContext>? = nil
+            guard openInput(url: track.url, headers: [:], fmt: &subtitleFmt),
+                  let subtitleCtx = subtitleFmt else {
+                closeInput(&subtitleFmt)
+                NSLog("[RigelHlsExporter] sidecar subtitle failed to open: %@", track.url)
+                continue
+            }
+            let subtitleStreamIndex = (0..<Int(subtitleCtx.pointee.nb_streams)).compactMap { index -> Int32? in
+                guard let stream = subtitleCtx.pointee.streams[index],
+                      let codecpar = stream.pointee.codecpar,
+                      codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE,
+                      !isBitmapSubtitle(codecpar.pointee.codec_id) else { return nil }
+                return Int32(index)
+            }.first
+            guard let subtitleStreamIndex,
+                  let subtitleStream = subtitleCtx.pointee.streams[Int(subtitleStreamIndex)] else {
+                closeInput(&subtitleFmt)
+                NSLog("[RigelHlsExporter] sidecar subtitle has no supported stream: %@", track.url)
+                continue
+            }
+            let language = hlsLanguageValue(track.language)
+                ?? hlsLanguage(for: subtitleStream.pointee.metadata)
+            let title = track.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            subtitleInputs.append(
+                SubtitleInput(
+                    sourceID: offset + 1,
+                    context: subtitleCtx,
+                    streamIndex: subtitleStreamIndex,
+                    timeBase: subtitleStream.pointee.time_base,
+                    language: language,
+                    title: title?.isEmpty == false
+                        ? title
+                        : streamMetadataValue(subtitleStream.pointee.metadata, key: "title"),
+                )
+            )
         }
 
         let outputAudioIndices: [Int32]
@@ -242,7 +372,7 @@ final class RigelHlsExporter {
             outputAudioIndices = selectedAudioIndices
         }
         let hasMasterPlaylist = selectedVideoIndex != nil
-        let variantCount = hasMasterPlaylist ? outputAudioIndices.count + 1 : 1
+        var variantCount = hasMasterPlaylist ? outputAudioIndices.count + 1 : 1
         let playlistPath = hasMasterPlaylist
             ? outDir.appendingPathComponent("variant_%v.m3u8").path
             : legacyPlaylistPath
@@ -274,6 +404,7 @@ final class RigelHlsExporter {
         )
 
         var streamMap: [Int32: Int32] = [:]
+        var mainVideoOutput: UnsafeMutablePointer<AVStream>?
         for inputIndex in outputInputIndices {
             guard let inStream = ctx.pointee.streams[Int(inputIndex)],
                   let codecpar = inStream.pointee.codecpar,
@@ -283,18 +414,20 @@ final class RigelHlsExporter {
 
             switch codecpar.pointee.codec_type {
             case AVMEDIA_TYPE_VIDEO:
+                mainVideoOutput = outStream
                 // remux: verbatim stream copy. transcode: always re-encode.
                 if mode == "remux" {
                     if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
                         outStream.pointee.codecpar.pointee.codec_tag = 0
                         outStream.pointee.time_base = inStream.pointee.time_base
                     }
-                } else {
-                    videoChain = makeVideoChain(
-                        inputStream: inStream,
-                        outputStream: outStream,
-                        timestampOrigin90k: timestampOrigin90k
-                    )
+                } else if let chain = makeVideoChain(
+                    inputStream: inStream,
+                    outputStream: outStream,
+                    timestampOrigin90k: timestampOrigin90k
+                ) {
+                    videoChain = chain
+                    chain.outputStreams = [outStream]
                 }
             case AVMEDIA_TYPE_AUDIO:
                 if let language = streamMetadataValue(inStream.pointee.metadata, key: "language") {
@@ -321,6 +454,89 @@ final class RigelHlsExporter {
             }
         }
 
+        var primarySubtitleOutputs: [Int32: SubtitleOutput] = [:]
+        var externalSubtitleOutputs: [Int: SubtitleOutput] = [:]
+        if let mainVideoOutput {
+            videoOutputStreams = [mainVideoOutput]
+            for input in subtitleInputs {
+                guard let inputStream = input.context.pointee.streams[Int(input.streamIndex)],
+                      let codecpar = inputStream.pointee.codecpar else { continue }
+                let codec = codecpar.pointee.codec_id
+                if codec != AV_CODEC_ID_WEBVTT {
+                    guard avcodec_find_decoder(codec) != nil else {
+                        NSLog("[RigelHlsExporter] no subtitle decoder for stream %d", input.streamIndex)
+                        continue
+                    }
+                }
+                guard let outputStream = avformat_new_stream(out, nil) else { continue }
+                let chain: SubtitleChain?
+                if codec == AV_CODEC_ID_WEBVTT {
+                    guard avcodec_parameters_copy(outputStream.pointee.codecpar, codecpar) >= 0 else {
+                        outputStream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_DATA
+                        continue
+                    }
+                    outputStream.pointee.codecpar.pointee.codec_tag = 0
+                    outputStream.pointee.time_base = input.timeBase
+                    chain = nil
+                } else {
+                    chain = makeSubtitleChain(inputStream: inputStream)
+                    guard chain != nil else {
+                        NSLog(
+                            "[RigelHlsExporter] failed to initialize subtitle decoder for stream %d codec %d",
+                            input.streamIndex,
+                            codec.rawValue
+                        )
+                        outputStream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_DATA
+                        continue
+                    }
+                    outputStream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_SUBTITLE
+                    outputStream.pointee.codecpar.pointee.codec_id = AV_CODEC_ID_WEBVTT
+                    outputStream.pointee.codecpar.pointee.codec_tag = 0
+                    outputStream.pointee.time_base = AVRational(num: 1, den: 1_000)
+                }
+                if let language = input.language {
+                    language.withCString { value in
+                        av_dict_set(&outputStream.pointee.metadata, "language", value, 0)
+                    }
+                }
+                if let title = input.title {
+                    title.withCString { value in
+                        av_dict_set(&outputStream.pointee.metadata, "title", value, 0)
+                    }
+                }
+                let videoOrdinal: Int
+                if subtitleOutputs.isEmpty {
+                    videoOrdinal = 0
+                } else {
+                    videoOrdinal = videoOutputStreams.count
+                    guard let duplicateVideo = avformat_new_stream(out, nil),
+                          avcodec_parameters_copy(duplicateVideo.pointee.codecpar, mainVideoOutput.pointee.codecpar) >= 0 else {
+                        chain?.release()
+                        outputStream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_DATA
+                        continue
+                    }
+                    duplicateVideo.pointee.codecpar.pointee.codec_tag = 0
+                    duplicateVideo.pointee.time_base = mainVideoOutput.pointee.time_base
+                    videoOutputStreams.append(duplicateVideo)
+                    videoChain?.outputStreams = videoOutputStreams
+                }
+                let output = SubtitleOutput(
+                    input: input,
+                    ordinal: subtitleOutputs.count,
+                    outputStream: outputStream,
+                    chain: chain,
+                    videoOrdinal: videoOrdinal
+                )
+                subtitleOutputs.append(output)
+                if input.sourceID == 0 {
+                    primarySubtitleOutputs[input.streamIndex] = output
+                } else {
+                    externalSubtitleOutputs[input.sourceID] = output
+                }
+            }
+        }
+        variantCount += max(0, subtitleOutputs.count - 1)
+
         if mode != "remux", selectedVideoIndex != nil, videoChain == nil {
             reportFailure("failed to initialize video transcoder")
             return
@@ -328,24 +544,44 @@ final class RigelHlsExporter {
 
         if hasMasterPlaylist {
             var streamMapEntries: [String] = []
-            if outputAudioIndices.isEmpty {
-                streamMapEntries.append("v:0")
-            } else {
-                streamMapEntries.append("v:0,agroup:aud")
-                for (audioNumber, inputIndex) in outputAudioIndices.enumerated() {
-                    var entry = "a:\(audioNumber),agroup:aud"
-                    if inputIndex == defaultAudioIndex {
-                        entry += ",default:yes"
-                    }
-                    if let language = hlsLanguage(
-                        for: ctx.pointee.streams[Int(inputIndex)]?.pointee.metadata
-                    ) {
-                        entry += ",language:\(language)"
-                    } else {
-                        entry += ",name:Audio-\(audioNumber + 1)"
-                    }
-                    streamMapEntries.append(entry)
+            var mainEntry = "v:0"
+            if !outputAudioIndices.isEmpty {
+                mainEntry += ",agroup:aud"
+            }
+            if let firstSubtitle = subtitleOutputs.first {
+                mainEntry += ",s:\(firstSubtitle.ordinal),sgroup:subs"
+                if let language = firstSubtitle.input.language {
+                    mainEntry += ",language:\(language)"
                 }
+                mainEntry += ",default:yes"
+            }
+            streamMapEntries.append(mainEntry)
+            for (audioNumber, inputIndex) in outputAudioIndices.enumerated() {
+                var entry = "a:\(audioNumber),agroup:aud"
+                if inputIndex == defaultAudioIndex {
+                    entry += ",default:yes"
+                }
+                if let language = hlsLanguage(
+                    for: ctx.pointee.streams[Int(inputIndex)]?.pointee.metadata
+                ) {
+                    entry += ",language:\(language)"
+                } else {
+                    entry += ",name:Audio-\(audioNumber + 1)"
+                }
+                streamMapEntries.append(entry)
+            }
+            for subtitle in subtitleOutputs.dropFirst() {
+                var entry = "v:\(subtitle.videoOrdinal)"
+                if !outputAudioIndices.isEmpty {
+                    entry += ",agroup:aud"
+                }
+                entry += ",s:\(subtitle.ordinal),sgroup:subs,default:no"
+                if let language = subtitle.input.language {
+                    entry += ",language:\(language)"
+                }
+                let name = streamMapName(subtitle.input.title, fallback: "Subtitle-\(subtitle.ordinal + 1)")
+                entry += ",name:\(name)"
+                streamMapEntries.append(entry)
             }
             av_opt_set(
                 out.pointee.priv_data,
@@ -465,6 +701,15 @@ final class RigelHlsExporter {
                 }
             }
         }
+        if let mainVideoOutput, videoOutputStreams.count > 1 {
+            for duplicateVideo in videoOutputStreams.dropFirst() {
+                avcodec_parameters_copy(
+                    duplicateVideo.pointee.codecpar,
+                    mainVideoOutput.pointee.codecpar
+                )
+                duplicateVideo.pointee.time_base = mainVideoOutput.pointee.time_base
+            }
+        }
         let headerRet = avformat_write_header(out, nil)
         guard headerRet >= 0 else {
             reportFailure("HLS write header failed: \(avErrorString(headerRet))")
@@ -497,33 +742,121 @@ final class RigelHlsExporter {
         }
         pendingAudioPackets.removeAll()
 
-        var pkt = AVPacket()
-        av_init_packet(&pkt)
+        /// Sidecar subtitle files keep absolute timestamps; after a proxy seek
+        /// the primary input's timeline is shifted, so sidecar cues must shift
+        /// by the same offset (and cues ending at/before it are dropped) to
+        /// stay aligned with picture and audio.
+        let sidecarOffsetUs = session.startOffsetMs.multipliedReportingOverflow(by: 1_000).partialValue
+        func writeSubtitlePacket(
+            _ output: SubtitleOutput,
+            packet: UnsafeMutablePointer<AVPacket>
+        ) {
+            guard let inputStream = output.input.context.pointee.streams[Int(output.input.streamIndex)] else { return }
+            var shiftedPacket = packet
+            if output.input.sourceID != 0, sidecarOffsetUs > 0,
+               packet.pointee.pts != Int64.min {
+                let inputTimeBase = inputStream.pointee.time_base.num != 0 &&
+                    inputStream.pointee.time_base.den != 0
+                    ? inputStream.pointee.time_base
+                    : AVRational(num: 1, den: 1_000)
+                let offsetInInput = av_rescale_q(
+                    sidecarOffsetUs,
+                    AVRational(num: 1, den: AV_TIME_BASE),
+                    inputTimeBase
+                )
+                let end = packet.pointee.duration > 0
+                    ? packet.pointee.pts + packet.pointee.duration
+                    : packet.pointee.pts
+                guard end > offsetInInput else { return }
+                shiftedPacket.pointee.pts = max(0, packet.pointee.pts - offsetInInput)
+                if shiftedPacket.pointee.dts != Int64.min {
+                    shiftedPacket.pointee.dts = shiftedPacket.pointee.pts
+                }
+                if packet.pointee.duration > 0 {
+                    shiftedPacket.pointee.duration = end - max(offsetInInput, packet.pointee.pts)
+                }
+            }
+            if let chain = output.chain {
+                writeTranscodedSubtitle(
+                    chain: chain,
+                    packet: shiftedPacket,
+                    inputStream: inputStream,
+                    out: out,
+                    outStream: output.outputStream
+                )
+            } else {
+                writeRemuxPacket(
+                    shiftedPacket,
+                    inStream: inputStream,
+                    outStream: output.outputStream,
+                    out: out
+                )
+            }
+        }
+
+        var primaryEnded = false
+        var endedExternalSources = Set<Int>()
+        let externalSourceCount = externalSubtitleOutputs.count
         while true {
             if isCancelled(session) { break }
-            let readRet = av_read_frame(ctx, &pkt)
-            if readRet < 0 { break }
-            defer { av_packet_unref(&pkt) }
-
-            let inIdx = pkt.stream_index
-            guard let outIdx = streamMap[inIdx],
-                  let inStream = ctx.pointee.streams[Int(inIdx)],
-                  let outStream = out.pointee.streams[Int(outIdx)] else { continue }
-
-            switch inStream.pointee.codecpar.pointee.codec_type {
-            case AVMEDIA_TYPE_VIDEO:
-                if let chain = videoChain, chain.inputIndex == inIdx {
-                    writeTranscodedVideo(chain: chain, packet: &pkt, out: out, outStream: outStream)
+            var didRead = false
+            if !primaryEnded {
+                var primaryPacket = AVPacket()
+                av_init_packet(&primaryPacket)
+                let readRet = av_read_frame(ctx, &primaryPacket)
+                if readRet < 0 {
+                    primaryEnded = true
                 } else {
-                    writeRemuxPacket(&pkt, inStream: inStream, outStream: outStream, out: out)
+                    didRead = true
+                    let inIdx = primaryPacket.stream_index
+                    if let outIdx = streamMap[inIdx],
+                       let inStream = ctx.pointee.streams[Int(inIdx)],
+                       let outStream = out.pointee.streams[Int(outIdx)] {
+                        switch inStream.pointee.codecpar.pointee.codec_type {
+                        case AVMEDIA_TYPE_VIDEO:
+                            if let chain = videoChain, chain.inputIndex == inIdx {
+                                writeTranscodedVideo(chain: chain, packet: &primaryPacket, out: out, outStream: outStream)
+                            } else {
+                                writeRemuxPacketCopies(
+                                    &primaryPacket,
+                                    inStream: inStream,
+                                    outStreams: videoOutputStreams,
+                                    out: out
+                                )
+                            }
+                        case AVMEDIA_TYPE_AUDIO:
+                            if let chain = audioChains[inIdx] {
+                                writeTranscodedAudio(chain: chain, packet: &primaryPacket, out: out, outStream: outStream)
+                            } else if passthroughAudioIndices.contains(inIdx) {
+                                writeRemuxPacket(&primaryPacket, inStream: inStream, outStream: outStream, out: out)
+                            }
+                        default:
+                            break
+                        }
+                    } else if let subtitleOutput = primarySubtitleOutputs[inIdx] {
+                        writeSubtitlePacket(subtitleOutput, packet: &primaryPacket)
+                    }
+                    av_packet_unref(&primaryPacket)
                 }
-            case AVMEDIA_TYPE_AUDIO:
-                if let chain = audioChains[inIdx] {
-                    writeTranscodedAudio(chain: chain, packet: &pkt, out: out, outStream: outStream)
-                } else if passthroughAudioIndices.contains(inIdx) {
-                    writeRemuxPacket(&pkt, inStream: inStream, outStream: outStream, out: out)
+            }
+
+            for subtitleOutput in externalSubtitleOutputs.values {
+                let sourceID = subtitleOutput.input.sourceID
+                guard !endedExternalSources.contains(sourceID) else { continue }
+                var subtitlePacket = AVPacket()
+                av_init_packet(&subtitlePacket)
+                let readRet = av_read_frame(subtitleOutput.input.context, &subtitlePacket)
+                if readRet < 0 {
+                    endedExternalSources.insert(sourceID)
+                } else {
+                    didRead = true
+                    writeSubtitlePacket(subtitleOutput, packet: &subtitlePacket)
+                    av_packet_unref(&subtitlePacket)
                 }
-            default:
+            }
+
+            if !didRead &&
+                (primaryEnded && endedExternalSources.count == externalSourceCount) {
                 break
             }
             if let videoError = videoChain?.error {
@@ -629,6 +962,179 @@ final class RigelHlsExporter {
         av_packet_rescale_ts(pkt, inStream.pointee.time_base, outStream.pointee.time_base)
         pkt.pointee.pos = -1
         av_interleaved_write_frame(out, pkt)
+    }
+
+    private static func writeRemuxPacketCopies(
+        _ packet: UnsafeMutablePointer<AVPacket>,
+        inStream: UnsafeMutablePointer<AVStream>,
+        outStreams: [UnsafeMutablePointer<AVStream>],
+        out: UnsafeMutablePointer<AVFormatContext>
+    ) {
+        for outStream in outStreams {
+            var copy = AVPacket()
+            av_init_packet(&copy)
+            guard av_packet_ref(&copy, packet) >= 0 else { continue }
+            writeRemuxPacket(&copy, inStream: inStream, outStream: outStream, out: out)
+            av_packet_unref(&copy)
+        }
+    }
+
+    private static func isBitmapSubtitle(_ id: AVCodecID) -> Bool {
+        switch id {
+        case AV_CODEC_ID_DVD_SUBTITLE,
+             AV_CODEC_ID_DVB_SUBTITLE,
+             AV_CODEC_ID_XSUB,
+             AV_CODEC_ID_HDMV_PGS_SUBTITLE:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func hlsLanguageValue(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 16 else { return nil }
+        guard trimmed.unicodeScalars.allSatisfy({
+            ($0.value >= 65 && $0.value <= 90) ||
+            ($0.value >= 97 && $0.value <= 122) ||
+            ($0.value >= 48 && $0.value <= 57) ||
+            $0.value == 45
+        }) else { return nil }
+        return trimmed
+    }
+
+    private static func streamMapName(_ value: String?, fallback: String) -> String {
+        let source = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = source?.isEmpty == false ? source! : fallback
+        let sanitized = candidate.unicodeScalars.map { scalar -> String in
+            let isUpper = scalar.value >= 65 && scalar.value <= 90
+            let isLower = scalar.value >= 97 && scalar.value <= 122
+            let isDigit = scalar.value >= 48 && scalar.value <= 57
+            return isUpper || isLower || isDigit || scalar.value == 45 || scalar.value == 95
+                ? String(scalar)
+                : "_"
+        }.joined()
+        return sanitized.isEmpty ? fallback : sanitized
+    }
+
+    private static func makeSubtitleChain(
+        inputStream: UnsafeMutablePointer<AVStream>
+    ) -> SubtitleChain? {
+        guard let codecpar = inputStream.pointee.codecpar,
+              let decoder = avcodec_find_decoder(codecpar.pointee.codec_id),
+              let decCtx = avcodec_alloc_context3(decoder) else {
+            return nil
+        }
+        func fail() -> SubtitleChain? {
+            var dec: UnsafeMutablePointer<AVCodecContext>? = decCtx
+            avcodec_free_context(&dec)
+            return nil
+        }
+
+        let sourceTimeBase = inputStream.pointee.time_base
+        let packetTimeBase = sourceTimeBase.num != 0 && sourceTimeBase.den != 0
+            ? sourceTimeBase
+            : AVRational(num: 1, den: 1_000)
+        guard avcodec_parameters_to_context(decCtx, codecpar) >= 0 else { return fail() }
+        decCtx.pointee.pkt_timebase = packetTimeBase
+        guard avcodec_open2(decCtx, decoder, nil) >= 0 else { return fail() }
+        return SubtitleChain(decCtx: decCtx)
+    }
+
+
+    private static func plainSubtitleText(_ value: String) -> String {
+        let fields = value.split(separator: ",", maxSplits: 9, omittingEmptySubsequences: false)
+        let body = fields.count == 10 ? String(fields[9]) : value
+        return body
+            .replacingOccurrences(of: "\\N", with: "\n")
+            .replacingOccurrences(of: "\\n", with: "\n")
+            .replacingOccurrences(of: #"\{[^}]*\}"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func subtitleText(_ subtitle: AVSubtitle) -> String? {
+        guard let rects = subtitle.rects else { return nil }
+        var lines: [String] = []
+        for index in 0..<Int(subtitle.num_rects) {
+            guard let rect = rects[index] else { continue }
+            let raw: String?
+            if let ass = rect.pointee.ass {
+                raw = String(cString: ass)
+            } else if let text = rect.pointee.text {
+                raw = String(cString: text)
+            } else {
+                raw = nil
+            }
+            if let raw {
+                let cleaned = plainSubtitleText(raw)
+                if !cleaned.isEmpty {
+                    lines.append(cleaned)
+                }
+            }
+        }
+        let text = lines.joined(separator: "\n")
+        return text.isEmpty ? nil : text
+    }
+
+    private static func writeTranscodedSubtitle(
+        chain: SubtitleChain,
+        packet: UnsafeMutablePointer<AVPacket>,
+        inputStream: UnsafeMutablePointer<AVStream>,
+        out: UnsafeMutablePointer<AVFormatContext>,
+        outStream: UnsafeMutablePointer<AVStream>
+    ) {
+        var subtitle = AVSubtitle()
+        var gotSubtitle: Int32 = 0
+        let decodeResult = avcodec_decode_subtitle2(
+            chain.decCtx,
+            &subtitle,
+            &gotSubtitle,
+            packet
+        )
+        guard decodeResult >= 0, gotSubtitle != 0, let text = subtitleText(subtitle) else {
+            avsubtitle_free(&subtitle)
+            return
+        }
+        defer { avsubtitle_free(&subtitle) }
+
+        let textData = Data(text.utf8)
+        guard textData.count <= Int(Int32.max) else { return }
+        var encoded = AVPacket()
+        av_init_packet(&encoded)
+        guard av_new_packet(&encoded, Int32(textData.count)) >= 0,
+              let destination = encoded.data else {
+            return
+        }
+        textData.withUnsafeBytes { rawBuffer in
+            if let baseAddress = rawBuffer.baseAddress {
+                memcpy(destination, baseAddress, textData.count)
+            }
+        }
+        let inputTimeBase = inputStream.pointee.time_base.num != 0 &&
+            inputStream.pointee.time_base.den != 0
+            ? inputStream.pointee.time_base
+            : AVRational(num: 1, den: 1_000)
+        let outputTimeBase = outStream.pointee.time_base.num != 0 &&
+            outStream.pointee.time_base.den != 0
+            ? outStream.pointee.time_base
+            : AVRational(num: 1, den: 1_000)
+        let inputPTS = packet.pointee.pts != Int64.min
+            ? packet.pointee.pts
+            : av_rescale_q(subtitle.pts, AVRational(num: 1, den: AV_TIME_BASE), inputTimeBase)
+        encoded.pts = av_rescale_q(inputPTS, inputTimeBase, outputTimeBase)
+        encoded.dts = encoded.pts
+        if packet.pointee.duration > 0 {
+            encoded.duration = av_rescale_q(packet.pointee.duration, inputTimeBase, outputTimeBase)
+        } else {
+            let displayDuration = Int64(subtitle.end_display_time) -
+                Int64(subtitle.start_display_time)
+            encoded.duration = max(1, displayDuration)
+        }
+        encoded.stream_index = outStream.pointee.index
+        encoded.pos = -1
+        av_interleaved_write_frame(out, &encoded)
+        av_packet_unref(&encoded)
     }
 
     // MARK: - Audio chain (decode → swresample → AAC)
@@ -924,6 +1430,7 @@ final class RigelHlsExporter {
         var initialized = false
         var pendingFrames: [UnsafeMutablePointer<AVFrame>] = []
         var error: String?
+        var outputStreams: [UnsafeMutablePointer<AVStream>] = []
         var hasVideoPTS = false
         var lastVideoPTS: Int64 = 0
         var lastRawVideoPTS: Int64?
@@ -1492,12 +1999,19 @@ final class RigelHlsExporter {
     ) {
         var encPkt = AVPacket()
         av_init_packet(&encPkt)
+        let outputStreams = chain.outputStreams.isEmpty ? [outStream] : chain.outputStreams
         while avcodec_receive_packet(chain.encCtx, &encPkt) >= 0 {
-            defer { av_packet_unref(&encPkt) }
-            encPkt.stream_index = outStream.pointee.index
-            av_packet_rescale_ts(&encPkt, chain.encCtx.pointee.time_base, outStream.pointee.time_base)
-            encPkt.pos = -1
-            av_interleaved_write_frame(out, &encPkt)
+            for destination in outputStreams {
+                var copy = AVPacket()
+                av_init_packet(&copy)
+                guard av_packet_ref(&copy, &encPkt) >= 0 else { continue }
+                copy.stream_index = destination.pointee.index
+                av_packet_rescale_ts(&copy, chain.encCtx.pointee.time_base, destination.pointee.time_base)
+                copy.pos = -1
+                av_interleaved_write_frame(out, &copy)
+                av_packet_unref(&copy)
+            }
+            av_packet_unref(&encPkt)
         }
     }
 
@@ -1518,6 +2032,10 @@ final class RigelHlsExporter {
         }
     }
 
+    private static func closeInput(_ fmt: inout UnsafeMutablePointer<AVFormatContext>?) {
+        avformat_close_input(&fmt)
+    }
+
     private static func openInput(url: String, headers: [String: String], fmt: inout UnsafeMutablePointer<AVFormatContext>?) -> Bool {
         var opened = false
         url.withCString { cstr in
@@ -1531,7 +2049,10 @@ final class RigelHlsExporter {
             }
             let ret = avformat_open_input(&fmt, cstr, nil, &opts)
             if ret < 0 { return }
-            if avformat_find_stream_info(fmt, nil) < 0 { return }
+            if avformat_find_stream_info(fmt, nil) < 0 {
+                closeInput(&fmt)
+                return
+            }
             opened = true
         }
         return opened
@@ -1541,10 +2062,17 @@ final class RigelHlsExporter {
         ifmt: UnsafeMutablePointer<AVFormatContext>?,
         ofmt: UnsafeMutablePointer<AVFormatContext>?,
         audio: [AudioChain],
-        video: VideoChain?
+        video: VideoChain?,
+        subtitleInputs: [SubtitleInput],
+        subtitles: [SubtitleChain]
     ) {
         var ifmtPtr: UnsafeMutablePointer<AVFormatContext>? = ifmt
         avformat_close_input(&ifmtPtr)
+        var closedExternalIDs = Set<Int>()
+        for input in subtitleInputs where input.sourceID != 0 && closedExternalIDs.insert(input.sourceID).inserted {
+            var inputPtr: UnsafeMutablePointer<AVFormatContext>? = input.context
+            avformat_close_input(&inputPtr)
+        }
         if let ofmt { avformat_free_context(ofmt) }
         for audioChain in audio {
             av_audio_fifo_free(audioChain.fifo)
@@ -1554,6 +2082,9 @@ final class RigelHlsExporter {
             avcodec_free_context(&dec)
             var enc: UnsafeMutablePointer<AVCodecContext>? = audioChain.encCtx
             avcodec_free_context(&enc)
+        }
+        for subtitleChain in subtitles {
+            subtitleChain.release()
         }
         video?.release()
     }

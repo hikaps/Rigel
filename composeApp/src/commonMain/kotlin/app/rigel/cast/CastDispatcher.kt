@@ -17,6 +17,27 @@ object CastDispatcher {
 
     fun capabilities(target: CastTarget): CastCapabilities = session.capabilities(target)
 
+    fun activeTarget(): CastTarget? = session.activeTarget()
+
+    fun clearActive() {
+        session.clearActive()
+        RigelCore.controller.setCastActive(false)
+    }
+
+    suspend fun seekActive(positionMs: Long, durationMs: Long): Boolean =
+        seekActive(positionMs, durationMs, RigelCore.client)
+
+    suspend fun seekActive(positionMs: Long, durationMs: Long, client: HttpClient): Boolean {
+        val target = session.activeTarget() ?: return false
+        return ReceiverRegistry.adapterFor(target).seek(
+            target = target,
+            positionMs = positionMs,
+            durationMs = durationMs,
+            client = client,
+        )
+    }
+
+
     fun remoteCastUrl(): String? = remoteCastUrl(RigelCore.controller.uiState.value)
 
     fun remoteCastUrl(state: PlayerUiState): String? {
@@ -40,12 +61,37 @@ object CastDispatcher {
         state.filename
             ?: state.sourceUrl?.substringAfterLast('/')
             ?: "Stream"
-
     /** Returns a human-readable result/error string. */
     suspend fun cast(target: CastTarget, url: String, title: String): String =
         cast(target, url, title, RigelCore.client)
 
+    /**
+     * Re-send media only while [target] remains the active receiver. The
+     * commit token is minted before dispatch, so a clearActive() during the
+     * adapter call voids the commit instead of resurrecting the session.
+     * Returns null immediately when [target] is no longer active.
+     */
+    suspend fun recastIfActive(
+        target: CastTarget,
+        url: String,
+        title: String,
+        client: HttpClient = RigelCore.client,
+    ): String? {
+        val attempt = session.beginAttemptFor(target) ?: return null
+        val result = ReceiverRegistry.adapterFor(target).cast(target, url, title, client)
+        if (result.startsWith("Sent to ") && session.commitActive(target, attempt)) {
+            RigelCore.controller.setCastActive(true)
+        }
+        return result
+    }
+
     /** Same dispatch with an injectable HTTP client (tests use a mock engine). */
-    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): String =
-        ReceiverRegistry.adapterFor(target).cast(target, url, title, client)
+    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): String {
+        val attempt = session.beginAttempt()
+        val result = ReceiverRegistry.adapterFor(target).cast(target, url, title, client)
+        if (result.startsWith("Sent to ") && session.commitActive(target, attempt)) {
+            RigelCore.controller.setCastActive(true)
+        }
+        return result
+    }
 }

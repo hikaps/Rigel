@@ -22,6 +22,41 @@ ffmpeg -hide_banner -loglevel error -y \
   -map 0:v -map 1:a -map 2:a \
   -metadata:s:a:0 language=eng -metadata:s:a:1 language=fre \
   -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$OUT/fixture_multi.mkv"
+
+cat > "$OUT/fixture_sub_en.srt" <<'EOF'
+1
+00:00:00,000 --> 00:00:01,000
+English subtitle
+
+2
+00:00:01,000 --> 00:00:02,000
+English second line
+EOF
+cat > "$OUT/fixture_sub_fr.srt" <<'EOF'
+1
+00:00:00,000 --> 00:00:01,000
+Sous-titre français
+
+2
+00:00:01,000 --> 00:00:02,000
+Deuxième ligne
+EOF
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc=duration=2:size=320x240:rate=10" \
+  -f lavfi -i "sine=frequency=440:duration=2" \
+  -f srt -i "$OUT/fixture_sub_en.srt" \
+  -f srt -i "$OUT/fixture_sub_fr.srt" \
+  -map 0:v -map 1:a -map 2:0 -map 3:0 \
+  -metadata:s:s:0 language=eng -metadata:s:s:0 title=English \
+  -metadata:s:s:1 language=fra -metadata:s:s:1 title=French \
+  -c:v libx264 -pix_fmt yuv420p -c:a aac -c:s srt -shortest \
+  "$OUT/fixture_subtitles.mkv"
+cat > "$OUT/fixture_sidecar.vtt" <<'EOF'
+WEBVTT
+
+00:00.000 --> 00:01.000
+Sidecar subtitle
+EOF
 # 2s HLS (H264+AAC, 2 segments) — bundled as RigelTests resources
 # (fixture_hls/ is referenced by project.pbxproj; without these files the
 # Swift test target's resource phase fails on fresh checkouts)

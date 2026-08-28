@@ -77,23 +77,28 @@ class DlnaRenderer(private val client: HttpClient) {
         return DlnaDeviceDescription.parse(usn, location, xml)
     }
 
-    suspend fun setAvTransportUri(device: DlnaDevice, uri: String, title: String?) {
+    /** True when the renderer accepted the URI (SOAP round-trip succeeded). */
+    suspend fun setAvTransportUri(device: DlnaDevice, uri: String, title: String?): Boolean {
         val body = DlnaSoap.setAvTransportUriBody(uri, title)
-        val resp = client.post(device.controlUrl) {
-            contentType(ContentType.Text.Xml)
-            userAgent("Rigel/1.0")
-            header("SOAPACTION", "\"${DlnaSoap.SERVICE_TYPE}#SetAVTransportURI\"")
-            setBody(body)
-        }
-        Logger.i(tag) { "SetAVTransportURI -> ${resp.status}" }
+        return runCatching {
+            val resp = client.post(device.controlUrl) {
+                contentType(ContentType.Text.Xml)
+                userAgent("Rigel/1.0")
+                header("SOAPACTION", "\"${DlnaSoap.SERVICE_TYPE}#SetAVTransportURI\"")
+                setBody(body)
+            }
+            Logger.i(tag) { "SetAVTransportURI -> ${resp.status}" }
+            resp.status.value in 200..299
+        }.onFailure {
+            Logger.w(tag, it) { "SetAVTransportURI failed: ${device.friendlyName}" }
+        }.getOrDefault(false)
     }
 
-    suspend fun play(device: DlnaDevice) = control(device, "Play", DlnaSoap.playBody())
-    suspend fun pause(device: DlnaDevice) = control(device, "Pause", DlnaSoap.pauseBody())
-    suspend fun stop(device: DlnaDevice) = control(device, "Stop", DlnaSoap.stopBody())
-    suspend fun seek(device: DlnaDevice, positionMs: Long) =
+    suspend fun play(device: DlnaDevice): Boolean = control(device, "Play", DlnaSoap.playBody())
+    suspend fun pause(device: DlnaDevice): Boolean = control(device, "Pause", DlnaSoap.pauseBody())
+    suspend fun stop(device: DlnaDevice): Boolean = control(device, "Stop", DlnaSoap.stopBody())
+    suspend fun seek(device: DlnaDevice, positionMs: Long): Boolean =
         control(device, "Seek", DlnaSoap.seekBody(positionMs))
-
     suspend fun position(device: DlnaDevice): Pair<Long, Long>? {
         val xml = postForBody(device, "GetPositionInfo", DlnaSoap.getPositionInfoBody()) ?: return null
         return DlnaSoap.parsePositionInfo(xml)
@@ -104,18 +109,20 @@ class DlnaRenderer(private val client: HttpClient) {
         return DlnaSoap.parseTransportState(xml)
     }
 
-    private suspend fun control(device: DlnaDevice, action: String, body: String) {
-        postForBody(device, action, body)
-    }
+    /** True when the SOAP action round-tripped successfully. */
+    private suspend fun control(device: DlnaDevice, action: String, body: String): Boolean =
+        postForBody(device, action, body) != null
 
     private suspend fun postForBody(device: DlnaDevice, action: String, body: String): String? {
         return runCatching {
-            client.post(device.controlUrl) {
+            val response = client.post(device.controlUrl) {
                 contentType(ContentType.Text.Xml)
                 userAgent("Rigel/1.0")
                 header("SOAPACTION", "\"${DlnaSoap.SERVICE_TYPE}#$action\"")
                 setBody(body)
-            }.bodyAsText()
+            }
+            if (response.status.value !in 200..299) return@runCatching null
+            response.bodyAsText()
         }.onFailure { Logger.w(tag, it) { "$action failed: ${device.friendlyName}" } }.getOrNull()
     }
 }

@@ -1,5 +1,6 @@
 package app.rigel.source.jellyfin
 
+import app.rigel.bridge.SubtitleTrack
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -230,5 +231,86 @@ class JellyfinClientTest {
     fun playToSessionFalseOnNon2xx() = kotlinx.coroutines.test.runTest {
         val engine = MockEngine { respond("", HttpStatusCode.InternalServerError) }
         assertFalse(JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("a")))
+    }
+
+    @Test
+    fun itemSubtitleTracksParsesExternalLanguages() = kotlinx.coroutines.test.runTest {
+        val json = """
+            {
+              "Id": "item1",
+              "MediaSources": [{"Id": "ms1", "Protocol": "File", "Container": "mkv"}],
+              "MediaStreams": [
+                {"Index": 2, "Type": "Subtitle", "Language": "eng", "DisplayTitle": "English", "IsExternal": true},
+                {"Index": 3, "Type": "Subtitle", "Language": "fra", "DisplayTitle": "French", "IsExternal": false}
+              ]
+            }
+        """.trimIndent()
+        val engine = MockEngine { request ->
+            assertEquals(
+                "$base/Users/u1/Items/item1?Fields=MediaStreams,MediaSources",
+                request.url.toString(),
+            )
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+
+        val tracks = JellyfinClient(HttpClient(engine))
+            .itemSubtitleTracks(base, "tok", "u1", "item1")
+
+        assertEquals(
+            listOf(
+                SubtitleTrack(
+                    url = "$base/Videos/item1/ms1/Subtitles/2/Stream.vtt?api_key=tok",
+                    language = "eng",
+                    title = "English",
+                ),
+            ),
+            tracks,
+        )
+    }
+
+    @Test
+    fun itemSubtitleTracksKeepsStreamsPairedWithFirstMediaSource() = kotlinx.coroutines.test.runTest {
+        val json = """
+            {
+              "MediaSources": [
+                {
+                  "Id": "ms-first",
+                  "Protocol": "File",
+                  "Container": "mkv",
+                  "MediaStreams": [
+                    {"Index": 4, "Type": "Subtitle", "Language": "eng", "DisplayTitle": "English", "IsExternal": true}
+                  ]
+                },
+                {
+                  "Id": "ms-second",
+                  "Protocol": "File",
+                  "Container": "mp4",
+                  "MediaStreams": [
+                    {"Index": 4, "Type": "Subtitle", "Language": "fra", "DisplayTitle": "French", "IsExternal": true}
+                  ]
+                }
+              ],
+              "MediaStreams": [
+                {"Index": 4, "Type": "Subtitle", "Language": "fra", "DisplayTitle": "French", "IsExternal": true}
+              ]
+            }
+        """.trimIndent()
+        val engine = MockEngine {
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+
+        val tracks = JellyfinClient(HttpClient(engine))
+            .itemSubtitleTracks(base, "tok", "u1", "item1")
+
+        assertEquals(
+            listOf(
+                SubtitleTrack(
+                    url = "$base/Videos/item1/ms-first/Subtitles/4/Stream.vtt?api_key=tok",
+                    language = "eng",
+                    title = "English",
+                ),
+            ),
+            tracks,
+        )
     }
 }

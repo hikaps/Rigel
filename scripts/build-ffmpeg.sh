@@ -39,10 +39,10 @@ SYSROOT="$(xcrun -sdk "$SDK" --show-sdk-path)"
   --enable-network \
   --enable-protocol=file,http,tcp \
   --enable-videotoolbox \
-  --enable-demuxer=matroska,mp4,mov,m4v,hls,mpegts,avi,webm,asf,wav,flac,ogg,mp3,mpegvideo,vc1 \
+  --enable-demuxer=matroska,mp4,mov,m4v,hls,mpegts,avi,webm,asf,wav,flac,ogg,mp3,mpegvideo,vc1,webvtt,srt,ass \
   --enable-parser=h264,hevc,vp8,vp9,av1,aac,ac3,eac3,dca,mp3,flac,opus,vorbis,mpeg4video,mpegvideo,vc1 \
-  --enable-decoder=h264,hevc,vp8,vp9,av1,aac,ac3,eac3,dca,mp3,flac,opus,vorbis,alac,pcm_s16le,mpeg4,mpeg2video,vc1 \
-  --enable-encoder=h264_videotoolbox,aac \
+  --enable-decoder=h264,hevc,vp8,vp9,av1,aac,ac3,eac3,dca,mp3,flac,opus,vorbis,alac,pcm_s16le,mpeg4,mpeg2video,vc1,subrip,ass,webvtt,mov_text,text \
+  --enable-encoder=h264_videotoolbox,aac,webvtt \
   --disable-x86asm \
   --pkg-config-flags="--static"
 

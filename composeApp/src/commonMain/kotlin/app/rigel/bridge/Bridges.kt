@@ -37,6 +37,8 @@ object Bridges {
         sourceUrl: String,
         headers: Map<String, String>,
         mode: String,
+        startOffsetMs: Long,
+        subtitleTracks: List<SubtitleTrack>,
         onError: (String) -> Unit,
     ): Pair<String?, String?> {
         val bridge = requireBridge("Transcode", RigelBridgeFactory.transcode)
@@ -46,6 +48,8 @@ object Bridges {
                 sourceUrl,
                 headers,
                 mode,
+                startOffsetMs,
+                subtitleTracks,
                 onReady = { path, error ->
                     if (cont.isActive) cont.resume(path to error)
                 },
