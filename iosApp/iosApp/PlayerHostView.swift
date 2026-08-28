@@ -131,37 +131,49 @@ struct PlayerHostView: View {
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
-        case "PLAYING":
-            if let url = player.playableURL {
-                PlayerView(
-                    url: url,
-                    title: player.displayTitle,
-                    sender: player.sender,
-                    subtitleTracks: player.subtitleTracks,
-                    longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
-                    isProxy: player.proxyUrl != nil,
-                    probeDurationMs: player.probeDurationMs,
-                    startPositionMs: player.startPositionMs,
-                    onReady: {},
-                    onError: { player.reportError($0) },
-                    onBack: { player.stop() },
-                    onDevices: { showDevicesPicker = true },
-                    onSeek: {
-                        player.seek(
-                            positionSeconds: $0,
-                            durationSeconds: (player.probeDurationMs ?? 0) / 1000
-                        )
+        case "PLAYING", "BUFFERING":
+            let buffering = player.phase.name == "BUFFERING"
+            ZStack {
+                if let url = player.playableURL {
+                    PlayerView(
+                        url: url,
+                        title: player.displayTitle,
+                        sender: player.sender,
+                        subtitleTracks: player.subtitleTracks,
+                        longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
+                        isProxy: player.proxyUrl != nil,
+                        probeDurationMs: player.probeDurationMs,
+                        startPositionMs: player.startPositionMs,
+                        onReady: {},
+                        onError: { player.reportError($0) },
+                        onBack: { player.stop() },
+                        onDevices: { showDevicesPicker = true },
+                        onSeek: {
+                            player.seek(
+                                positionSeconds: $0,
+                                durationSeconds: (player.probeDurationMs ?? 0) / 1000
+                            )
+                        }
+                    )
+                    .ignoresSafeArea()
+                } else {
+                    stateContent {
+                        ProgressView()
+                            .tint(.white)
+                            .controlSize(.large)
+                        Text("Loading player")
+                            .font(.headline)
+                            .foregroundStyle(.white)
                     }
-                )
-                .ignoresSafeArea()
-            } else {
-                stateContent {
+                }
+                if buffering {
                     ProgressView()
                         .tint(.white)
                         .controlSize(.large)
-                    Text("Loading player")
-                        .font(.headline)
-                        .foregroundStyle(.white)
+                        .padding(18)
+                        .background(Circle().fill(Color.black.opacity(0.55)))
+                        .accessibilityLabel("Buffering")
+                        .allowsHitTesting(false)
                 }
             }
         default: // ERROR
@@ -220,9 +232,10 @@ struct PlayerHostView: View {
 }
 
 /// Hosts RigelPlayerViewController (AVPlayerViewController + transparent overlay controls).
-/// Load is called only when the URL/title/sender signature actually changes,
-/// so SwiftUI state updates never reload the player. The guard lives in the
-/// Coordinator (never mutate @State during view updates).
+/// Load is called only when the media URL or playback configuration changes.
+/// The start offset is intentionally excluded from the guard: proxy seeking
+/// keeps the current controller mounted until its replacement URL is ready.
+/// The guard lives in the Coordinator (never mutate @State during view updates).
 struct PlayerView: UIViewControllerRepresentable {
     let url: String
     let title: String?
@@ -246,8 +259,7 @@ struct PlayerView: UIViewControllerRepresentable {
             subtitleTracks: [SubtitleTrack],
             longFormVideoAirPlayEligible: Bool,
             isProxy: Bool,
-            probeDurationMs: Double?,
-            startPositionMs: Int64
+            probeDurationMs: Double?
         )?
         /// Strongly retains the error origin so the closure's weak capture
         /// outlives makeUIViewController; otherwise the box deallocates and
@@ -256,10 +268,9 @@ struct PlayerView: UIViewControllerRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
-
     static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: Coordinator) {
-        // SwiftUI removes this representable when the player phase changes to
-        // proxy preparation or error. Dispose only this concrete controller;
+        // SwiftUI removes this representable for initial proxy preparation or
+        // error. Dispose only this concrete controller;
         // the bridge may already retain a newer replacement.
         if let player = uiViewController as? RigelPlayerViewController,
            let bridge = PlayerBridgeFactory.shared.create() as? RigelPlayerBridge {
@@ -285,9 +296,9 @@ struct PlayerView: UIViewControllerRepresentable {
         }
         // Bind the error path to the concrete controller created below. The
         // coordinator retains the origin box strongly; the closure forwards
-        // the error only when that controller was still the bridge's current
-        // one, so a stale .failed from a dismantled player is dropped after
-        // disposing only itself.
+        // the error only when that controller is still current. Do not stop it
+        // here: a proxy seek can make the old item fail while the controller
+        // must remain mounted for the replacement proxy URL.
         let origin = PlayerErrorOrigin()
         let events = PlayerEventsImpl(
             onReady: onReady,
@@ -300,10 +311,20 @@ struct PlayerView: UIViewControllerRepresentable {
                     onError(message)
                     return
                 }
-                let wasCurrent = currentBridge.stop(viewController: controller)
-                if wasCurrent {
-                    onError(message)
+                guard currentBridge.isCurrent(viewController: controller) else {
+                    return
                 }
+                // Kotlin can publish a replacement proxy URL before SwiftUI
+                // installs it. Ignore a delayed failure from the old item;
+                // controller identity alone is not a sufficient generation.
+                if let loadedURL = controller.loadedURL {
+                    let state = SwiftPlayer.shared.snapshot()
+                    let expectedURL = state.proxyUrl ?? state.sourceUrl
+                    guard expectedURL == loadedURL else {
+                        return
+                    }
+                }
+                onError(message)
             },
             onBack: onBack
         )
@@ -333,8 +354,7 @@ struct PlayerView: UIViewControllerRepresentable {
             loaded?.subtitleTracks != subtitleTracks ||
             loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible ||
             loaded?.isProxy != isProxy ||
-            loaded?.probeDurationMs != probeDurationMs ||
-            loaded?.startPositionMs != startPositionMs {
+            loaded?.probeDurationMs != probeDurationMs {
             bridge.load(
                 url: url,
                 title: title,
@@ -352,8 +372,7 @@ struct PlayerView: UIViewControllerRepresentable {
                 subtitleTracks,
                 longFormVideoAirPlayEligible,
                 isProxy,
-                probeDurationMs,
-                startPositionMs
+                probeDurationMs
             )
         }
     }

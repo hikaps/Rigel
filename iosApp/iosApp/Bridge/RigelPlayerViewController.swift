@@ -43,6 +43,9 @@ final class RigelPlayerViewController: UIViewController {
     var onSeekRequested: ((Double) -> Void)?
 
     private var player: AVPlayer?
+    /// Raw URL of the item currently installed in AVPlayer. Delayed failures
+    /// from a replaced proxy item must not be attributed to the new item.
+    private(set) var loadedURL: String?
     private var playerVC: AVPlayerViewController?
     private var timeJumpObserver: NSObjectProtocol?
     private var pollTimer: Timer?
@@ -673,10 +676,16 @@ final class RigelPlayerViewController: UIViewController {
                 guard error == nil,
                       let http = response as? HTTPURLResponse,
                       (200..<300).contains(http.statusCode),
-                      let data,
-                      let text = String(data: data, encoding: .utf8) else {
+                      let data else {
                     let detail = error?.localizedDescription ?? "HTTP request failed"
                     NSLog("[RigelPlayer] sidecar %@ failed: %@", rawURL, detail)
+                    return
+                }
+                guard let text = SubtitleParser.decode(
+                    data: data,
+                    encodingName: http.textEncodingName
+                ) else {
+                    NSLog("[RigelPlayer] sidecar %@ failed: unsupported text encoding", rawURL)
                     return
                 }
                 var cues = extensionName == "vtt"
@@ -757,6 +766,7 @@ final class RigelPlayerViewController: UIViewController {
             return
         }
         tearDownPlayer()
+        loadedURL = url
         do {
             try Self.configureAudioSession(
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
@@ -985,6 +995,7 @@ final class RigelPlayerViewController: UIViewController {
         playerVC?.removeFromParent()
         playerVC = nil
         player = nil
+        loadedURL = nil
         controlsHideTimer?.invalidate()
         if let observer = timeJumpObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -1170,6 +1181,10 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
             isProxy: isProxy,
             startOffsetSeconds: Double(startOffsetMs) / 1000.0
         )
+    }
+
+    func isCurrent(viewController: RigelPlayerViewController) -> Bool {
+        vc === viewController
     }
 
     func stop() {

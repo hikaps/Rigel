@@ -375,6 +375,53 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertEqual(audioSession.routeSharingPolicy, .default)
     }
 
+    @MainActor
+    func testBufferingStateKeepsPlayerPresented() {
+        let model = PlayerModel()
+        let proxy = "http://127.0.0.1/session-x/index.m3u8"
+        model.apply(state(
+            phase: .buffering,
+            route: .remux,
+            proxyUrl: proxy,
+            probe: probe()
+        ))
+
+        XCTAssertTrue(model.showPlayer)
+        XCTAssertFalse(model.isPlaying)
+        XCTAssertEqual(model.playableURL, proxy)
+    }
+
+    @MainActor
+    func testNativeControllerTracksInstalledItemURL() {
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let controller = RigelPlayerViewController(events: events)
+        let oldURL = "http://127.0.0.1/session-old/index.m3u8"
+        let newURL = "http://127.0.0.1/session-new/index.m3u8"
+
+        controller.load(
+            url: oldURL,
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false,
+            durationSeconds: 600,
+            isProxy: true
+        )
+        XCTAssertEqual(controller.loadedURL, oldURL)
+
+        controller.load(
+            url: newURL,
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false,
+            durationSeconds: 600,
+            isProxy: true
+        )
+        XCTAssertEqual(controller.loadedURL, newURL)
+
+        controller.stopPlayback()
+        XCTAssertNil(controller.loadedURL)
+    }
+
     private func probe(
         container: String = "mp4",
         videoCodec: String? = "h264",
