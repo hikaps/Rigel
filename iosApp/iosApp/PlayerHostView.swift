@@ -98,6 +98,7 @@ struct PlayerHostView: View {
                     .font(.system(size: 34, weight: .medium))
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(Color.rigelStar)
+                    .accessibilityHidden(true)
 
                 ProgressView()
                     .tint(.white)
@@ -312,6 +313,16 @@ struct PlayerView: UIViewControllerRepresentable {
                 }
                 guard currentBridge.isCurrent(viewController: controller) else {
                     return
+                }
+                // Kotlin can publish a replacement proxy URL before SwiftUI
+                // installs it. Ignore a delayed failure from the old item;
+                // controller identity alone is not a sufficient generation.
+                if let loadedURL = controller.loadedURL {
+                    let state = SwiftPlayer.shared.snapshot()
+                    let expectedURL = state.proxyUrl ?? state.sourceUrl
+                    guard expectedURL == loadedURL else {
+                        return
+                    }
                 }
                 onError(message)
             },

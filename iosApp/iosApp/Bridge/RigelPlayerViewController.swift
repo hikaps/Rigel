@@ -43,6 +43,9 @@ final class RigelPlayerViewController: UIViewController {
     var onSeekRequested: ((Double) -> Void)?
 
     private var player: AVPlayer?
+    /// Raw URL of the item currently installed in AVPlayer. Delayed failures
+    /// from a replaced proxy item must not be attributed to the new item.
+    private(set) var loadedURL: String?
     private var playerVC: AVPlayerViewController?
     private var timeJumpObserver: NSObjectProtocol?
     private var pollTimer: Timer?
@@ -763,6 +766,7 @@ final class RigelPlayerViewController: UIViewController {
             return
         }
         tearDownPlayer()
+        loadedURL = url
         do {
             try Self.configureAudioSession(
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
@@ -991,6 +995,7 @@ final class RigelPlayerViewController: UIViewController {
         playerVC?.removeFromParent()
         playerVC = nil
         player = nil
+        loadedURL = nil
         controlsHideTimer?.invalidate()
         if let observer = timeJumpObserver {
             NotificationCenter.default.removeObserver(observer)
