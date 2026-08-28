@@ -1,5 +1,7 @@
 package app.rigel.intake
 
+import app.rigel.bridge.SubtitleTrack
+
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -14,7 +16,7 @@ class UrlIntakeTest {
         assertNotNull(request)
         assertEquals("https://x/v.mkv", request.sourceUrl)
         assertEquals("Movie", request.filename)
-        assertEquals(listOf("https://x/s.vtt"), request.subtitleUrls)
+        assertEquals(listOf(SubtitleTrack(url = "https://x/s.vtt")), request.subtitleTracks)
         assertNull(request.successCallbackUrl)
     }
 
@@ -23,7 +25,13 @@ class UrlIntakeTest {
         val raw = "rigel://x-callback-url/play?url=http%3A%2F%2Fa%2Fv.mp4&sub=http%3A%2F%2Fa%2F1.vtt&sub=http%3A%2F%2Fa%2F2.vtt"
         val request = UrlIntake.parse(raw)
         assertNotNull(request)
-        assertEquals(listOf("http://a/1.vtt", "http://a/2.vtt"), request.subtitleUrls)
+        assertEquals(
+            listOf(
+                SubtitleTrack(url = "http://a/1.vtt"),
+                SubtitleTrack(url = "http://a/2.vtt"),
+            ),
+            request.subtitleTracks,
+        )
     }
 
     @Test
@@ -114,7 +122,7 @@ class UrlIntakeTest {
         val raw = "rigel://x-callback-url/play?url=http%3A%2F%2Fa%2Fv.mp4&sub=ftp%3A%2F%2Fx%2Fs.vtt"
         val request = UrlIntake.parse(raw)
         assertNotNull(request)
-        assertEquals(emptyList(), request.subtitleUrls)
+        assertEquals(emptyList<SubtitleTrack>(), request.subtitleTracks)
     }
 
     @Test

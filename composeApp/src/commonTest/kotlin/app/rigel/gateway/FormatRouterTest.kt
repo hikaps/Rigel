@@ -107,8 +107,23 @@ class FormatRouterTest {
     }
 
     @Test
-    fun assSubtitleForcesTranscode() {
-        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "h264", listOf("aac")), true))
+    fun externalSubtitleTracksForceRemuxForFileMedia() {
+        assertEquals(PlaybackRoute.REMUX, FormatRouter.decide(probe("mp4", "h264", listOf("aac")), true))
+    }
+
+    @Test
+    fun externalSubtitlesDoNotDowngradeUnsupportedVideoToRemux() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", "hevc", listOf("aac")), true))
+    }
+
+    @Test
+    fun externalSubtitlesDoNotChangeHlsRoute() {
+        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("m3u8", "h264", listOf("aac")), true))
+    }
+
+    @Test
+    fun externalSubtitlesDoNotChangeLiveRoute() {
+        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mpegts", "h264", listOf("aac"), isLive = true), true))
     }
 
     @Test

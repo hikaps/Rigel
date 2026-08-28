@@ -1,6 +1,8 @@
 package app.rigel.source.jellyfin
 
 import co.touchlab.kermit.Logger
+import app.rigel.bridge.SubtitleTrack
+
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -27,6 +29,12 @@ data class JellyfinSession(
 data class JellyfinAuth(
     val token: String,
     val userId: String,
+)
+
+private data class JellyfinSubtitleCandidate(
+    val index: Int,
+    val language: String?,
+    val title: String?,
 )
 
 /**
@@ -60,6 +68,22 @@ object JellyfinApi {
     /** Direct file stream URL — feeds the normal probe→route pipeline. */
     fun streamUrl(base: String, itemId: String, token: String): String =
         base.trimEnd('/') + "/Videos/$itemId/stream?Static=true&api_key=$token"
+
+    fun itemDetailsUrl(base: String, userId: String, itemId: String): String =
+        base.trimEnd('/') +
+            "/Users/${encodeUrlComponent(userId)}/Items/${encodeUrlComponent(itemId)}" +
+            "?Fields=MediaStreams,MediaSources"
+
+    fun subtitleStreamUrl(
+        base: String,
+        itemId: String,
+        mediaSourceId: String,
+        index: Int,
+        token: String,
+    ): String =
+        base.trimEnd('/') +
+            "/Videos/${encodeUrlComponent(itemId)}/${encodeUrlComponent(mediaSourceId)}" +
+            "/Subtitles/$index/Stream.vtt?api_key=${encodeUrlComponent(token)}"
 
     fun playCommand(itemIds: List<String>, command: String = "PlayNow"): String =
         """{"ItemIds":[${itemIds.joinToString(",") { "\"$it\"" }}],"PlayCommand":"$command","StartPositionTicks":0}"""
@@ -116,6 +140,75 @@ class JellyfinClient(private val http: HttpClient) {
     suspend fun search(base: String, token: String, userId: String, term: String): List<JellyfinItem> {
         if (term.isBlank()) return emptyList()
         return fetchItems(JellyfinApi.searchUrl(base, userId, term.trim()), token)
+    }
+
+    @Throws(Exception::class)
+    suspend fun itemSubtitleTracks(
+        base: String,
+        token: String,
+        userId: String,
+        itemId: String,
+    ): List<SubtitleTrack> {
+        val response = http.get(JellyfinApi.itemDetailsUrl(base, userId, itemId)) {
+            header("X-Emby-Token", token)
+        }
+        if (!response.status.isSuccess()) {
+            throw JellyfinRequestException("Jellyfin request failed (${response.status.value})")
+        }
+        val sourceIds = mutableMapOf<Int, String>()
+        val nestedCandidates = mutableMapOf<Int, MutableList<JellyfinSubtitleCandidate>>()
+        val topLevelCandidates = mutableListOf<JellyfinSubtitleCandidate>()
+        fun candidate(fields: Map<String, String>): JellyfinSubtitleCandidate? {
+            if (!fields["Type"].equals("Subtitle", ignoreCase = true)) return null
+            if (!fields["IsExternal"].equals("true", ignoreCase = true)) return null
+            val index = fields["Index"]?.toIntOrNull() ?: return null
+            return JellyfinSubtitleCandidate(
+                index = index,
+                language = fields["Language"]?.takeIf { it.isNotBlank() },
+                title = fields["DisplayTitle"]?.takeIf { it.isNotBlank() },
+            )
+        }
+        JsonObjectReader(
+            source = response.bodyAsText(),
+            onObjectAtPath = { path, fields ->
+                when {
+                    path.size == 2 && path[0] == "MediaSources" -> {
+                        val index = path[1].toIntOrNull()
+                        val id = fields["Id"]
+                        if (index != null && id != null && id.isNotBlank()) {
+                            sourceIds[index] = id
+                        }
+                    }
+                    path.size >= 4 &&
+                        path[0] == "MediaSources" &&
+                        path[2] == "MediaStreams" -> {
+                        val sourceIndex = path[1].toIntOrNull() ?: return@JsonObjectReader
+                        candidate(fields)?.let {
+                            nestedCandidates.getOrPut(sourceIndex) { mutableListOf() } += it
+                        }
+                    }
+                    path.size == 2 && path[0] == "MediaStreams" -> {
+                        candidate(fields)?.let { topLevelCandidates += it }
+                    }
+                }
+            },
+        ).parseObjectsWithPaths()
+        val firstSource = sourceIds.entries.firstOrNull() ?: return emptyList()
+        val candidates = (nestedCandidates[firstSource.key].orEmpty().ifEmpty { topLevelCandidates })
+            .distinctBy { it.index }
+        return candidates.map { candidate ->
+            SubtitleTrack(
+                url = JellyfinApi.subtitleStreamUrl(
+                    base = base,
+                    itemId = itemId,
+                    mediaSourceId = firstSource.value,
+                    index = candidate.index,
+                    token = token,
+                ),
+                language = candidate.language,
+                title = candidate.title ?: candidate.language ?: "Subtitle ${candidate.index}",
+            )
+        }
     }
 
     suspend fun sessions(base: String, token: String): List<JellyfinSession> {
@@ -216,7 +309,8 @@ object JellyfinInterop {
  */
 private class JsonObjectReader(
     private val source: String,
-    private val onObject: (Map<String, String>) -> Unit,
+    private val onObjectAtPath: ((List<String>, Map<String, String>) -> Unit)? = null,
+    private val onObject: (Map<String, String>) -> Unit = {},
 ) {
     private var index = 0
 
@@ -236,6 +330,14 @@ private class JsonObjectReader(
         skipWhitespace()
         if (index != source.length) error("Trailing JSON content")
     }
+
+    fun parseObjectsWithPaths() {
+        skipWhitespace()
+        parseValue(emitObjects = true)
+        skipWhitespace()
+        if (index != source.length) error("Trailing JSON content")
+    }
+
 
     private fun parseItemsEnvelope() {
         expect('{')
@@ -280,18 +382,20 @@ private class JsonObjectReader(
             }
         }
     }
-
-    private fun parseValue(emitObjects: Boolean): String? {
+    private fun parseValue(
+        emitObjects: Boolean,
+        path: List<String> = emptyList(),
+    ): String? {
         skipWhitespace()
         if (index >= source.length) error("Missing JSON value")
         return when (source[index]) {
             '"' -> parseString()
             '{' -> {
-                parseObject(emitObjects)
+                parseObject(emitObjects, path)
                 null
             }
             '[' -> {
-                parseArray(emitObjects)
+                parseArray(emitObjects, path)
                 null
             }
             't' -> {
@@ -311,12 +415,18 @@ private class JsonObjectReader(
         }
     }
 
-    private fun parseObject(emitObject: Boolean): Map<String, String> {
+    private fun parseObject(
+        emitObject: Boolean,
+        path: List<String> = emptyList(),
+    ): Map<String, String> {
         expect('{')
         val fields = mutableMapOf<String, String>()
         skipWhitespace()
         if (takeIf('}')) {
-            if (emitObject) onObject(fields)
+            if (emitObject) {
+                onObject(fields)
+                onObjectAtPath?.invoke(path, fields)
+            }
             return fields
         }
         while (true) {
@@ -324,11 +434,14 @@ private class JsonObjectReader(
             val key = parseString()
             skipWhitespace()
             expect(':')
-            parseValue(emitObjects = false)?.let { fields[key] = it }
+            parseValue(emitObjects = emitObject, path = path + key)?.let { fields[key] = it }
             skipWhitespace()
             when {
                 takeIf('}') -> {
-                    if (emitObject) onObject(fields)
+                    if (emitObject) {
+                        onObject(fields)
+                        onObjectAtPath?.invoke(path, fields)
+                    }
                     return fields
                 }
                 takeIf(',') -> Unit
@@ -337,16 +450,20 @@ private class JsonObjectReader(
         }
     }
 
-    private fun parseArray(emitObjects: Boolean) {
+    private fun parseArray(
+        emitObjects: Boolean,
+        path: List<String> = emptyList(),
+    ) {
         expect('[')
         skipWhitespace()
         if (takeIf(']')) return
+        var elementIndex = 0
         while (true) {
-            parseValue(emitObjects)
+            parseValue(emitObjects, path + elementIndex.toString())
             skipWhitespace()
             when {
                 takeIf(']') -> return
-                takeIf(',') -> Unit
+                takeIf(',') -> elementIndex++
                 else -> error("Expected array separator at $index")
             }
         }

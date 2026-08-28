@@ -13,7 +13,7 @@ struct DevicesView: View {
             List {
                 Section {
                     HStack {
-                        Label("AirPlay & Bluetooth", systemImage: "airplayvideo")
+                        Text("AirPlay & Bluetooth")
                         Spacer()
                         RoutePickerRow()
                     }

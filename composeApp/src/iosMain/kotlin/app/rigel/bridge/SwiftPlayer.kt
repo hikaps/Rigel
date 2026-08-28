@@ -22,11 +22,18 @@ object SwiftPlayer {
     fun observe(onChange: (PlayerUiState) -> Unit): Job =
         scope.launch { RigelCore.controller.uiState.collect { onChange(it) } }
 
-    fun loadRaw(url: String, title: String? = null): Boolean = RigelCore.controller.loadRaw(url, title)
+    fun loadRaw(
+        url: String,
+        title: String? = null,
+        subtitleTracks: List<SubtitleTrack> = emptyList(),
+    ): Boolean = RigelCore.controller.loadRaw(url, title, subtitleTracks)
 
     fun stop() = RigelCore.controller.stopPlayback()
 
     fun retryWithProxy() = RigelCore.controller.retryWithProxy()
+
+    fun seek(positionMs: Long, durationMs: Long) =
+        RigelCore.controller.seek(positionMs, durationMs)
 
     /** Native player (AVPlayerViewController poll) reports item failure. */
     fun reportError(message: String) = RigelCore.controller.reportError(message)

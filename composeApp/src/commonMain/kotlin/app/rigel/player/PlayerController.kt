@@ -1,7 +1,11 @@
 package app.rigel.player
 
+import app.rigel.cast.CastDispatcher
+
 import app.rigel.bridge.Bridges
 import app.rigel.bridge.ProbeResult
+import app.rigel.bridge.SubtitleTrack
+
 import app.rigel.gateway.FormatRouter
 import app.rigel.gateway.PlaybackRoute
 import app.rigel.intake.IntakeRequest
@@ -25,14 +29,17 @@ data class PlayerUiState(
     val phase: PlayerPhase = PlayerPhase.IDLE,
     val sourceUrl: String? = null,
     val filename: String? = null,
-    val subtitleUrls: List<String> = emptyList(),
+    val subtitleTracks: List<SubtitleTrack> = emptyList(),
     val route: PlaybackRoute? = null,
     val proxyUrl: String? = null,
     val probe: ProbeResult? = null,
     val error: String? = null,
     val castActive: Boolean = false,
+    val startPositionMs: Long = 0,
     val sender: String? = null,
 ) {
+
+
     /**
      * Long-form video routing is deliberately narrower than "has a video
      * track": short clips, live/unknown-duration media, HLS, and proxy output
@@ -69,20 +76,26 @@ class PlayerController(
 
     private var successCallbackUrl: String? = null
 
-    fun loadRaw(rawUrl: String, title: String? = null): Boolean {
+    fun loadRaw(
+        rawUrl: String,
+        title: String? = null,
+        subtitleTracks: List<SubtitleTrack> = emptyList(),
+    ): Boolean {
         val request = UrlIntake.parse(rawUrl)
         if (request == null) {
             invalidatePendingWork()
             _uiState.value = PlayerUiState(phase = PlayerPhase.ERROR, error = "Unrecognized URL: $rawUrl")
             return false
         }
-        loadRequest(request.copy(title = title))
+        val finalTracks = if (subtitleTracks.isNotEmpty()) subtitleTracks else request.subtitleTracks
+        loadRequest(request.copy(title = title, subtitleTracks = finalTracks))
         return true
     }
 
 
     fun loadRequest(request: IntakeRequest) {
         invalidatePendingWork()
+        CastDispatcher.clearActive()
         successCallbackUrl = request.successCallbackUrl
         settings.addToLinkHistory(request.sourceUrl, request.title ?: request.filename)
         directFallbackUsed = false
@@ -91,10 +104,50 @@ class PlayerController(
             phase = PlayerPhase.PROBING,
             sourceUrl = request.sourceUrl,
             filename = request.filename,
-            subtitleUrls = request.subtitleUrls,
+            subtitleTracks = request.subtitleTracks,
+            castActive = false,
+            startPositionMs = 0,
             sender = request.xSource,
         )
         pendingJob = scope.launch { probeAndRoute(request, generation) }
+    }
+
+    fun setCastActive(active: Boolean) {
+        _uiState.value = _uiState.value.copy(castActive = active)
+    }
+
+    fun seek(positionMs: Long, durationMs: Long) {
+        val current = _uiState.value
+        if (current.phase != PlayerPhase.PLAYING) return
+        val duration = durationMs.takeIf { it > 0 } ?: current.probe?.durationMs
+        val target = if (duration != null && duration > 0) {
+            positionMs.coerceIn(0, duration)
+        } else {
+            positionMs.coerceAtLeast(0)
+        }
+        if (current.proxyUrl != null) {
+            restartProxyAt(target)
+        } else if (current.castActive) {
+            scope.launch { CastDispatcher.seekActive(target, duration ?: 0) }
+        }
+    }
+
+    private fun restartProxyAt(positionMs: Long) {
+        val current = _uiState.value
+        val probe = current.probe ?: return
+        val route = current.route ?: return
+        val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
+            ?: positionMs.coerceAtLeast(0)
+        invalidatePendingWork()
+        val generation = loadGeneration
+        directFallbackUsed = false
+        _uiState.value = current.copy(
+            phase = PlayerPhase.PREPARING_PROXY,
+            proxyUrl = null,
+            error = null,
+            startPositionMs = target,
+        )
+        pendingJob = scope.launch { prepareProxy(probe, route, generation) }
     }
 
     private fun invalidatePendingWork() {
@@ -111,35 +164,6 @@ class PlayerController(
 
     private fun isCurrent(generation: Long): Boolean = generation == loadGeneration
 
-    /**
-     * True when a subtitle URL points at an Advanced SubStation file. Only
-     * ASS forces the transcode route — HLS cannot carry it without burn-in.
-     * Query, fragment, and percent-encoding are stripped so "subs.ass?x=1",
-     * "subs.ass#track" and "sub%2Eass" all classify correctly, while
-     * "assets/subs.srt" does not.
-     */
-    private fun isAssSubtitle(url: String): Boolean {
-        val path = url.substringBefore('?').substringBefore('#').substringAfterLast('/')
-        return percentDecode(path).endsWith(".ass", ignoreCase = true)
-    }
-
-    private fun percentDecode(s: String): String = buildString {
-        var i = 0
-        while (i < s.length) {
-            val c = s[i]
-            if (c == '%' && i + 2 < s.length) {
-                val hi = s[i + 1].digitToIntOrNull(16)
-                val lo = s[i + 2].digitToIntOrNull(16)
-                if (hi != null && lo != null) {
-                    append((hi * 16 + lo).toChar())
-                    i += 3
-                    continue
-                }
-            }
-            append(c)
-            i += 1
-        }
-    }
 
     private suspend fun probeAndRoute(request: IntakeRequest, generation: Long) {
         val (probe, probeError) = Bridges.probe(request.sourceUrl, emptyMap())
@@ -156,7 +180,10 @@ class PlayerController(
         val route = when (override) {
             RouteOverride.DIRECT -> PlaybackRoute.DIRECT
             RouteOverride.ALWAYS_PROXY -> PlaybackRoute.REMUX
-            RouteOverride.AUTO -> FormatRouter.decide(probe, hasExternalAssSubs = request.subtitleUrls.any { isAssSubtitle(it) })
+            RouteOverride.AUTO -> FormatRouter.decide(
+                probe,
+                hasExternalSubs = request.subtitleTracks.isNotEmpty(),
+            )
         }
         if (!isCurrent(generation)) return
         Logger.i(tag) { "route=$route container=${probe.container} video=${probe.videoCodec} audio=${probe.audioCodecs}" }
@@ -187,16 +214,20 @@ class PlayerController(
             return
         }
         val sessionId = "session-${Random.nextLong().toString(16)}${Random.nextInt(0xFFFF).toString(16)}"
+        val startOffsetMs = _uiState.value.startPositionMs
         pendingSessionId = sessionId
         val (relPath, transcodeError) = Bridges.startHlsSession(
             sessionId = sessionId,
             sourceUrl = sourceUrl,
             headers = emptyMap(),
             mode = route.name.lowercase(),
+            startOffsetMs = startOffsetMs,
+            subtitleTracks = _uiState.value.subtitleTracks,
             onError = { message ->
                 scope.launch { failProxySession(sessionId, generation, message) }
             },
         )
+
         if (!isCurrent(generation)) {
             Bridges.stopHlsSession(sessionId)
             if (pendingSessionId == sessionId) pendingSessionId = null
@@ -242,7 +273,24 @@ class PlayerController(
         }
         pendingSessionId = null
         Logger.i(tag) { "proxy ready: $proxyUrl" }
+        val activeTarget = if (_uiState.value.castActive) CastDispatcher.activeTarget() else null
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.PLAYING, proxyUrl = proxyUrl)
+        if (activeTarget != null) {
+            val remoteUrl = CastDispatcher.remoteCastUrl(_uiState.value)
+            if (remoteUrl != null) {
+                scope.launch {
+                    runCatching {
+                        CastDispatcher.recastIfActive(
+                            activeTarget,
+                            remoteUrl,
+                            CastDispatcher.remoteCastTitle(_uiState.value),
+                        )
+                    }.onFailure { error ->
+                        Logger.w(tag) { "proxy recast failed: ${error.message}" }
+                    }
+                }
+            }
+        }
     }
     private fun failProxySession(sessionId: String, generation: Long, message: String) {
         if (!isCurrent(generation)) return
@@ -277,6 +325,7 @@ class PlayerController(
 
     fun stopPlayback() {
         invalidatePendingWork()
+        CastDispatcher.clearActive()
         Bridges.stopHttpServer()
         UrlIntake.fireSuccess(successCallbackUrl)
         successCallbackUrl = null

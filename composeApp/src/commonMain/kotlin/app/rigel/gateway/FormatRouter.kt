@@ -20,8 +20,7 @@ object FormatRouter {
     private val remuxContainers = setOf("matroska", "mkv", "webm", "avi", "mpegts", "asf")
     private val hlsContainers = setOf("m3u8", "hls")
 
-    fun decide(probe: ProbeResult, hasExternalAssSubs: Boolean): PlaybackRoute {
-        if (hasExternalAssSubs) return PlaybackRoute.TRANSCODE
+    fun decide(probe: ProbeResult, hasExternalSubs: Boolean): PlaybackRoute {
         val container = probe.container.lowercase()
         val video = probe.videoCodec?.lowercase()
         val audio = probe.audioCodecs.map { it.lowercase() }.toSet()
@@ -36,6 +35,8 @@ object FormatRouter {
 
         if (probe.isLive) return PlaybackRoute.DIRECT
         if (container in hlsContainers) return PlaybackRoute.DIRECT
+
+        if (hasExternalSubs && video in directVideo) return PlaybackRoute.REMUX
 
         if (container in directContainers && video in directVideo &&
             audio.all { it in directAudio }

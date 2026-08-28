@@ -29,6 +29,8 @@ struct SourcesView: View {
     @State private var libraryGeneration = 0
     @State private var searchGeneration = 0
     @State private var sessionGeneration = 0
+    @State private var playGeneration = 0
+
 
     private var settings: SettingsStore { RigelCore.shared.settings }
     private var jellyfin: JellyfinClient { RigelCore.shared.jellyfin }
@@ -235,8 +237,7 @@ struct SourcesView: View {
                         LibraryRow(item: item) {
                             openFolder(item)
                         } onPlay: {
-                            let url = JellyfinApi.shared.streamUrl(base: base, itemId: item.id, token: token)
-                            _ = player.open(url: url, title: item.name)
+                            play(item)
                         }
                     }
                 }
@@ -247,8 +248,7 @@ struct SourcesView: View {
                     LibraryRow(item: item) {
                         openFolder(item)
                     } onPlay: {
-                        let url = JellyfinApi.shared.streamUrl(base: base, itemId: item.id, token: token)
-                        _ = player.open(url: url, title: item.name)
+                        play(item)
                     }
                 }
             }
@@ -455,6 +455,44 @@ struct SourcesView: View {
         searchPerformed = false
         searchError = nil
         loadLibrary(at: item.id)
+    }
+
+    private func play(_ item: JellyfinItem) {
+        playGeneration &+= 1
+        let requestGeneration = playGeneration
+        let requestBase = base
+        let requestToken = token
+        let requestUserId = userId
+        let connection = connectionGeneration
+        let url = JellyfinApi.shared.streamUrl(
+            base: requestBase,
+            itemId: item.id,
+            token: requestToken
+        )
+        busy = true
+        jellyfin.itemSubtitleTracks(
+            base: requestBase,
+            token: requestToken,
+            userId: requestUserId,
+            itemId: item.id
+        ) { tracks, error in
+            Task { @MainActor in
+                guard self.connectionGeneration == connection,
+                      self.playGeneration == requestGeneration else { return }
+                self.busy = false
+                if let error {
+                    guard !self.isCancellation(error) else { return }
+                    NSLog("[Rigel] Jellyfin subtitle lookup failed: %@", error.localizedDescription)
+                    _ = self.player.open(url: url, title: item.name)
+                    return
+                }
+                _ = self.player.open(
+                    url: url,
+                    title: item.name,
+                    subtitleTracks: tracks ?? []
+                )
+            }
+        }
     }
 
     private func isCancellation(_ error: Error) -> Bool {

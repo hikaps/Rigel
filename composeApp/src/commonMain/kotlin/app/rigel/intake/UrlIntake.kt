@@ -1,5 +1,7 @@
 package app.rigel.intake
 
+import app.rigel.bridge.SubtitleTrack
+
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -17,7 +19,7 @@ import kotlinx.coroutines.launch
 data class IntakeRequest(
     val sourceUrl: String,
     val filename: String?,
-    val subtitleUrls: List<String>,
+    val subtitleTracks: List<SubtitleTrack>,
     val successCallbackUrl: String?,
     val xSource: String? = null,
     val title: String? = null,
@@ -48,12 +50,14 @@ object UrlIntake {
         val sourceUrl = params["url"]?.firstOrNull()
             ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
             ?: return null
-        val subs = params["sub"].orEmpty().filter { it.startsWith("http://") || it.startsWith("https://") }
+        val subtitleTracks = params["sub"].orEmpty()
+            .filter { it.startsWith("http://") || it.startsWith("https://") }
+            .map { SubtitleTrack(url = it) }
         val filename = params["filename"]?.firstOrNull()
         val success = params["x-success"]?.firstOrNull()
             ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
         val xSource = params["x-source"]?.firstOrNull()?.takeIf { it.isNotBlank() }
-        return IntakeRequest(sourceUrl, filename, subs, success, xSource)
+        return IntakeRequest(sourceUrl, filename, subtitleTracks, success, xSource)
     }
 
     /** Query-string parsing: '&' separators, '+' = space, %XX percent-decode. */

@@ -5,6 +5,8 @@ import app.rigel.bridge.ProbeBridge
 import app.rigel.bridge.ProbeResult
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.TranscodeBridge
+import app.rigel.bridge.SubtitleTrack
+
 import app.rigel.gateway.PlaybackRoute
 import app.rigel.intake.IntakeRequest
 import app.rigel.settings.LinkHistoryEntry
@@ -43,6 +45,10 @@ class PlayerControllerTest {
     private var lanBase: String? = null
     private val stoppedSessions = mutableListOf<String>()
     private val hlsModes = mutableListOf<String>()
+    private val hlsOffsets = mutableListOf<Long>()
+    private val hlsSessionIds = mutableListOf<String>()
+    private val hlsSubtitleTracks = mutableListOf<List<SubtitleTrack>>()
+
     private var transcodeErrorCallback: ((String) -> Unit)? = null
     /** When non-null, startHlsSession defers its onReady until fired here. */
     private var pendingReady: ((String?, String?) -> Unit)? = null
@@ -61,10 +67,15 @@ class PlayerControllerTest {
                     sourceUrl: String,
                     headers: Map<String, String>,
                     mode: String,
+                    startOffsetMs: Long,
+                    subtitleTracks: List<SubtitleTrack>,
                     onReady: (String?, String?) -> Unit,
                     onError: (String) -> Unit,
                 ) {
                     hlsModes += mode
+                    hlsOffsets += startOffsetMs
+                    hlsSessionIds += sessionId
+                    hlsSubtitleTracks += subtitleTracks
                     transcodeErrorCallback = onError
                     if (pendingReady != null) {
                         pendingReady = onReady
@@ -92,9 +103,10 @@ class PlayerControllerTest {
     private val request = IntakeRequest(
         sourceUrl = "http://h/v.mp4",
         filename = "v.mp4",
-        subtitleUrls = emptyList(),
+        subtitleTracks = emptyList(),
         successCallbackUrl = null,
     )
+
 
     @BeforeTest
     fun setUp() {
@@ -177,6 +189,30 @@ class PlayerControllerTest {
         assertEquals(PlayerPhase.PLAYING, state.phase)
         assertEquals("http://127.0.0.1:8090/hls/s1/out.m3u8", state.proxyUrl)
         assertEquals(listOf("remux"), hlsModes)
+    }
+
+    @Test
+    fun proxySeekRestartsSessionAtRequestedOffset() = runTest(dispatcher.scheduler) {
+        hlsOffsets.clear()
+        hlsSessionIds.clear()
+        stoppedSessions.clear()
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        c.loadRequest(request)
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(listOf(0L), hlsOffsets)
+        val firstSession = hlsSessionIds.single()
+
+        c.seek(45_000, 60_000)
+        assertEquals(PlayerPhase.PREPARING_PROXY, c.uiState.value.phase)
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(45_000L, c.uiState.value.startPositionMs)
+        assertEquals(listOf(0L, 45_000L), hlsOffsets)
+        assertEquals(2, hlsSessionIds.distinct().size)
+        assertEquals(1, stoppedSessions.size)
     }
 
     @Test
@@ -338,22 +374,26 @@ class PlayerControllerTest {
     }
 
     @Test
-    fun assSubtitleForcesTranscode() = runTest(dispatcher.scheduler) {
+    fun externalSubtitleTracksForceRemux() = runTest(dispatcher.scheduler) {
         val c = controller()
-        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/subs.ass")))
+        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/subs.ass"))))
         advanceUntilIdle()
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
-        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertEquals(
+            listOf(listOf(SubtitleTrack("https://cdn.h/subs.ass"))),
+            hlsSubtitleTracks,
+        )
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
         assertNotNull(c.uiState.value.proxyUrl)
-        assertEquals(listOf("transcode"), hlsModes)
+        assertEquals(listOf("remux"), hlsModes)
     }
 
     @Test
-    fun assSubtitleWithQueryAndFragmentForcesTranscode() = runTest(dispatcher.scheduler) {
+    fun externalSubtitleWithQueryAndFragmentForcesRemux() = runTest(dispatcher.scheduler) {
         val c = controller()
-        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/subs.ass?token=abc#track1")))
+        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/subs.ass?token=abc#track1"))))
         advanceUntilIdle()
-        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
     }
     @Test
     fun stoppingDuringProxyPreparationInvalidatesLateCallback() = runTest(dispatcher.scheduler) {
@@ -403,28 +443,28 @@ class PlayerControllerTest {
     }
 
     @Test
-    fun assSubtitlePercentEncodedForcesTranscode() = runTest(dispatcher.scheduler) {
+    fun percentEncodedExternalSubtitleForcesRemux() = runTest(dispatcher.scheduler) {
         val c = controller()
-        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/sub%2Eass")))
+        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/sub%2Eass"))))
         advanceUntilIdle()
-        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
     }
 
     @Test
-    fun assSubtitleMixedCaseForcesTranscode() = runTest(dispatcher.scheduler) {
+    fun mixedCaseExternalSubtitleForcesRemux() = runTest(dispatcher.scheduler) {
         val c = controller()
-        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/SUBS.ASS")))
+        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/SUBS.ASS"))))
         advanceUntilIdle()
-        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
     }
 
     @Test
-    fun srtSubtitleUnderAssetsPathStaysDirect() = runTest(dispatcher.scheduler) {
+    fun externalSrtSubtitleForcesRemux() = runTest(dispatcher.scheduler) {
         val c = controller()
-        c.loadRequest(request.copy(subtitleUrls = listOf("https://cdn.h/assets/subtitles.srt")))
+        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/assets/subtitles.srt"))))
         advanceUntilIdle()
-        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
-        assertNull(c.uiState.value.proxyUrl)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertNotNull(c.uiState.value.proxyUrl)
     }
 
     @Test

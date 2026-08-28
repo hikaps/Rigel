@@ -26,8 +26,11 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
 
 /** Fake bridge layer so the LAN URL resolution path is deterministic. */
 private class FakeBridges(private val lan: String?) :
@@ -39,6 +42,8 @@ private class FakeBridges(private val lan: String?) :
         sourceUrl: String,
         headers: Map<String, String>,
         mode: String,
+        startOffsetMs: Long,
+        subtitleTracks: List<app.rigel.bridge.SubtitleTrack>,
         onReady: (String?, String?) -> Unit,
         onError: (String) -> Unit,
     ) = Unit
@@ -54,11 +59,13 @@ class CastDispatcherTest {
 
     @BeforeTest
     fun registerBridges() {
+        CastDispatcher.clearActive()
         RigelBridgeFactory.register(withLan, withLan, withLan, withLan)
     }
 
     @AfterTest
     fun resetBridges() {
+        CastDispatcher.clearActive()
         RigelBridgeFactory.register(null, null, null, null)
     }
 
@@ -208,5 +215,143 @@ class CastDispatcherTest {
         val result = runBlocking { CastDispatcher.cast(target, "http://x/v.mkv", "Movie", client) }
 
         assertEquals("Kodi rejected the URL", result)
+    }
+    @Test
+    fun successfulCastTracksActiveTargetAndDlnaSeekUsesRelativeTime() {
+        val engine = MockEngine {
+            respond(
+                content = """<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:Response xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/></s:Body></s:Envelope>""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/xml"),
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(DlnaDevice("u2", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
+
+        runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
+        assertEquals(target, CastDispatcher.activeTarget())
+        assertTrue(runBlocking { CastDispatcher.seekActive(30_000, 60_000, client) })
+
+        val seekBody = (engine.requestHistory[2].body as? TextContent)?.text ?: ""
+        assertTrue(engine.requestHistory[2].headers["SOAPACTION"]!!.contains("#Seek"))
+        assertTrue(seekBody.contains("<Unit>REL_TIME</Unit>"))
+        assertTrue(seekBody.contains("<Target>00:00:30</Target>"))
+    }
+
+    @Test
+    fun activeKodiSeekUsesPercentage() {
+        val engine = MockEngine {
+            respond(
+                content = """{"jsonrpc":"2.0","id":1,"result":"OK"}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Kodi(KodiDevice("k2", "http://10.0.0.7:8080", "Kodi"))
+
+        runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
+        assertTrue(runBlocking { CastDispatcher.seekActive(30_000, 60_000, client) })
+
+        val body = (engine.requestHistory[1].body as? TextContent)?.text ?: ""
+        assertTrue(body.contains("\"Player.Seek\""))
+        assertTrue(body.contains("\"percentage\":50.0"))
+    }
+
+    @Test
+    fun clearedCastAttemptCannotCommit() {
+        val session = CastSession()
+        val target = CastTarget.Kodi(KodiDevice("epoch", "http://10.0.0.8:8080", "Kodi"))
+        val staleAttempt = session.beginAttempt()
+
+        session.clearActive()
+
+        assertFalse(session.commitActive(target, staleAttempt))
+        assertNull(session.activeTarget())
+        val currentAttempt = session.beginAttempt()
+        assertTrue(session.commitActive(target, currentAttempt))
+        assertEquals(target, session.activeTarget())
+    }
+
+    @Test
+    fun dlnaSoapFailureDoesNotActivateCast() {
+        val engine = MockEngine {
+            respond("", HttpStatusCode.InternalServerError)
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(DlnaDevice("u3", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
+
+        val result = runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
+
+        assertEquals("DLNA rejected the URL", result)
+        assertNull(CastDispatcher.activeTarget())
+    }
+
+
+    @Test
+    fun dlnaPlayNonSuccessResponseDoesNotActivateCast() {
+        var requestCount = 0
+        val engine = MockEngine {
+            requestCount++
+            if (requestCount == 1) {
+                respond(
+                    content = """<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:Response xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/></s:Body></s:Envelope>""",
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "text/xml"),
+                )
+            } else {
+                respond("<error>Play failed</error>", HttpStatusCode.InternalServerError)
+            }
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(DlnaDevice("u5", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
+
+        val result = runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
+
+        assertEquals("DLNA rejected the URL", result)
+        assertNull(CastDispatcher.activeTarget())
+        assertEquals(2, engine.requestHistory.size)
+    }
+
+    @Test
+    fun kodiSeekWithUnknownDurationIsNotDispatched() {
+        val engine = MockEngine {
+            respond(
+                content = """{"jsonrpc":"2.0","id":1,"result":"OK"}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Kodi(KodiDevice("k3", "http://10.0.0.7:8080", "Kodi"))
+
+        runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
+        assertFalse(runBlocking { CastDispatcher.seekActive(30_000, 0, client) })
+        assertEquals(1, engine.requestHistory.size)
+    }
+    @Test
+    fun recastSkipsInactiveTargetAndVoidedAttemptCannotCommit() {
+        val engine = MockEngine {
+            respond(
+                content = """<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:Response xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"/></s:Body></s:Envelope>""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/xml"),
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(DlnaDevice("u4", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
+
+        // Never activated: recast must refuse to dispatch entirely.
+        assertNull(runBlocking { CastDispatcher.recastIfActive(target, "http://origin/v.mp4", "Movie", client) })
+        assertEquals(0, engine.requestHistory.size)
+
+        // Activated then cleared: the in-flight attempt's commit is voided.
+        val session = CastSession()
+        assertTrue(session.commitActive(target, session.beginAttempt()))
+        val inFlightAttempt = session.beginAttemptFor(target)
+        session.clearActive()
+        assertNotNull(inFlightAttempt)
+        assertFalse(session.commitActive(target, inFlightAttempt))
+        assertNull(session.activeTarget())
     }
 }

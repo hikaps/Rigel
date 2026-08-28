@@ -50,6 +50,37 @@ data class CastCapabilities(
 
 /** Per-adapter control of a remote renderer. */
 class CastSession {
+    private var active: CastTarget? = null
+    private var epoch = 0L
+
+    fun activeTarget(): CastTarget? = active
+
+    fun beginAttempt(): Long {
+        epoch += 1
+        return epoch
+    }
+
+    /**
+     * Mint a commit token only when [target] is still the active receiver.
+     * Callers pass the token to [commitActive]; a clearActive() between mint
+     * and completion bumps the epoch and voids the commit.
+     */
+    fun beginAttemptFor(target: CastTarget): Long? {
+        if (active != target) return null
+        return beginAttempt()
+    }
+
+    fun commitActive(target: CastTarget, attempt: Long): Boolean {
+        if (attempt != epoch) return false
+        active = target
+        return true
+    }
+
+    fun clearActive() {
+        epoch += 1
+        active = null
+    }
+
     fun capabilities(target: CastTarget): CastCapabilities =
         ReceiverRegistry.adapterFor(target).capabilities()
 }

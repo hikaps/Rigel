@@ -14,10 +14,12 @@ final class PlayerModel: ObservableObject {
     @Published var proxyUrl: String?
     @Published var error: String?
     @Published var sender: String?
-    @Published var subtitleUrls: [String] = []
+    @Published var subtitleTracks: [SubtitleTrack] = []
     @Published var castActive = false
     @Published var longFormVideoAirPlayEligible = false
     @Published var probeDurationMs: Double?
+    @Published var startPositionMs: Int64 = 0
+
     @Published var showPlayer = false
     private var requestedTitle: String?
     private var requestedTitleURL: String?
@@ -66,8 +68,9 @@ final class PlayerModel: ObservableObject {
         proxyUrl = state.proxyUrl
         error = state.error
         sender = state.sender
-        subtitleUrls = state.subtitleUrls
+        subtitleTracks = state.subtitleTracks
         castActive = state.castActive
+        startPositionMs = state.startPositionMs
         longFormVideoAirPlayEligible = state.longFormVideoAirPlayEligible
         if let probe = state.probe, !probe.isLive {
             probeDurationMs = probe.durationMs?.doubleValue
@@ -79,21 +82,38 @@ final class PlayerModel: ObservableObject {
 
     @discardableResult
     func open(url: String) -> Bool {
-        open(url: url, title: nil)
+        open(url: url, title: nil, subtitleTracks: [])
     }
 
     @discardableResult
     func open(url: String, title: String?) -> Bool {
+        open(url: url, title: title, subtitleTracks: [])
+    }
+
+    @discardableResult
+    func open(url: String, title: String?, subtitleTracks: [SubtitleTrack]) -> Bool {
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         requestedTitle = trimmedTitle.flatMap { $0.isEmpty ? nil : $0 }
         requestedTitleURL = url
-        let accepted = SwiftPlayer.shared.loadRaw(url: url, title: trimmedTitle)
+        let accepted = SwiftPlayer.shared.loadRaw(
+            url: url,
+            title: trimmedTitle,
+            subtitleTracks: subtitleTracks,
+        )
         if !accepted {
             requestedTitle = nil
             requestedTitleURL = nil
         }
         return accepted
     }
+    func seek(positionSeconds: Double, durationSeconds: Double) {
+        guard positionSeconds.isFinite, durationSeconds.isFinite, durationSeconds >= 0 else { return }
+        SwiftPlayer.shared.seek(
+            positionMs: Int64(max(0, positionSeconds * 1000)),
+            durationMs: Int64(durationSeconds * 1000),
+        )
+    }
+
 
     func stop() {
         // Native AVPlayer must stop too, or playback (and its poll timer)

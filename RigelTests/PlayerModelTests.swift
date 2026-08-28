@@ -15,12 +15,13 @@ final class PlayerModelTests: XCTestCase {
             phase: PlayerPhase.playing,
             sourceUrl: "http://origin/v.mkv",
             filename: nil,
-            subtitleUrls: ["https://origin/en.vtt"],
+            subtitleTracks: [SubtitleTrack(url: "https://origin/en.vtt", language: nil, title: nil)],
             route: PlaybackRoute.direct,
             proxyUrl: nil,
             probe: nil,
             error: nil,
             castActive: false,
+            startPositionMs: 0,
             sender: "kodi-remote"
         )
         model.apply(state)
@@ -28,7 +29,7 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertEqual(model.phase, PlayerPhase.playing)
         XCTAssertEqual(model.sourceUrl, "http://origin/v.mkv")
         XCTAssertEqual(model.sender, "kodi-remote")
-        XCTAssertEqual(model.subtitleUrls, ["https://origin/en.vtt"])
+        XCTAssertEqual(model.subtitleTracks, [SubtitleTrack(url: "https://origin/en.vtt", language: nil, title: nil)])
         XCTAssertTrue(model.showPlayer)
         XCTAssertTrue(model.isPlaying)
         XCTAssertEqual(model.playableURL, "http://origin/v.mkv", "direct playback serves the source URL")
@@ -41,18 +42,43 @@ final class PlayerModelTests: XCTestCase {
             phase: PlayerPhase.playing,
             sourceUrl: "http://origin/v.mkv",
             filename: nil,
-            subtitleUrls: [],
+            subtitleTracks: [],
             route: PlaybackRoute.remux,
             proxyUrl: "http://127.0.0.1:12345/session-x/index.m3u8",
             probe: nil,
             error: nil,
             castActive: true,
+            startPositionMs: 45_000,
             sender: nil
         ))
 
         XCTAssertEqual(model.route, PlaybackRoute.remux)
         XCTAssertEqual(model.playableURL, "http://127.0.0.1:12345/session-x/index.m3u8")
         XCTAssertTrue(model.castActive)
+        XCTAssertEqual(model.startPositionMs, 45_000)
+    }
+
+    @MainActor
+    func testProxySkipForwardsAbsoluteMediaPosition() {
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let controller = RigelPlayerViewController(events: events)
+        var requested: Double?
+        controller.onSeekRequested = { requested = $0 }
+        controller.load(
+            url: "http://127.0.0.1/session/index.m3u8",
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false,
+            durationSeconds: 600,
+            isProxy: true,
+            startOffsetSeconds: 120
+        )
+        defer { controller.stopPlayback() }
+
+        let skipForward = view(controller.view, withAccessibilityLabel: "Forward 15 seconds")
+        (skipForward as? UIButton)?.sendActions(for: .touchUpInside)
+
+        XCTAssertEqual(requested ?? -1, 135, accuracy: 0.001)
     }
 
     @MainActor
@@ -237,12 +263,13 @@ final class PlayerModelTests: XCTestCase {
             phase: PlayerPhase.idle,
             sourceUrl: nil,
             filename: nil,
-            subtitleUrls: [],
+            subtitleTracks: [],
             route: nil,
             proxyUrl: nil,
             probe: nil,
             error: nil,
             castActive: false,
+            startPositionMs: 0,
             sender: nil
         ))
         XCTAssertFalse(model.showPlayer)
@@ -255,12 +282,13 @@ final class PlayerModelTests: XCTestCase {
             phase: PlayerPhase.error,
             sourceUrl: "http://origin/v.mkv",
             filename: nil,
-            subtitleUrls: [],
+            subtitleTracks: [],
             route: nil,
             proxyUrl: nil,
             probe: nil,
             error: "probe failed",
             castActive: false,
+            startPositionMs: 0,
             sender: nil
         ))
         XCTAssertTrue(model.showPlayer, "error phase must keep the full-screen host up for retry/close")
@@ -367,12 +395,13 @@ final class PlayerModelTests: XCTestCase {
             phase: phase,
             sourceUrl: "http://origin/video",
             filename: "video.mp4",
-            subtitleUrls: [],
+            subtitleTracks: [],
             route: route,
             proxyUrl: proxyUrl,
             probe: probe,
             error: nil,
             castActive: false,
+            startPositionMs: 0,
             sender: nil
         )
     }

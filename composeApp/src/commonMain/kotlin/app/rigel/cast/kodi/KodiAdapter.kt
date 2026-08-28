@@ -39,6 +39,22 @@ object KodiAdapter : ReceiverAdapter {
         } else null
     }
 
+    override suspend fun seek(
+        target: CastTarget,
+        positionMs: Long,
+        durationMs: Long,
+        client: HttpClient,
+    ): Boolean {
+        if (durationMs <= 0) return false
+        val device = (target as CastTarget.Kodi).device
+        val percent = (positionMs.toDouble() * 100.0 / durationMs).coerceIn(0.0, 100.0)
+        return runCatching { KodiRenderer(client).seek(device.endpoint, percent) }
+            .getOrNull()
+            ?.let { !it.contains("\"error\"") }
+            ?: false
+    }
+
+
     override suspend fun fromRow(parts: List<String>, client: HttpClient): CastTarget? =
         CastTarget.Kodi(KodiDevice(parts[1], parts[2], parts[3]))
 

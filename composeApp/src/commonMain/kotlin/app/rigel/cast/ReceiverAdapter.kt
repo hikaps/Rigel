@@ -23,6 +23,14 @@ interface ReceiverAdapter {
 
     /** Send a URL to the remote renderer. Returns a human-readable result or error. */
     suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): String
+    /** Seek the active remote item; false means this receiver cannot seek. */
+    suspend fun seek(
+        target: CastTarget,
+        positionMs: Long,
+        durationMs: Long,
+        client: HttpClient,
+    ): Boolean = false
+
 
     /** Enrich an SSDP response into a [CastTarget], or null to skip. */
     suspend fun fromSsdp(device: SsdpDevice, client: HttpClient): CastTarget? = null

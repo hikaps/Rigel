@@ -24,6 +24,8 @@ final class RigelTranscodeBridge: NSObject, TranscodeBridge {
         sourceUrl: String,
         headers: [String: String],
         mode: String,
+        startOffsetMs: Int64,
+        subtitleTracks: [SubtitleTrack],
         onReady: @escaping (String?, String?) -> Void,
         onError: @escaping (String) -> Void
     ) {
@@ -32,6 +34,8 @@ final class RigelTranscodeBridge: NSObject, TranscodeBridge {
             sourceUrl: sourceUrl,
             headers: headers,
             mode: mode,
+            startOffsetMs: startOffsetMs,
+            subtitleTracks: subtitleTracks,
             onReady: onReady,
             onError: onError
         )
