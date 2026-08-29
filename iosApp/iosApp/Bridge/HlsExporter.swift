@@ -1043,9 +1043,23 @@ final class RigelHlsExporter {
     }
 
 
-    private static func plainSubtitleText(_ value: String) -> String {
-        let fields = value.split(separator: ",", maxSplits: 9, omittingEmptySubsequences: false)
-        let body = fields.count == 10 ? String(fields[9]) : value
+    static func plainSubtitleText(_ value: String, isASS: Bool) -> String {
+        let body: String
+        if isASS {
+            // FFmpeg's SRT and WebVTT decoders expose ASS-compatible events
+            // without the Dialogue prefix: readorder,layer,style,speaker,
+            // marginL,marginR,marginV,effect,text. Split only that fixed
+            // prefix so commas in the subtitle body remain text.
+            if value.hasPrefix("Dialogue:") {
+                let fields = value.split(separator: ",", maxSplits: 9, omittingEmptySubsequences: false)
+                body = fields.count == 10 ? String(fields[9]) : value
+            } else {
+                let fields = value.split(separator: ",", maxSplits: 8, omittingEmptySubsequences: false)
+                body = fields.count == 9 ? String(fields[8]) : value
+            }
+        } else {
+            body = value
+        }
         return body
             .replacingOccurrences(of: "\\N", with: "\n")
             .replacingOccurrences(of: "\\n", with: "\n")
@@ -1059,15 +1073,19 @@ final class RigelHlsExporter {
         for index in 0..<Int(subtitle.num_rects) {
             guard let rect = rects[index] else { continue }
             let raw: String?
+            let isASS: Bool
             if let ass = rect.pointee.ass {
                 raw = SubtitleParser.decodeCString(UnsafePointer(ass))
+                isASS = true
             } else if let text = rect.pointee.text {
                 raw = SubtitleParser.decodeCString(UnsafePointer(text))
+                isASS = false
             } else {
                 raw = nil
+                isASS = false
             }
             if let raw {
-                let cleaned = plainSubtitleText(raw)
+                let cleaned = plainSubtitleText(raw, isASS: isASS)
                 if !cleaned.isEmpty {
                     lines.append(cleaned)
                 }
