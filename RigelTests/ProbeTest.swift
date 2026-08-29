@@ -226,9 +226,27 @@ final class ProbeTest: XCTestCase {
             .joined(separator: "\n")
         XCTAssertTrue(vttText.contains("English subtitle"))
         XCTAssertTrue(vttText.contains("Sous-titre français"))
+        XCTAssertFalse(vttText.contains("0,0,Default"), vttText)
         let vttPlaylists = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
             .filter { $0.hasSuffix("_vtt.m3u8") }
         XCTAssertEqual(vttPlaylists.count, 2)
+    }
+
+    func testASSSubtitleEventsDiscardFFmpegMetadata() {
+        XCTAssertEqual(
+            RigelHlsExporter.plainSubtitleText(
+                "2,0,Default,,0,0,0,,Hello, world\\NSecond line",
+                isASS: true
+            ),
+            "Hello, world\nSecond line"
+        )
+        XCTAssertEqual(
+            RigelHlsExporter.plainSubtitleText(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\i1}Styled{\\i0}",
+                isASS: true
+            ),
+            "Styled"
+        )
     }
 
     func testSidecarWebVttPublishesSubtitleRendition() throws {
