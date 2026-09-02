@@ -98,6 +98,7 @@ final class RigelPlayerViewController: UIViewController {
     private var subtitleGroup: AVMediaSelectionGroup?
     private var trackGroupsLoadedFor: AVPlayerItem?
     private struct SidecarSubtitle {
+        let order: Int
         let name: String
         let language: String?
         let cues: [SubtitleParser.Cue]
@@ -105,6 +106,8 @@ final class RigelPlayerViewController: UIViewController {
     private var sidecarSubtitles: [SidecarSubtitle] = []
     private var activeSidecarSubtitleIndex: Int?
     private var sidecarGeneration = 0
+    private var nextSidecarOrder = 0
+    private var subtitleBottomConstraint: NSLayoutConstraint?
     private var isScrubbing = false
     private var knownDurationSeconds: Double?
     private var loadedTitle: String?
@@ -150,11 +153,16 @@ final class RigelPlayerViewController: UIViewController {
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
         subtitleLabel.isHidden = true
         view.addSubview(subtitleLabel)
+        let bottomConstraint = subtitleLabel.bottomAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.bottomAnchor,
+            constant: -SubtitlePreferences.bottomInset
+        )
+        subtitleBottomConstraint = bottomConstraint
         NSLayoutConstraint.activate([
             subtitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 40),
             subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -40),
             subtitleLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            subtitleLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -100),
+            bottomConstraint,
         ])
         setupControlsGesture()
     }
@@ -517,52 +525,16 @@ final class RigelPlayerViewController: UIViewController {
     @objc private func subtitlesTapped() {
         showControls()
         var options: [TrackPickerOption] = []
-        if let group = subtitleGroup, !group.options.isEmpty {
-            let selectedNative = player?.currentItem?.currentMediaSelection.selectedMediaOption(in: group)
-            if group.allowsEmptySelection && sidecarSubtitles.isEmpty {
-                options.append(
-                    TrackPickerOption(
-                        id: "subtitles-off",
-                        title: "Off",
-                        isSelected: selectedNative == nil,
-                        select: { [weak self] in
-                            guard let self else { return }
-                            self.activeSidecarSubtitleIndex = nil
-                            self.selectMediaOption(nil, in: group)
-                            self.updateSidecarSubtitle()
-                            self.updateTrackButtons()
-                        }
-                    )
-                )
-            }
-            for (index, option) in group.options.enumerated() {
-                options.append(
-                    TrackPickerOption(
-                        id: "subtitle-\(index)",
-                        title: option.displayName,
-                        isSelected: activeSidecarSubtitleIndex == nil && selectedNative === option,
-                        select: { [weak self] in
-                            guard let self,
-                                  let currentGroup = self.subtitleGroup,
-                                  currentGroup.options.indices.contains(index) else { return }
-                            self.activeSidecarSubtitleIndex = nil
-                            self.selectMediaOption(currentGroup.options[index], in: currentGroup)
-                            self.updateSidecarSubtitle()
-                            self.updateTrackButtons()
-                        }
-                    )
-                )
-            }
+        let nativeOptions = subtitleGroup?.options ?? []
+        let selectedNative = subtitleGroup.flatMap {
+            player?.currentItem?.currentMediaSelection.selectedMediaOption(in: $0)
         }
-        if !sidecarSubtitles.isEmpty {
-            let nativeSelected = subtitleGroup.flatMap {
-                player?.currentItem?.currentMediaSelection.selectedMediaOption(in: $0)
-            } != nil
+        if !nativeOptions.isEmpty || !sidecarSubtitles.isEmpty {
             options.append(
                 TrackPickerOption(
-                    id: "sidecar-off",
+                    id: "subtitles-off",
                     title: "Off",
-                    isSelected: activeSidecarSubtitleIndex == nil && !nativeSelected,
+                    isSelected: activeSidecarSubtitleIndex == nil && selectedNative == nil,
                     select: { [weak self] in
                         guard let self else { return }
                         self.activeSidecarSubtitleIndex = nil
@@ -574,25 +546,43 @@ final class RigelPlayerViewController: UIViewController {
                     }
                 )
             )
-            for (index, sidecar) in sidecarSubtitles.enumerated() {
-                let label = sidecar.language ?? sidecar.name
-                options.append(
-                    TrackPickerOption(
-                        id: "sidecar-\(index)",
-                        title: label,
-                        isSelected: activeSidecarSubtitleIndex == index,
-                        select: { [weak self] in
-                            guard let self, self.sidecarSubtitles.indices.contains(index) else { return }
-                            self.activeSidecarSubtitleIndex = index
-                            if let group = self.subtitleGroup {
-                                self.selectMediaOption(nil, in: group)
-                            }
-                            self.updateSidecarSubtitle()
-                            self.updateTrackButtons()
-                        }
-                    )
+        }
+        for (index, option) in nativeOptions.enumerated() {
+            options.append(
+                TrackPickerOption(
+                    id: "subtitle-\(index)",
+                    title: option.displayName,
+                    isSelected: activeSidecarSubtitleIndex == nil && selectedNative === option,
+                    select: { [weak self] in
+                        guard let self,
+                              let currentGroup = self.subtitleGroup,
+                              currentGroup.options.indices.contains(index) else { return }
+                        self.activeSidecarSubtitleIndex = nil
+                        self.selectMediaOption(currentGroup.options[index], in: currentGroup)
+                        self.updateSidecarSubtitle()
+                        self.updateTrackButtons()
+                    }
                 )
-            }
+            )
+        }
+        for (index, sidecar) in sidecarSubtitles.enumerated() {
+            let label = sidecar.language ?? sidecar.name
+            options.append(
+                TrackPickerOption(
+                    id: "sidecar-\(index)",
+                    title: label,
+                    isSelected: activeSidecarSubtitleIndex == index,
+                    select: { [weak self] in
+                        guard let self, self.sidecarSubtitles.indices.contains(index) else { return }
+                        self.activeSidecarSubtitleIndex = index
+                        if let group = self.subtitleGroup {
+                            self.selectMediaOption(nil, in: group)
+                        }
+                        self.updateSidecarSubtitle()
+                        self.updateTrackButtons()
+                    }
+                )
+            )
         }
         presentTrackPicker(
             title: "Subtitles",
@@ -723,6 +713,8 @@ final class RigelPlayerViewController: UIViewController {
         }
         let generation = sidecarGeneration
         for (index, track) in limitedTracks.enumerated() {
+            let sidecarOrder = nextSidecarOrder
+            nextSidecarOrder += 1
             let rawURL = track.url
             guard let url = URL(string: rawURL) else {
                 NSLog("[RigelPlayer] sidecar %@ failed: invalid URL", rawURL)
@@ -767,14 +759,28 @@ final class RigelPlayerViewController: UIViewController {
                 let language = track.language?.trimmingCharacters(in: .whitespacesAndNewlines)
                 DispatchQueue.main.async {
                     guard self.sidecarGeneration == generation, !self.disposed else { return }
-                    let sidecarIndex = self.sidecarSubtitles.count
+                    let activeOrder = self.activeSidecarSubtitleIndex.flatMap { index in
+                        self.sidecarSubtitles.indices.contains(index)
+                            ? self.sidecarSubtitles[index].order
+                            : nil
+                    }
                     self.sidecarSubtitles.append(
                         SidecarSubtitle(
+                            order: sidecarOrder,
                             name: name,
                             language: language?.isEmpty == false ? language : nil,
                             cues: cues,
                         )
                     )
+                    self.sidecarSubtitles.sort { $0.order < $1.order }
+                    if let activeOrder {
+                        self.activeSidecarSubtitleIndex = self.sidecarSubtitles.firstIndex {
+                            $0.order == activeOrder
+                        }
+                    }
+                    guard let sidecarIndex = self.sidecarSubtitles.firstIndex(where: { $0.order == sidecarOrder }) else {
+                        return
+                    }
                     onLoaded(sidecarIndex)
                     self.updateTrackButtons()
                     NSLog("[RigelPlayer] sidecar %@ ok", rawURL)
@@ -796,7 +802,8 @@ final class RigelPlayerViewController: UIViewController {
             subtitleLabel.isHidden = true
             return
         }
-        let seconds = mediaSeconds
+        subtitleBottomConstraint?.constant = -SubtitlePreferences.bottomInset
+        let seconds = mediaSeconds - SubtitlePreferences.delay
         guard seconds.isFinite else {
             subtitleLabel.text = nil
             subtitleLabel.isHidden = true
@@ -1090,6 +1097,7 @@ final class RigelPlayerViewController: UIViewController {
         trackGroupsLoadedFor = nil
         sidecarGeneration &+= 1
         sidecarSubtitles.removeAll()
+        nextSidecarOrder = 0
         activeSidecarSubtitleIndex = nil
         subtitleLabel.text = nil
         subtitleLabel.isHidden = true
