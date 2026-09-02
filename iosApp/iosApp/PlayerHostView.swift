@@ -140,6 +140,9 @@ struct PlayerHostView: View {
                         title: player.displayTitle,
                         sender: player.sender,
                         subtitleTracks: player.subtitleTracks,
+                        onSubtitleDownloaded: { track in
+                            player.addSubtitleTrack(track)
+                        },
                         longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
                         isProxy: player.proxyUrl != nil,
                         probeDurationMs: player.probeDurationMs,
@@ -232,15 +235,16 @@ struct PlayerHostView: View {
 }
 
 /// Hosts RigelPlayerViewController (AVPlayerViewController + transparent overlay controls).
-/// Load is called only when the media URL or playback configuration changes.
-/// The start offset is intentionally excluded from the guard: proxy seeking
-/// keeps the current controller mounted until its replacement URL is ready.
-/// The guard lives in the Coordinator (never mutate @State during view updates).
+/// Load is called when the media URL or playback configuration changes.
+/// Subtitle downloads update the native sidecar immediately and Kotlin state for
+/// the next proxy rebuild, so a subtitle-list-only state change must not tear
+/// down the current item.
 struct PlayerView: UIViewControllerRepresentable {
     let url: String
     let title: String?
     let sender: String?
     let subtitleTracks: [SubtitleTrack]
+    let onSubtitleDownloaded: (SubtitleTrack) -> Void
     let longFormVideoAirPlayEligible: Bool
     let isProxy: Bool
     let probeDurationMs: Double?
@@ -330,6 +334,7 @@ struct PlayerView: UIViewControllerRepresentable {
         )
         let created = bridge.createPlayerViewController(events: events)
         if let player = created as? RigelPlayerViewController {
+            player.onSubtitleDownloaded = onSubtitleDownloaded
             player.onDevicesRequested = onDevices
             player.onSeekRequested = onSeek
         }
@@ -345,13 +350,13 @@ struct PlayerView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         if let player = uiViewController as? RigelPlayerViewController {
             player.onSeekRequested = onSeek
+            player.onSubtitleDownloaded = onSubtitleDownloaded
         }
         guard let bridge = PlayerBridgeFactory.shared.create() else { return }
         let loaded = context.coordinator.loaded
         if loaded?.url != url ||
             loaded?.title != title ||
             loaded?.sender != sender ||
-            loaded?.subtitleTracks != subtitleTracks ||
             loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible ||
             loaded?.isProxy != isProxy ||
             loaded?.probeDurationMs != probeDurationMs {

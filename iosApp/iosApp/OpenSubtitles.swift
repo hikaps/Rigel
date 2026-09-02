@@ -375,6 +375,7 @@ struct OpenSubtitlesSearchSheet: View {
     @State private var isSearching = false
     @State private var downloadingID: Int?
     @State private var errorMessage: String?
+    @State private var requestTask: Task<Void, Never>?
 
     let client: OpenSubtitlesClient
     let onDownloaded: (SubtitleTrack) -> Void
@@ -454,36 +455,52 @@ struct OpenSubtitlesSearchSheet: View {
             }
         }
         .task { search() }
+        .onDisappear {
+            requestTask?.cancel()
+            requestTask = nil
+            isSearching = false
+            downloadingID = nil
+        }
     }
 
     private func search() {
-        guard !isSearching else { return }
+        guard requestTask == nil else { return }
         let requestedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !requestedQuery.isEmpty else { return }
         isSearching = true
         errorMessage = nil
-        Task {
+        let task = Task { @MainActor in
             do {
                 let language = Locale.preferredLanguages.first?
                     .split(separator: "-")
                     .first
                     .map(String.init)
-                results = try await client.search(query: requestedQuery, language: language)
+                let found = try await client.search(query: requestedQuery, language: language)
+                guard !Task.isCancelled else { return }
+                results = found
+                isSearching = false
+                requestTask = nil
+            } catch is CancellationError {
+                return
             } catch {
+                guard !Task.isCancelled else { return }
                 results = []
                 errorMessage = error.localizedDescription
+                isSearching = false
+                requestTask = nil
             }
-            isSearching = false
         }
+        requestTask = task
     }
 
     private func download(_ result: OpenSubtitlesSearchResult) {
-        guard downloadingID == nil else { return }
+        guard requestTask == nil, downloadingID == nil else { return }
         downloadingID = result.id
         errorMessage = nil
-        Task {
+        let task = Task { @MainActor in
             do {
                 let url = try await client.download(result)
+                guard !Task.isCancelled else { return }
                 let track = SubtitleTrack(
                     url: url.absoluteString,
                     language: result.language,
@@ -491,10 +508,17 @@ struct OpenSubtitlesSearchSheet: View {
                 )
                 onDownloaded(track)
                 dismiss()
+                downloadingID = nil
+                requestTask = nil
+            } catch is CancellationError {
+                return
             } catch {
+                guard !Task.isCancelled else { return }
                 errorMessage = error.localizedDescription
+                downloadingID = nil
+                requestTask = nil
             }
-            downloadingID = nil
         }
+        requestTask = task
     }
 }

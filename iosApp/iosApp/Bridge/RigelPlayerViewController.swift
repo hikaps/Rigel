@@ -41,6 +41,9 @@ final class RigelPlayerViewController: UIViewController {
     /// Called with an absolute media position for remote seek forwarding or
     /// proxy session restart.
     var onSeekRequested: ((Double) -> Void)?
+    /// Called when a subtitle selected from OpenSubtitles is ready to retain
+    /// in Kotlin playback state.
+    var onSubtitleDownloaded: ((SubtitleTrack) -> Void)?
 
     private var player: AVPlayer?
     /// Raw URL of the item currently installed in AVPlayer. Delayed failures
@@ -653,7 +656,8 @@ final class RigelPlayerViewController: UIViewController {
                 query: query,
                 client: OpenSubtitlesClient.shared,
                 onDownloaded: { [weak self] track in
-                    self?.loadSidecarSubtitles([track]) { [weak self] index in
+                    guard let self, !self.disposed else { return }
+                    self.loadSidecarSubtitles([track]) { [weak self] index in
                         guard let self else { return }
                         self.activeSidecarSubtitleIndex = index
                         if let group = self.subtitleGroup {
@@ -662,6 +666,7 @@ final class RigelPlayerViewController: UIViewController {
                         self.updateSidecarSubtitle()
                         self.updateTrackButtons()
                     }
+                    self.onSubtitleDownloaded?(track)
                 }
             )
         )

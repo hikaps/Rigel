@@ -193,7 +193,7 @@ struct SettingsView: View {
         let password = openSubtitlesPassword
         guard !apiKey.isEmpty, !username.isEmpty, !password.isEmpty else {
             openSubtitlesNotice = "Enter an API key, username, and password."
-            openSubtitlesConnected = false
+            openSubtitlesConnected = OpenSubtitlesKeychainStore.shared.isConnected
             return
         }
 
@@ -215,8 +215,11 @@ struct SettingsView: View {
                 openSubtitlesConnected = true
                 openSubtitlesNotice = "Connected"
             } catch {
-                openSubtitlesConnected = false
-                openSubtitlesNotice = error.localizedDescription
+                let stillConnected = OpenSubtitlesKeychainStore.shared.isConnected
+                openSubtitlesConnected = stillConnected
+                openSubtitlesNotice = stillConnected
+                    ? "Could not reconnect; the saved connection remains active."
+                    : error.localizedDescription
             }
             openSubtitlesBusy = false
         }

@@ -114,6 +114,9 @@ final class PlayerModel: ObservableObject {
         )
     }
 
+    func addSubtitleTrack(_ track: SubtitleTrack) {
+        SwiftPlayer.shared.addSubtitleTrack(track: track)
+    }
 
     func stop() {
         // Native AVPlayer must stop too, or playback (and its poll timer)

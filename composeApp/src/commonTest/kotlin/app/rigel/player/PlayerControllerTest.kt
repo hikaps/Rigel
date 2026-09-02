@@ -158,6 +158,23 @@ class PlayerControllerTest {
     }
 
     @Test
+    fun downloadedSubtitleIsPassedToReplacementProxySession() = runTest(dispatcher.scheduler) {
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        c.loadRequest(request)
+        advanceUntilIdle()
+
+        val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
+        c.addSubtitleTrack(track)
+        assertEquals(listOf(track), c.uiState.value.subtitleTracks)
+
+        c.seek(positionMs = 15_000, durationMs = 60_000)
+        advanceUntilIdle()
+
+        assertEquals(listOf(track), hlsSubtitleTracks.last())
+    }
+
+    @Test
     fun rejectedUrlNotRecorded() {
         val settings = SettingsStore(MapSettings(mutableMapOf()))
         val c = controller(settings)
