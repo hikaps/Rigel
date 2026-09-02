@@ -9,6 +9,7 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 - Play `http(s)` links, local files, and HLS playlists — entered on the home screen, opened from the share sheet or Files, or handed over by other apps.
 - Direct AVPlayer playback when the format fits. Otherwise FFmpeg probes the media and Rigel remuxes or transcodes it to HLS on the fly, served from a local HTTP server — conversion happens on your device.
 - External subtitle URLs, Picture in Picture, and background audio.
+- OpenSubtitles search and downloads from the player subtitle picker; configure the account under Settings, with credentials kept in the iOS Keychain.
 
 ## Screens & casting
 

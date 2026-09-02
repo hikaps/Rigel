@@ -116,6 +116,20 @@ class PlayerController(
         _uiState.value = _uiState.value.copy(castActive = active)
     }
 
+    /** Adds a user-selected subtitle so future proxy rebuilds retain it. */
+    fun addSubtitleTrack(track: SubtitleTrack) {
+        val current = _uiState.value
+        if (current.phase == PlayerPhase.IDLE ||
+            track.url.isBlank() ||
+            current.subtitleTracks.any { it.url == track.url }
+        ) {
+            return
+        }
+        _uiState.value = current.copy(
+            subtitleTracks = current.subtitleTracks + track,
+        )
+    }
+
     fun seek(positionMs: Long, durationMs: Long) {
         val current = _uiState.value
         if (current.phase != PlayerPhase.PLAYING && current.phase != PlayerPhase.BUFFERING) return
