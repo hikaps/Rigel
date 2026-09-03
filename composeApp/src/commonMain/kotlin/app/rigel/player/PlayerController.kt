@@ -30,6 +30,7 @@ data class PlayerUiState(
     val sourceUrl: String? = null,
     val filename: String? = null,
     val subtitleTracks: List<SubtitleTrack> = emptyList(),
+    val selectedExternalSubtitleUrl: String? = null,
     val route: PlaybackRoute? = null,
     val proxyUrl: String? = null,
     val probe: ProbeResult? = null,
@@ -71,6 +72,8 @@ class PlayerController(
     private var loadGeneration = 0L
     private var pendingJob: Job? = null
     private var pendingSessionId: String? = null
+    /** Subtitle URL baked into the live proxy playlist, if any. */
+    private var proxySessionSubtitleUrl: String? = null
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
@@ -105,6 +108,7 @@ class PlayerController(
             sourceUrl = request.sourceUrl,
             filename = request.filename,
             subtitleTracks = request.subtitleTracks,
+            selectedExternalSubtitleUrl = request.subtitleTracks.firstOrNull { it.url.isNotBlank() }?.url,
             castActive = false,
             startPositionMs = 0,
             sender = request.xSource,
@@ -116,18 +120,81 @@ class PlayerController(
         _uiState.value = _uiState.value.copy(castActive = active)
     }
 
-    /** Adds a user-selected subtitle so future proxy rebuilds retain it. */
-    fun addSubtitleTrack(track: SubtitleTrack) {
+    /**
+     * Selects an external text subtitle. Video playback is rebuilt through the
+     * LAN HLS proxy so AVPlayer and AirPlay can select the generated rendition.
+     */
+    fun selectExternalSubtitle(track: SubtitleTrack?, positionMs: Long) {
         val current = _uiState.value
-        if (current.phase == PlayerPhase.IDLE ||
-            track.url.isBlank() ||
-            current.subtitleTracks.any { it.url == track.url }
-        ) {
+        if (current.phase == PlayerPhase.IDLE) return
+        if (track == null) {
+            val cleared = current.copy(selectedExternalSubtitleUrl = null)
+            // The live playlist may still mark the sidecar DEFAULT=YES: a
+            // local Off never rebuilt it, and a remote renderer fetches that
+            // same master and keeps its own subtitle selection. Rebuild
+            // without the sidecar whenever the running session includes it,
+            // local or cast, so no receiver inherits disabled captions.
+            if (proxySessionSubtitleUrl == null || current.proxyUrl == null) {
+                _uiState.value = cleared
+                return
+            }
+            val probe = current.probe ?: run {
+                _uiState.value = cleared
+                return
+            }
+            val route = current.route ?: PlaybackRoute.REMUX
+            val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
+                ?: positionMs.coerceAtLeast(0)
+            invalidatePendingWork()
+            directFallbackUsed = false
+            val generation = loadGeneration
+            _uiState.value = cleared.copy(
+                phase = PlayerPhase.PREPARING_PROXY,
+                route = route,
+                proxyUrl = null,
+                startPositionMs = target,
+            )
+            pendingJob = scope.launch { prepareProxy(probe, route, generation) }
             return
         }
-        _uiState.value = current.copy(
-            subtitleTracks = current.subtitleTracks + track,
+        if (track.url.isBlank()) return
+
+        val tracks = if (current.subtitleTracks.any { it.url == track.url }) {
+            current.subtitleTracks
+        } else {
+            current.subtitleTracks + track
+        }
+        val selected = current.copy(
+            subtitleTracks = tracks,
+            selectedExternalSubtitleUrl = track.url,
+            error = null,
         )
+        val probe = selected.probe ?: run {
+            _uiState.value = selected
+            return
+        }
+        if (probe.videoCodec == null) {
+            _uiState.value = selected
+            return
+        }
+
+        val route = FormatRouter.decide(probe, hasSelectedExternalSubtitle = true)
+        if (route == PlaybackRoute.DIRECT) {
+            _uiState.value = selected
+            return
+        }
+        val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
+            ?: positionMs.coerceAtLeast(0)
+        invalidatePendingWork()
+        directFallbackUsed = false
+        val generation = loadGeneration
+        _uiState.value = selected.copy(
+            phase = PlayerPhase.PREPARING_PROXY,
+            route = route,
+            proxyUrl = null,
+            startPositionMs = target,
+        )
+        pendingJob = scope.launch { prepareProxy(probe, route, generation) }
     }
 
     fun seek(positionMs: Long, durationMs: Long) {
@@ -173,6 +240,7 @@ class PlayerController(
             Bridges.stopHttpServer()
         }
         pendingSessionId = null
+        proxySessionSubtitleUrl = null
     }
 
     private fun isCurrent(generation: Long): Boolean = generation == loadGeneration
@@ -189,14 +257,21 @@ class PlayerController(
             )
             return
         }
-        val override = settings.routeOverride()
-        val route = when (override) {
-            RouteOverride.DIRECT -> PlaybackRoute.DIRECT
-            RouteOverride.ALWAYS_PROXY -> PlaybackRoute.REMUX
-            RouteOverride.AUTO -> FormatRouter.decide(
-                probe,
-                hasExternalSubs = request.subtitleTracks.isNotEmpty(),
-            )
+        if (_uiState.value.selectedExternalSubtitleUrl != null && probe.videoCodec == null) {
+            _uiState.value = _uiState.value.copy(selectedExternalSubtitleUrl = null)
+        }
+        val hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null
+        val route = if (hasSelectedExternalSubtitle && probe.videoCodec != null) {
+            FormatRouter.decide(probe, hasSelectedExternalSubtitle = true)
+        } else {
+            when (val override = settings.routeOverride()) {
+                RouteOverride.DIRECT -> PlaybackRoute.DIRECT
+                RouteOverride.ALWAYS_PROXY -> PlaybackRoute.REMUX
+                RouteOverride.AUTO -> FormatRouter.decide(
+                    probe,
+                    hasSelectedExternalSubtitle = false,
+                )
+            }
         }
         if (!isCurrent(generation)) return
         Logger.i(tag) { "route=$route container=${probe.container} video=${probe.videoCodec} audio=${probe.audioCodecs}" }
@@ -219,25 +294,46 @@ class PlayerController(
             }
         }
     }
-
     private suspend fun prepareProxy(probe: ProbeResult, route: PlaybackRoute, generation: Long) {
         if (!isCurrent(generation)) return
         val sourceUrl = _uiState.value.sourceUrl ?: run {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "No source URL")
             return
         }
+        val state = _uiState.value
+        val subtitleTracks = if (probe.videoCodec == null) {
+            emptyList()
+        } else {
+            state.selectedExternalSubtitleUrl?.let { selectedUrl ->
+                state.subtitleTracks.firstOrNull { it.url == selectedUrl }?.let(::listOf)
+                    ?: run {
+                        _uiState.value = state.copy(
+                            phase = PlayerPhase.ERROR,
+                            proxyUrl = null,
+                            error = "Could not prepare the selected subtitle",
+                        )
+                        return
+                    }
+            } ?: emptyList()
+        }
         val sessionId = "session-${Random.nextLong().toString(16)}${Random.nextInt(0xFFFF).toString(16)}"
-        val startOffsetMs = _uiState.value.startPositionMs
+        val startOffsetMs = state.startPositionMs
         pendingSessionId = sessionId
+        val selectedSubtitle = subtitleTracks.isNotEmpty()
         val (relPath, transcodeError) = Bridges.startHlsSession(
             sessionId = sessionId,
             sourceUrl = sourceUrl,
             headers = emptyMap(),
             mode = route.name.lowercase(),
             startOffsetMs = startOffsetMs,
-            subtitleTracks = _uiState.value.subtitleTracks,
+            subtitleTracks = subtitleTracks,
             onError = { message ->
-                scope.launch { failProxySession(sessionId, generation, message) }
+                val error = if (selectedSubtitle) {
+                    "Could not prepare the selected subtitle"
+                } else {
+                    message
+                }
+                scope.launch { failProxySession(sessionId, generation, error) }
             },
         )
 
@@ -248,10 +344,15 @@ class PlayerController(
         }
         if (relPath == null) {
             if (pendingSessionId == sessionId) pendingSessionId = null
-            Logger.w(tag) { "HLS session failed: $transcodeError" }
+            val error = if (selectedSubtitle) {
+                "Could not prepare the selected subtitle"
+            } else {
+                transcodeError ?: "Transcode/remux failed"
+            }
+            Logger.w(tag) { "HLS session failed: $error" }
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
-                error = transcodeError ?: "Transcode/remux failed",
+                error = error,
             )
             return
         }
@@ -285,6 +386,7 @@ class PlayerController(
             return
         }
         pendingSessionId = null
+        proxySessionSubtitleUrl = subtitleTracks.firstOrNull()?.url
         Logger.i(tag) { "proxy ready: $proxyUrl" }
         val activeTarget = if (_uiState.value.castActive) CastDispatcher.activeTarget() else null
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.PLAYING, proxyUrl = proxyUrl)

@@ -294,6 +294,97 @@ final class ProbeTest: XCTestCase {
         XCTAssertTrue(master.contains("LANGUAGE=\"eng\""))
     }
 
+    func testSelectedSidecarPrecedesEmbeddedRenditions() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_subtitles", withExtension: "mkv"))
+        let sidecar = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_sidecar", withExtension: "vtt"))
+        let sessionId = "test-selected-sidecar-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "selected sidecar session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [
+                SubtitleTrack(
+                    url: sidecar.absoluteString,
+                    language: "eng",
+                    title: "Selected sidecar"
+                )
+            ],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "selected sidecar session failed")
+        XCTAssertNil(error)
+        let master = try String(contentsOf: outputDir.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        XCTAssertEqual(master.components(separatedBy: "TYPE=SUBTITLES").count - 1, 3, master)
+        XCTAssertTrue(master.contains("NAME=\"RigelSelected__Selected_sidecar\""), master)
+        let selectedNameOffset = try XCTUnwrap(master.range(of: "NAME=\"RigelSelected__Selected_sidecar\"")?.lowerBound)
+        let englishNameOffset = master.range(of: "LANGUAGE=\"eng\"")?.lowerBound
+        XCTAssertLessThan(selectedNameOffset, englishNameOffset ?? master.endIndex)
+        let vttFiles = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+            .filter { $0.hasSuffix(".vtt") }
+        let vttText = try vttFiles
+            .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
+        XCTAssertTrue(vttText.contains("Sidecar subtitle"), vttText)
+    }
+
+    func testInvalidSelectedSidecarFailsSession() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let missingSidecar = URL(fileURLWithPath: "/tmp/rigel-missing-selected-\(UUID().uuidString).srt")
+        let sessionId = "test-invalid-selected-sidecar-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "invalid selected sidecar session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [SubtitleTrack(url: missingSidecar.absoluteString, language: nil, title: nil)],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+
+        XCTAssertNil(readyPath)
+        XCTAssertEqual(error, "Could not prepare the selected subtitle")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outputDir.appendingPathComponent("index.m3u8").path))
+    }
+
     func testSidecarSubtitleTimestampsShiftWithSeekOffset() throws {
         let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
         let sidecar = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_sidecar", withExtension: "vtt"))

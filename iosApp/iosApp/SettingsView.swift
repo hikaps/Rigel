@@ -4,8 +4,6 @@ import ComposeApp
 struct SettingsView: View {
     @State private var routeKey = ""
     @State private var capKey = ""
-    @State private var subtitleBottomInset = SubtitlePreferences.bottomInset
-    @State private var subtitleDelay = SubtitlePreferences.delay
     @State private var rendererOn = false
     @State private var rendererNotice: String?
     @State private var openSubtitlesAPIKey = ""
@@ -21,7 +19,6 @@ struct SettingsView: View {
             Form {
                 playbackSection
                 integrationSection
-                subtitlesSection
                 openSubtitlesSection
                 rendererSection
                 aboutSection
@@ -31,8 +28,6 @@ struct SettingsView: View {
                 routeKey = settings.routeOverride().name
                 capKey = settings.transcodeCap().name == "P720" ? "720p" : "1080p"
                 rendererOn = RendererBridgeAccess.shared.isRunning()
-                subtitleBottomInset = SubtitlePreferences.bottomInset
-                subtitleDelay = SubtitlePreferences.delay
                 loadOpenSubtitlesSettings()
             }
             .onChange(of: routeKey) { newValue in
@@ -41,8 +36,6 @@ struct SettingsView: View {
             .onChange(of: capKey) { newValue in
                 settings.setTranscodeCap(value: newValue == "720p" ? TranscodeCap.p720 : TranscodeCap.p1080)
             }
-            .onChange(of: subtitleBottomInset) { SubtitlePreferences.bottomInset = $0 }
-            .onChange(of: subtitleDelay) { SubtitlePreferences.delay = $0 }
         }
     }
 
@@ -87,36 +80,6 @@ struct SettingsView: View {
         }
     }
 
-    private var subtitlesSection: some View {
-        Section("Subtitles") {
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Subtitle height")
-                    Spacer()
-                    Text(subtitleBottomInset < 90 ? "Low" : subtitleBottomInset > 110 ? "High" : "Default")
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $subtitleBottomInset, in: 40...300, step: 10)
-                    .accessibilityLabel("Subtitle height")
-                Text("Moves downloaded and sidecar subtitles up or down.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Subtitle delay")
-                    Spacer()
-                    Text(String(format: "%+.1f s", subtitleDelay))
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $subtitleDelay, in: -10...10, step: 0.1)
-                    .accessibilityLabel("Subtitle delay")
-                Text("Positive values show subtitles later.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
 
     private var openSubtitlesSection: some View {
         Section("OpenSubtitles") {

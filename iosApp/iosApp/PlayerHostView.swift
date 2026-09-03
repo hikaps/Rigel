@@ -140,8 +140,9 @@ struct PlayerHostView: View {
                         title: player.displayTitle,
                         sender: player.sender,
                         subtitleTracks: player.subtitleTracks,
-                        onSubtitleDownloaded: { track in
-                            player.addSubtitleTrack(track)
+                        selectedExternalSubtitleUrl: player.selectedExternalSubtitleUrl,
+                        onExternalSubtitleSelected: { track, positionSeconds in
+                            player.selectExternalSubtitle(track, positionSeconds: positionSeconds)
                         },
                         longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
                         isProxy: player.proxyUrl != nil,
@@ -236,15 +237,16 @@ struct PlayerHostView: View {
 
 /// Hosts RigelPlayerViewController (AVPlayerViewController + transparent overlay controls).
 /// Load is called when the media URL or playback configuration changes.
-/// Subtitle downloads update the native sidecar immediately and Kotlin state for
-/// the next proxy rebuild, so a subtitle-list-only state change must not tear
-/// down the current item.
+/// Subtitle downloads and selection changes update the native sidecar immediately
+/// and Kotlin state. A selected sidecar also rebuilds the proxy so the receiver
+/// receives a real HLS subtitle rendition.
 struct PlayerView: UIViewControllerRepresentable {
     let url: String
     let title: String?
     let sender: String?
     let subtitleTracks: [SubtitleTrack]
-    let onSubtitleDownloaded: (SubtitleTrack) -> Void
+    let selectedExternalSubtitleUrl: String?
+    let onExternalSubtitleSelected: (SubtitleTrack?, Double) -> Void
     let longFormVideoAirPlayEligible: Bool
     let isProxy: Bool
     let probeDurationMs: Double?
@@ -261,6 +263,7 @@ struct PlayerView: UIViewControllerRepresentable {
             title: String?,
             sender: String?,
             subtitleTracks: [SubtitleTrack],
+            selectedExternalSubtitleUrl: String?,
             longFormVideoAirPlayEligible: Bool,
             isProxy: Bool,
             probeDurationMs: Double?
@@ -334,7 +337,7 @@ struct PlayerView: UIViewControllerRepresentable {
         )
         let created = bridge.createPlayerViewController(events: events)
         if let player = created as? RigelPlayerViewController {
-            player.onSubtitleDownloaded = onSubtitleDownloaded
+            player.onExternalSubtitleSelected = onExternalSubtitleSelected
             player.onDevicesRequested = onDevices
             player.onSeekRequested = onSeek
         }
@@ -349,8 +352,7 @@ struct PlayerView: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         if let player = uiViewController as? RigelPlayerViewController {
-            player.onSeekRequested = onSeek
-            player.onSubtitleDownloaded = onSubtitleDownloaded
+            player.onExternalSubtitleSelected = onExternalSubtitleSelected
         }
         guard let bridge = PlayerBridgeFactory.shared.create() else { return }
         let loaded = context.coordinator.loaded
@@ -366,6 +368,7 @@ struct PlayerView: UIViewControllerRepresentable {
                 sender: sender,
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
                 subtitleTracks: subtitleTracks,
+                selectedExternalSubtitleUrl: selectedExternalSubtitleUrl,
                 durationMs: probeDurationMs.map { KotlinLong(longLong: Int64($0)) },
                 isProxy: isProxy,
                 startOffsetMs: startPositionMs
@@ -375,6 +378,7 @@ struct PlayerView: UIViewControllerRepresentable {
                 title,
                 sender,
                 subtitleTracks,
+                selectedExternalSubtitleUrl,
                 longFormVideoAirPlayEligible,
                 isProxy,
                 probeDurationMs

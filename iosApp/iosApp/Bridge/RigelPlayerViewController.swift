@@ -4,6 +4,7 @@ import AVKit
 import UIKit
 import SwiftUI
 import ComposeApp
+import Combine
 
 private final class PlayerGradientView: UIView {
     private let gradientLayer = CAGradientLayer()
@@ -24,6 +25,22 @@ private final class PlayerGradientView: UIView {
     }
 }
 
+private final class SubtitleInsetLabel: UILabel {
+    var textInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+
+    override func drawText(in rect: CGRect) {
+        super.drawText(in: rect.inset(by: textInsets))
+    }
+
+    override var intrinsicContentSize: CGSize {
+        let size = super.intrinsicContentSize
+        return CGSize(
+            width: size.width + textInsets.left + textInsets.right,
+            height: size.height + textInsets.top + textInsets.bottom
+        )
+    }
+}
+
 /// AVPlayer host with native title, route, audio/subtitle, and transport controls.
 /// The overlay chrome follows normal player behavior: it appears on interaction
 /// and fades while playback runs. HLS proxy playlists use Rigel's own
@@ -41,9 +58,9 @@ final class RigelPlayerViewController: UIViewController {
     /// Called with an absolute media position for remote seek forwarding or
     /// proxy session restart.
     var onSeekRequested: ((Double) -> Void)?
-    /// Called when a subtitle selected from OpenSubtitles is ready to retain
-    /// in Kotlin playback state.
-    var onSubtitleDownloaded: ((SubtitleTrack) -> Void)?
+    /// Called when the active subtitle selection changes. A non-nil track is
+    /// rebuilt through the Kotlin-owned proxy so an AirPlay receiver can fetch it.
+    var onExternalSubtitleSelected: ((SubtitleTrack?, Double) -> Void)?
 
     private var player: AVPlayer?
     /// Raw URL of the item currently installed in AVPlayer. Delayed failures
@@ -93,12 +110,13 @@ final class RigelPlayerViewController: UIViewController {
     private let skipForwardButton = UIButton(type: .system)
     private let elapsedLabel = UILabel()
     private let durationLabel = UILabel()
-    private let subtitleLabel = UILabel()
+    private let subtitleLabel = SubtitleInsetLabel()
     private var audioGroup: AVMediaSelectionGroup?
     private var subtitleGroup: AVMediaSelectionGroup?
     private var trackGroupsLoadedFor: AVPlayerItem?
     private struct SidecarSubtitle {
         let order: Int
+        let track: SubtitleTrack
         let name: String
         let language: String?
         let cues: [SubtitleParser.Cue]
@@ -113,9 +131,17 @@ final class RigelPlayerViewController: UIViewController {
     private var loadedTitle: String?
     private var startOffsetSeconds: Double = 0
     private var isProxyPlayback = false
+    private var selectedExternalSubtitleUrl: String?
+    private var selectedExternalSubtitleOption: AVMediaSelectionOption?
+    private var proxyExternalSubtitleUrl: String?
+    private var externalPlaybackObservation: NSKeyValueObservation?
     private var pendingScrubValue: Float?
     private var scrubGeneration = 0
-
+    private var subtitleCustomizationModel: SubtitleCustomizationModel?
+    private var subtitleCustomizationHost: UIViewController?
+    private var appliedSubtitleAppearance: SubtitleAppearance?
+    private var renderedSubtitleText: String?
+    private var renderedSubtitleAppearance: SubtitleAppearance?
     private var customPlaybackControls = false
     private var controlsHideTimer: Timer?
     private var controlsVisible = true
@@ -143,19 +169,16 @@ final class RigelPlayerViewController: UIViewController {
         setupBottomBar()
         // Sidecar subtitles are an in-app overlay and are not captured by
         // AVPlayerViewController's PiP or AirPlay handoff.
-        subtitleLabel.font = .preferredFont(forTextStyle: .title3)
-        subtitleLabel.textColor = .white
         subtitleLabel.numberOfLines = 0
         subtitleLabel.textAlignment = .center
-        subtitleLabel.layer.shadowColor = UIColor.black.cgColor
-        subtitleLabel.layer.shadowRadius = 3
-        subtitleLabel.layer.shadowOpacity = 1
+        subtitleLabel.accessibilityIdentifier = "player.subtitleLabel"
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
         subtitleLabel.isHidden = true
+        applySubtitleAppearance(SubtitlePreferences.appearance)
         view.addSubview(subtitleLabel)
         let bottomConstraint = subtitleLabel.bottomAnchor.constraint(
             equalTo: view.safeAreaLayoutGuide.bottomAnchor,
-            constant: -SubtitlePreferences.bottomInset
+            constant: -SubtitlePreferences.appearance.bottomInset
         )
         subtitleBottomConstraint = bottomConstraint
         NSLayoutConstraint.activate([
@@ -487,6 +510,20 @@ final class RigelPlayerViewController: UIViewController {
         }
         return url.pathExtension.lowercased() == "m3u8"
     }
+    private static let selectedSubtitleMarker = "RigelSelected__"
+
+    private static func subtitleDisplayName(for option: AVMediaSelectionOption) -> String {
+        let name = option.displayName
+        guard name.hasPrefix(selectedSubtitleMarker) else { return name }
+        return String(name.dropFirst(selectedSubtitleMarker.count))
+    }
+
+    private func selectedExternalOption(in group: AVMediaSelectionGroup?) -> AVMediaSelectionOption? {
+        guard isProxyPlayback, selectedExternalSubtitleUrl != nil, let group else { return nil }
+        return group.options.first {
+            $0.displayName.hasPrefix(Self.selectedSubtitleMarker)
+        } ?? group.options.first
+    }
 
     @objc private func audioTapped() {
         showControls()
@@ -525,7 +562,7 @@ final class RigelPlayerViewController: UIViewController {
     @objc private func subtitlesTapped() {
         showControls()
         var options: [TrackPickerOption] = []
-        let nativeOptions = subtitleGroup?.options ?? []
+        let nativeOptions = visibleNativeSubtitleOptions()
         let selectedNative = subtitleGroup.flatMap {
             player?.currentItem?.currentMediaSelection.selectedMediaOption(in: $0)
         }
@@ -539,11 +576,13 @@ final class RigelPlayerViewController: UIViewController {
                     select: { [weak self] in
                         guard let self else { return }
                         self.activeSidecarSubtitleIndex = nil
+                        self.selectedExternalSubtitleUrl = nil
                         if let group = self.subtitleGroup {
                             self.selectMediaOption(nil, in: group)
                         }
                         self.updateSidecarSubtitle()
                         self.updateTrackButtons()
+                        self.onExternalSubtitleSelected?(nil, self.mediaSeconds)
                     }
                 )
             )
@@ -552,16 +591,18 @@ final class RigelPlayerViewController: UIViewController {
             options.append(
                 TrackPickerOption(
                     id: "subtitle-\(index)",
-                    title: option.displayName,
+                    title: Self.subtitleDisplayName(for: option),
                     isSelected: activeSidecarSubtitleIndex == nil && selectedNative === option,
                     select: { [weak self] in
                         guard let self,
                               let currentGroup = self.subtitleGroup,
-                              currentGroup.options.indices.contains(index) else { return }
+                              currentGroup.options.contains(where: { $0 === option }) else { return }
                         self.activeSidecarSubtitleIndex = nil
-                        self.selectMediaOption(currentGroup.options[index], in: currentGroup)
+                        self.selectedExternalSubtitleUrl = nil
+                        self.selectMediaOption(option, in: currentGroup)
                         self.updateSidecarSubtitle()
                         self.updateTrackButtons()
+                        self.onExternalSubtitleSelected?(nil, self.mediaSeconds)
                     }
                 )
             )
@@ -580,15 +621,20 @@ final class RigelPlayerViewController: UIViewController {
                             return
                         }
                         self.activeSidecarSubtitleIndex = currentIndex
+                        self.selectedExternalSubtitleUrl = sidecar.track.url
                         if let group = self.subtitleGroup {
                             self.selectMediaOption(nil, in: group)
                         }
                         self.updateSidecarSubtitle()
                         self.updateTrackButtons()
+                        self.onExternalSubtitleSelected?(sidecar.track, self.mediaSeconds)
                     }
                 )
             )
         }
+        let customizeEnabled = activeSidecarSubtitleIndex.map {
+            sidecarSubtitles.indices.contains($0)
+        } ?? false
         presentTrackPicker(
             title: "Subtitles",
             options: options,
@@ -597,8 +643,40 @@ final class RigelPlayerViewController: UIViewController {
                 : "No subtitle tracks are available.",
             moreAction: { [weak self] in
                 self?.presentOpenSubtitlesSearch()
+            },
+            customizeAction: { [weak self] in
+                self?.presentSubtitleCustomization()
+            },
+            customizeEnabled: customizeEnabled
+        )
+    }
+
+    private func presentSubtitleCustomization() {
+        guard let index = activeSidecarSubtitleIndex,
+              sidecarSubtitles.indices.contains(index) else {
+            return
+        }
+        let model = SubtitleCustomizationModel(
+            onChange: { [weak self] appearance, _ in
+                guard let self else { return }
+                self.applySubtitleAppearance(appearance)
+                self.subtitleBottomConstraint?.constant = -appearance.bottomInset
+                self.updateSidecarSubtitle()
             }
         )
+        model.isExternalPlaybackActive = player?.isExternalPlaybackActive ?? false
+        subtitleCustomizationModel = model
+        let sheet = UIHostingController(
+            rootView: SubtitleCustomizationSheet(model: model)
+        )
+        sheet.modalPresentationStyle = .pageSheet
+        sheet.view.backgroundColor = .systemBackground
+        if let presentation = sheet.sheetPresentationController {
+            presentation.detents = [.medium(), .large()]
+            presentation.prefersGrabberVisible = true
+        }
+        subtitleCustomizationHost = sheet
+        present(sheet, animated: true)
     }
 
     /// Native track pickers own the selection after a user makes a choice.
@@ -617,14 +695,18 @@ final class RigelPlayerViewController: UIViewController {
         title: String,
         options: [TrackPickerOption],
         emptyMessage: String,
-        moreAction: (() -> Void)? = nil
+        moreAction: (() -> Void)? = nil,
+        customizeAction: (() -> Void)? = nil,
+        customizeEnabled: Bool = true
     ) {
         let picker = UIHostingController(
             rootView: TrackPickerSheet(
                 title: title,
                 options: options,
                 emptyMessage: emptyMessage,
-                moreAction: moreAction
+                moreAction: moreAction,
+                customizeAction: customizeAction,
+                customizeEnabled: customizeEnabled
             )
         )
         picker.modalPresentationStyle = .pageSheet
@@ -635,6 +717,7 @@ final class RigelPlayerViewController: UIViewController {
         }
         present(picker, animated: true)
     }
+
 
     private func presentOpenSubtitlesSearch() {
         guard !disposed else { return }
@@ -654,14 +737,15 @@ final class RigelPlayerViewController: UIViewController {
                     guard let self, !self.disposed else { return }
                     self.loadSidecarSubtitles([track]) { [weak self] index in
                         guard let self else { return }
+                        self.selectedExternalSubtitleUrl = track.url
                         self.activeSidecarSubtitleIndex = index
                         if let group = self.subtitleGroup {
                             self.selectMediaOption(nil, in: group)
                         }
                         self.updateSidecarSubtitle()
                         self.updateTrackButtons()
+                        self.onExternalSubtitleSelected?(track, self.mediaSeconds)
                     }
-                    self.onSubtitleDownloaded?(track)
                 }
             )
         )
@@ -692,15 +776,62 @@ final class RigelPlayerViewController: UIViewController {
                 guard !self.disposed, self.player?.currentItem === item else { return }
                 self.audioGroup = audio
                 self.subtitleGroup = subtitles
+                self.selectedExternalSubtitleOption = self.selectedExternalOption(in: subtitles)
                 self.trackGroupsLoadedFor = item
+                self.reconcileSubtitlePresentation(
+                    externalPlaybackActive: self.player?.isExternalPlaybackActive ?? false
+                )
                 self.updateTrackButtons()
             }
         }
     }
 
+    private var selectedSidecarIsLoaded: Bool {
+        guard let selectedExternalSubtitleUrl else { return false }
+        return sidecarSubtitles.contains { $0.track.url == selectedExternalSubtitleUrl }
+    }
+
+    private var proxySidecarIsLoaded: Bool {
+        guard let proxyExternalSubtitleUrl else { return false }
+        return sidecarSubtitles.contains { $0.track.url == proxyExternalSubtitleUrl }
+    }
+
+    private func visibleNativeSubtitleOptions() -> [AVMediaSelectionOption] {
+        guard let subtitleGroup else { return [] }
+        guard proxySidecarIsLoaded, let selectedExternalSubtitleOption else {
+            return subtitleGroup.options
+        }
+        return subtitleGroup.options.filter { $0 !== selectedExternalSubtitleOption }
+    }
+
+    func reconcileSubtitlePresentation(externalPlaybackActive: Bool) {
+        subtitleCustomizationModel?.isExternalPlaybackActive = externalPlaybackActive
+        guard selectedExternalSubtitleUrl != nil,
+              let subtitleGroup,
+              let selectedExternalSubtitleOption else {
+            if externalPlaybackActive {
+                renderSubtitleText(nil)
+                subtitleLabel.isHidden = true
+            }
+            return
+        }
+        if externalPlaybackActive {
+            selectMediaOption(selectedExternalSubtitleOption, in: subtitleGroup)
+            renderSubtitleText(nil)
+            subtitleLabel.isHidden = true
+        } else if selectedSidecarIsLoaded {
+            selectMediaOption(nil, in: subtitleGroup)
+            updateSidecarSubtitle()
+        } else {
+            renderSubtitleText(nil)
+            subtitleLabel.isHidden = true
+        }
+        updateTrackButtons()
+    }
+
     private func updateTrackButtons() {
         let audioCount = audioGroup?.options.count ?? 0
-        let subtitleCount = (subtitleGroup?.options.count ?? 0) + sidecarSubtitles.count
+        let subtitleCount = visibleNativeSubtitleOptions().count + sidecarSubtitles.count
         audioButton.accessibilityValue = audioCount == 0
             ? "No alternate audio tracks"
             : "\(audioCount) audio track" + (audioCount == 1 ? "" : "s")
@@ -708,6 +839,95 @@ final class RigelPlayerViewController: UIViewController {
             ? "No subtitle tracks"
             : "\(subtitleCount) subtitle track" + (subtitleCount == 1 ? "" : "s")
     }
+    private func applySubtitleAppearance(_ appearance: SubtitleAppearance) {
+        let weight: UIFont.Weight = appearance.bold ? .bold : .regular
+        let baseFont = UIFont.systemFont(ofSize: appearance.fontSizePoints, weight: weight)
+        subtitleLabel.font = UIFontMetrics(forTextStyle: .title3).scaledFont(for: baseFont)
+        subtitleLabel.adjustsFontForContentSizeCategory = true
+        subtitleLabel.backgroundColor = appearance.backgroundColor.color.withAlphaComponent(
+            appearance.backgroundOpacity
+        )
+        subtitleLabel.layer.cornerRadius = 6
+        subtitleLabel.layer.masksToBounds = true
+        appliedSubtitleAppearance = appearance
+        renderedSubtitleAppearance = nil
+        renderSubtitleText(renderedSubtitleText)
+    }
+
+    private func renderSubtitleText(_ text: String?) {
+        guard let appearance = appliedSubtitleAppearance else {
+            subtitleLabel.attributedText = text.map { NSAttributedString(string: $0) }
+            renderedSubtitleText = text
+            renderedSubtitleAppearance = nil
+            return
+        }
+        guard renderedSubtitleText != text || renderedSubtitleAppearance != appearance else {
+            return
+        }
+        renderedSubtitleText = text
+        renderedSubtitleAppearance = appearance
+        guard let text else {
+            subtitleLabel.attributedText = nil
+            return
+        }
+        let foreground = appearance.textColor.color.withAlphaComponent(appearance.textOpacity)
+        let outline = appearance.outlineEnabled ? appearance.outlineColor.color : .clear
+        subtitleLabel.attributedText = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: subtitleLabel.font as Any,
+                .foregroundColor: foreground,
+                .strokeColor: outline,
+                .strokeWidth: appearance.outlineEnabled ? -3 : 0,
+            ]
+        )
+    }
+
+    func installLoadedSidecar(
+        track: SubtitleTrack,
+        order: Int,
+        cues: [SubtitleParser.Cue],
+        onLoaded: @escaping (Int) -> Void = { _ in }
+    ) {
+        guard !cues.isEmpty, let url = URL(string: track.url) else { return }
+        let title = track.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = title?.isEmpty == false
+            ? title!
+            : Self.sidecarName(for: url, fallback: "Subtitles \(order + 1)")
+        let language = track.language?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let activeOrder = activeSidecarSubtitleIndex.flatMap { index in
+            sidecarSubtitles.indices.contains(index)
+                ? sidecarSubtitles[index].order
+                : nil
+        }
+        sidecarSubtitles.append(
+            SidecarSubtitle(
+                order: order,
+                track: track,
+                name: name,
+                language: language?.isEmpty == false ? language : nil,
+                cues: cues
+            )
+        )
+        sidecarSubtitles.sort { $0.order < $1.order }
+        guard let sidecarIndex = sidecarSubtitles.firstIndex(where: { $0.order == order }) else {
+            return
+        }
+        if selectedExternalSubtitleUrl == track.url {
+            activeSidecarSubtitleIndex = sidecarIndex
+        } else if let activeOrder {
+            activeSidecarSubtitleIndex = sidecarSubtitles.firstIndex {
+                $0.order == activeOrder
+            }
+        }
+        onLoaded(sidecarIndex)
+        updateTrackButtons()
+        updateSidecarSubtitle()
+        reconcileSubtitlePresentation(
+            externalPlaybackActive: player?.isExternalPlaybackActive ?? false
+        )
+    }
+
     private func loadSidecarSubtitles(
         _ tracks: [SubtitleTrack],
         onLoaded: @escaping (Int) -> Void = { _ in }
@@ -717,7 +937,7 @@ final class RigelPlayerViewController: UIViewController {
             NSLog("[RigelPlayer] ignoring %ld sidecar subtitle URLs over the limit", tracks.count - limitedTracks.count)
         }
         let generation = sidecarGeneration
-        for (index, track) in limitedTracks.enumerated() {
+        for track in limitedTracks {
             let sidecarOrder = nextSidecarOrder
             nextSidecarOrder += 1
             let rawURL = track.url
@@ -757,37 +977,14 @@ final class RigelPlayerViewController: UIViewController {
                     NSLog("[RigelPlayer] sidecar %@ failed: no valid cues", rawURL)
                     return
                 }
-                let title = track.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let name = title?.isEmpty == false
-                    ? title!
-                    : Self.sidecarName(for: url, fallback: "Subtitles \(index + 1)")
-                let language = track.language?.trimmingCharacters(in: .whitespacesAndNewlines)
                 DispatchQueue.main.async {
                     guard self.sidecarGeneration == generation, !self.disposed else { return }
-                    let activeOrder = self.activeSidecarSubtitleIndex.flatMap { index in
-                        self.sidecarSubtitles.indices.contains(index)
-                            ? self.sidecarSubtitles[index].order
-                            : nil
-                    }
-                    self.sidecarSubtitles.append(
-                        SidecarSubtitle(
-                            order: sidecarOrder,
-                            name: name,
-                            language: language?.isEmpty == false ? language : nil,
-                            cues: cues,
-                        )
+                    self.installLoadedSidecar(
+                        track: track,
+                        order: sidecarOrder,
+                        cues: cues,
+                        onLoaded: onLoaded
                     )
-                    self.sidecarSubtitles.sort { $0.order < $1.order }
-                    if let activeOrder {
-                        self.activeSidecarSubtitleIndex = self.sidecarSubtitles.firstIndex {
-                            $0.order == activeOrder
-                        }
-                    }
-                    guard let sidecarIndex = self.sidecarSubtitles.firstIndex(where: { $0.order == sidecarOrder }) else {
-                        return
-                    }
-                    onLoaded(sidecarIndex)
-                    self.updateTrackButtons()
                     NSLog("[RigelPlayer] sidecar %@ ok", rawURL)
                 }
             }.resume()
@@ -801,23 +998,32 @@ final class RigelPlayerViewController: UIViewController {
     }
 
     private func updateSidecarSubtitle() {
-        guard let index = activeSidecarSubtitleIndex,
-              sidecarSubtitles.indices.contains(index) else {
-            subtitleLabel.text = nil
+        if player?.isExternalPlaybackActive == true {
+            renderSubtitleText(nil)
             subtitleLabel.isHidden = true
             return
         }
-        subtitleBottomConstraint?.constant = -SubtitlePreferences.bottomInset
+        guard let index = activeSidecarSubtitleIndex,
+              sidecarSubtitles.indices.contains(index) else {
+            renderSubtitleText(nil)
+            subtitleLabel.isHidden = true
+            return
+        }
+        let appearance = SubtitlePreferences.appearance
+        if appliedSubtitleAppearance != appearance {
+            applySubtitleAppearance(appearance)
+        }
+        subtitleBottomConstraint?.constant = -appearance.bottomInset
         let seconds = mediaSeconds - SubtitlePreferences.delay
         guard seconds.isFinite else {
-            subtitleLabel.text = nil
+            renderSubtitleText(nil)
             subtitleLabel.isHidden = true
             return
         }
         let cue = sidecarSubtitles[index].cues.first {
             $0.start <= seconds && seconds < $0.end
         }
-        subtitleLabel.text = cue?.text
+        renderSubtitleText(cue?.text)
         subtitleLabel.isHidden = cue == nil
     }
 
@@ -827,6 +1033,7 @@ final class RigelPlayerViewController: UIViewController {
         sender: String?,
         longFormVideoAirPlayEligible: Bool,
         subtitleTracks: [SubtitleTrack] = [],
+        selectedExternalSubtitleUrl: String? = nil,
         durationSeconds: Double? = nil,
         isProxy: Bool = false,
         startOffsetSeconds: Double = 0
@@ -866,8 +1073,11 @@ final class RigelPlayerViewController: UIViewController {
         knownDurationSeconds = durationSeconds
         self.startOffsetSeconds = max(0, startOffsetSeconds.isFinite ? startOffsetSeconds : 0)
         isProxyPlayback = isProxy
-        pendingScrubValue = nil
+        self.selectedExternalSubtitleUrl = selectedExternalSubtitleUrl
+        proxyExternalSubtitleUrl = isProxy ? selectedExternalSubtitleUrl : nil
+        applySubtitleAppearance(SubtitlePreferences.appearance)
         customPlaybackControls = Self.isHLSURL(url)
+        pendingScrubValue = nil
         bottomBar.isHidden = !customPlaybackControls
         progressSlider.isHidden = true
         progressSlider.value = 0
@@ -886,6 +1096,19 @@ final class RigelPlayerViewController: UIViewController {
         let p = AVPlayer(playerItem: item)
         p.allowsExternalPlayback = true
         player = p
+        externalPlaybackObservation = p.observe(
+            \.isExternalPlaybackActive,
+            options: [.initial, .new]
+        ) { [weak self, weak p] observedPlayer, _ in
+            let active = observedPlayer.isExternalPlaybackActive
+            DispatchQueue.main.async {
+                guard let self,
+                      let p,
+                      self.player === p,
+                      !self.disposed else { return }
+                self.reconcileSubtitlePresentation(externalPlaybackActive: active)
+            }
+        }
         if !customPlaybackControls {
             timeJumpObserver = NotificationCenter.default.addObserver(
                 forName: NSNotification.Name.AVPlayerItemTimeJumped,
@@ -896,7 +1119,7 @@ final class RigelPlayerViewController: UIViewController {
                 self.onSeekRequested?(self.mediaSeconds)
             }
         }
-        if !isProxyPlayback {
+        if !subtitleTracks.isEmpty {
             loadSidecarSubtitles(subtitleTracks)
         }
 
@@ -1070,6 +1293,11 @@ final class RigelPlayerViewController: UIViewController {
     }
 
     private func tearDownPlayer() {
+        externalPlaybackObservation?.invalidate()
+        externalPlaybackObservation = nil
+        subtitleCustomizationHost?.dismiss(animated: false)
+        subtitleCustomizationHost = nil
+        subtitleCustomizationModel = nil
         playerVC?.willMove(toParent: nil)
         playerVC?.view.removeFromSuperview()
         playerVC?.removeFromParent()
@@ -1094,6 +1322,9 @@ final class RigelPlayerViewController: UIViewController {
         knownDurationSeconds = nil
         startOffsetSeconds = 0
         isProxyPlayback = false
+        selectedExternalSubtitleUrl = nil
+        selectedExternalSubtitleOption = nil
+        proxyExternalSubtitleUrl = nil
         pendingScrubValue = nil
         scrubGeneration &+= 1
         bottomBar.isHidden = true
@@ -1104,6 +1335,9 @@ final class RigelPlayerViewController: UIViewController {
         sidecarSubtitles.removeAll()
         nextSidecarOrder = 0
         activeSidecarSubtitleIndex = nil
+        renderedSubtitleText = nil
+        renderedSubtitleAppearance = nil
+        subtitleLabel.attributedText = nil
         subtitleLabel.text = nil
         subtitleLabel.isHidden = true
         audioButton.accessibilityValue = nil
@@ -1184,6 +1418,8 @@ private struct TrackPickerSheet: View {
     let options: [TrackPickerOption]
     let emptyMessage: String
     let moreAction: (() -> Void)?
+    let customizeAction: (() -> Void)?
+    let customizeEnabled: Bool
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -1196,13 +1432,7 @@ private struct TrackPickerSheet: View {
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 24)
-                        if let moreAction {
-                            Button("Get More from OpenSubtitles") {
-                                dismiss()
-                                DispatchQueue.main.async { moreAction() }
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
+                        actionButtons
                         Spacer()
                     }
                     .frame(maxWidth: .infinity)
@@ -1226,13 +1456,8 @@ private struct TrackPickerSheet: View {
                             .buttonStyle(.plain)
                             .accessibilityValue(option.isSelected ? "Selected" : "")
                         }
-                        if let moreAction {
-                            Section {
-                                Button("Get More from OpenSubtitles") {
-                                    dismiss()
-                                    DispatchQueue.main.async { moreAction() }
-                                }
-                            }
+                        Section {
+                            actionButtons
                         }
                     }
                 }
@@ -1248,8 +1473,316 @@ private struct TrackPickerSheet: View {
             }
         }
     }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        if let moreAction {
+            Button("Get More from OpenSubtitles") {
+                dismiss()
+                DispatchQueue.main.async { moreAction() }
+            }
+        }
+        if let customizeAction {
+            Button("Customize Subtitles") {
+                dismiss()
+                DispatchQueue.main.async { customizeAction() }
+            }
+            .disabled(!customizeEnabled)
+            .accessibilityIdentifier("player.customizeSubtitles")
+            .accessibilityHint(
+                customizeEnabled
+                    ? "Adjust the selected sidecar subtitle"
+                    : "Select a downloaded or sidecar subtitle to customize"
+            )
+        }
+    }
 }
 
+}
+
+@MainActor
+final class SubtitleCustomizationModel: ObservableObject {
+    @Published private(set) var appearance: SubtitleAppearance
+    @Published private(set) var delay: TimeInterval
+    @Published var isExternalPlaybackActive = false
+
+    private let onChange: (SubtitleAppearance, TimeInterval) -> Void
+
+    init(onChange: @escaping (SubtitleAppearance, TimeInterval) -> Void) {
+        appearance = SubtitlePreferences.appearance
+        delay = SubtitlePreferences.delay
+        self.onChange = onChange
+    }
+
+    func updateAppearance(_ update: (inout SubtitleAppearance) -> Void) {
+        var next = appearance
+        update(&next)
+        SubtitlePreferences.appearance = next
+        appearance = SubtitlePreferences.appearance
+        onChange(appearance, delay)
+    }
+
+    func setDelay(_ value: TimeInterval) {
+        SubtitlePreferences.delay = min(max(value, -10), 10)
+        delay = SubtitlePreferences.delay
+        onChange(appearance, delay)
+    }
+
+    func adjustFontSize(by delta: CGFloat) {
+        updateAppearance {
+            $0.fontSizePoints = min(max(($0.fontSizePoints + delta).rounded(), 12), 40)
+            $0.fontSizePoints = ($0.fontSizePoints / 2).rounded() * 2
+        }
+    }
+
+    func reset() {
+        SubtitlePreferences.reset()
+        appearance = SubtitlePreferences.appearance
+        delay = SubtitlePreferences.delay
+        onChange(appearance, delay)
+    }
+}
+
+private struct SubtitleCustomizationSheet: View {
+    @ObservedObject var model: SubtitleCustomizationModel
+    @Environment(\.dismiss) private var dismiss
+
+    private let textColors: [SubtitleColorPreset] = [
+        .white, .gold, .cyan, .red, .brightGreen, .purple, .orange, .blue, .black
+    ]
+    private let backgroundColors: [SubtitleColorPreset] = [
+        .transparent, .black, .navy, .darkRed, .darkGreen, .darkBlue
+    ]
+    private let outlineColors: [SubtitleColorPreset] = [.black, .white, .cyan, .red]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Timing") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Subtitle delay")
+                            Spacer()
+                            Text(String(format: "%+.1f s", model.delay))
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { model.delay },
+                                set: { model.setDelay($0) }
+                            ),
+                            in: -10...10,
+                            step: 0.1
+                        )
+                        .accessibilityIdentifier("player.subtitle.delay")
+                        .accessibilityLabel("Subtitle delay")
+                        .accessibilityValue(String(format: "%+.1f seconds", model.delay))
+                        Text("Positive values show subtitles later.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Appearance") {
+                    HStack {
+                        Text("Font size")
+                        Spacer()
+                        Button {
+                            model.adjustFontSize(by: -2)
+                        } label: {
+                            Image(systemName: "minus")
+                        }
+                        .accessibilityLabel("Decrease subtitle font size")
+                        Text("\(Int(model.appearance.fontSizePoints)) pt")
+                            .frame(minWidth: 58)
+                            .accessibilityLabel("Subtitle font size")
+                            .accessibilityValue("\(Int(model.appearance.fontSizePoints)) points")
+                        Button {
+                            model.adjustFontSize(by: 2)
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .accessibilityLabel("Increase subtitle font size")
+                    }
+                    .accessibilityIdentifier("player.subtitle.fontSize")
+
+                    Toggle(
+                        "Bold",
+                        isOn: Binding(
+                            get: { model.appearance.bold },
+                            set: { value in model.updateAppearance { $0.bold = value } }
+                        )
+                    )
+                    .accessibilityIdentifier("player.subtitle.bold")
+
+                    colorSection(
+                        title: "Text color",
+                        presets: textColors,
+                        selected: model.appearance.textColor,
+                        identifier: "player.subtitle.textColor"
+                    ) { preset in
+                        model.updateAppearance { $0.textColor = preset }
+                    }
+
+                    opacitySlider(
+                        title: "Text opacity",
+                        value: Binding(
+                            get: { Double(model.appearance.textOpacity) },
+                            set: { value in model.updateAppearance { $0.textOpacity = CGFloat(value) } }
+                        ),
+                        identifier: "player.subtitle.textOpacity"
+                    )
+
+                    colorSection(
+                        title: "Background color",
+                        presets: backgroundColors,
+                        selected: model.appearance.backgroundColor,
+                        identifier: "player.subtitle.backgroundColor"
+                    ) { preset in
+                        model.updateAppearance { $0.backgroundColor = preset }
+                    }
+
+                    opacitySlider(
+                        title: "Background opacity",
+                        value: Binding(
+                            get: { Double(model.appearance.backgroundOpacity) },
+                            set: { value in model.updateAppearance { $0.backgroundOpacity = CGFloat(value) } }
+                        ),
+                        identifier: "player.subtitle.backgroundOpacity"
+                    )
+
+                    Toggle(
+                        "Outline",
+                        isOn: Binding(
+                            get: { model.appearance.outlineEnabled },
+                            set: { value in model.updateAppearance { $0.outlineEnabled = value } }
+                        )
+                    )
+                    .accessibilityIdentifier("player.subtitle.outline")
+
+                    colorSection(
+                        title: "Outline color",
+                        presets: outlineColors,
+                        selected: model.appearance.outlineColor,
+                        identifier: "player.subtitle.outlineColor",
+                        enabled: model.appearance.outlineEnabled
+                    ) { preset in
+                        model.updateAppearance {
+                            $0.outlineEnabled = true
+                            $0.outlineColor = preset
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Vertical position")
+                            Spacer()
+                            Text("\(Int(model.appearance.bottomInset)) pt")
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(
+                            value: Binding(
+                                get: { Double(model.appearance.bottomInset) },
+                                set: { value in model.updateAppearance { $0.bottomInset = CGFloat(value) } }
+                            ),
+                            in: 40...300,
+                            step: 10
+                        )
+                        .accessibilityIdentifier("player.subtitle.bottomInset")
+                        .accessibilityLabel("Subtitle vertical position")
+                        .accessibilityValue("\(Int(model.appearance.bottomInset)) points")
+                    }
+                }
+
+                if model.isExternalPlaybackActive {
+                    Section {
+                        Label(
+                            "AirPlay devices control final caption appearance.",
+                            systemImage: "airplayvideo"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section {
+                    Button("Reset Defaults") {
+                        model.reset()
+                    }
+                    .accessibilityIdentifier("player.subtitle.reset")
+                }
+            }
+            .navigationTitle("Customize Subtitles")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func opacitySlider(
+        title: String,
+        value: Binding<Double>,
+        identifier: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text("\(Int((value.wrappedValue * 100).rounded()))%")
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: value, in: 0...1, step: 0.1)
+                .accessibilityIdentifier(identifier)
+                .accessibilityLabel(title)
+                .accessibilityValue("\(Int((value.wrappedValue * 100).rounded())) percent")
+        }
+    }
+
+    @ViewBuilder
+    private func colorSection(
+        title: String,
+        presets: [SubtitleColorPreset],
+        selected: SubtitleColorPreset,
+        identifier: String,
+        enabled: Bool = true,
+        onSelect: @escaping (SubtitleColorPreset) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(presets, id: \.self) { preset in
+                        Button {
+                            onSelect(preset)
+                        } label: {
+                            Circle()
+                                .fill(Color(uiColor: preset.color))
+                                .frame(width: 30, height: 30)
+                                .overlay {
+                                    Circle()
+                                        .stroke(
+                                            preset == selected ? Color.primary : Color.secondary.opacity(0.45),
+                                            lineWidth: preset == selected ? 3 : 1
+                                        )
+                                }
+                        }
+                        .disabled(!enabled)
+                        .accessibilityLabel(preset.displayName)
+                        .accessibilityValue(preset == selected ? "Selected" : "")
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .accessibilityIdentifier(identifier)
+        }
+        .opacity(enabled ? 1 : 0.45)
+    }
 }
 
 final class RigelPlayerBridge: NSObject, NativePlayerBridge {
@@ -1267,6 +1800,7 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         sender: String?,
         longFormVideoAirPlayEligible: Bool,
         subtitleTracks: [SubtitleTrack],
+        selectedExternalSubtitleUrl: String?,
         durationMs: KotlinLong?,
         isProxy: Bool,
         startOffsetMs: Int64
@@ -1277,6 +1811,7 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
             sender: sender,
             longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
             subtitleTracks: subtitleTracks,
+            selectedExternalSubtitleUrl: selectedExternalSubtitleUrl,
             durationSeconds: durationMs.map { $0.doubleValue / 1000.0 },
             isProxy: isProxy,
             startOffsetSeconds: Double(startOffsetMs) / 1000.0

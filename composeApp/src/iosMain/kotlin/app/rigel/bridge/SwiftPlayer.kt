@@ -30,8 +30,8 @@ object SwiftPlayer {
 
     fun stop() = RigelCore.controller.stopPlayback()
 
-    fun addSubtitleTrack(track: SubtitleTrack) =
-        RigelCore.controller.addSubtitleTrack(track)
+    fun selectExternalSubtitle(track: SubtitleTrack?, positionMs: Long) =
+        RigelCore.controller.selectExternalSubtitle(track, positionMs)
 
     fun retryWithProxy() = RigelCore.controller.retryWithProxy()
 
