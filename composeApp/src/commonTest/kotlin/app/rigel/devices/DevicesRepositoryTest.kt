@@ -5,7 +5,8 @@ import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastTarget
 import app.rigel.cast.chrome.CastWireConnection
-import app.rigel.cast.chrome.ChromeDevice
+import app.rigel.cast.ChromeDevice
+import app.rigel.cast.KodiDevice
 import app.rigel.cast.chrome.ChromecastBridge
 import app.rigel.cast.chrome.ChromecastBridgeFactory
 import app.rigel.settings.SettingsStore
@@ -277,7 +278,7 @@ class DevicesRepositoryTest {
     fun removeManualDeviceDelegatesToSettings() = kotlinx.coroutines.test.runTest {
         val settings = SettingsStore(MapSettings(mutableMapOf()))
         settings.addManualDevice("kodi|mk1|http://10.0.0.9:8080|Kodi")
-        val target = CastTarget.Kodi(app.rigel.cast.kodi.KodiDevice("mk1", "http://10.0.0.9:8080", "Kodi"))
+        val target = CastTarget.Kodi(KodiDevice("mk1", "http://10.0.0.9:8080", "Kodi"))
         repo(MockEngine { respond("", HttpStatusCode.OK) }, settings).removeManualDevice(target)
         assertTrue(settings.manualDevices().isEmpty())
     }

@@ -2,7 +2,9 @@ package app.rigel.cast.kodi
 
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
+import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.KodiDevice
 import app.rigel.cast.ReceiverAdapter
 import io.ktor.client.HttpClient
 
@@ -22,10 +24,10 @@ object KodiAdapter : ReceiverAdapter {
         url: String,
         title: String,
         client: HttpClient,
-    ): String {
+    ): CastResult {
         val device = (target as CastTarget.Kodi).device
         val ok = KodiRenderer(client).launch(device.endpoint, url)
-        return if (ok) "Sent to ${target.name}" else "Kodi rejected the URL"
+        return if (ok) CastResult.Sent("Sent to ${target.name}") else CastResult.Rejected("Kodi rejected the URL")
     }
 
     override suspend fun fromSsdp(device: SsdpDevice, client: HttpClient): CastTarget? {

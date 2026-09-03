@@ -1,5 +1,6 @@
 package app.rigel
 
+import app.rigel.cast.CastDispatcher
 import app.rigel.devices.DevicesRepository
 import app.rigel.player.PlayerController
 import app.rigel.settings.SettingsStore
@@ -21,6 +22,11 @@ object RigelCore {
     val controller: PlayerController = PlayerController(settings)
     val devices: DevicesRepository = DevicesRepository(client, settings)
     val jellyfin: JellyfinClient = JellyfinClient(client)
+
+    init {
+        // Cast learns about playback here; it never imports the player layer.
+        CastDispatcher.install(playbackPort = controller, client = client)
+    }
 }
 
 /** Platform log writer wiring — iOS actual sends Kermit output to NSLog. */

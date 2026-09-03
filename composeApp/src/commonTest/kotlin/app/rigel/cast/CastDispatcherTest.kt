@@ -7,11 +7,10 @@ import app.rigel.bridge.ProbeResult
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.SsdpDevice
 import app.rigel.bridge.TranscodeBridge
-import app.rigel.cast.dlna.DlnaDevice
-import app.rigel.cast.kodi.KodiDevice
-import app.rigel.cast.roku.RokuDevice
-import app.rigel.player.PlayerPhase
-import app.rigel.player.PlayerUiState
+import app.rigel.cast.dlna.DlnaRenderer
+import app.rigel.cast.DlnaDevice
+import app.rigel.cast.KodiDevice
+import app.rigel.cast.RokuDevice
 import app.rigel.source.jellyfin.JellyfinSession
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -54,11 +53,25 @@ private class FakeBridges(private val lan: String?) :
     override fun lanBaseUrl(): String? = lan
 }
 
+/** Records cast-active mirroring without a PlayerController. */
+private class RecordingPort : CastPlaybackPort {
+    var active = false
+    override fun setCastActive(active: Boolean) {
+        this.active = active
+    }
+
+    override fun remoteCastUrl(): String? = null
+    override fun remoteCastTitle(): String = "Stream"
+}
+
 class CastDispatcherTest {
     private val withLan = FakeBridges(lan = "http://192.168.1.5:8080")
+    private val port = RecordingPort()
+    private val defaultClient = HttpClient(MockEngine { respond("") })
 
     @BeforeTest
     fun registerBridges() {
+        CastDispatcher.install(port, defaultClient)
         CastDispatcher.clearActive()
         RigelBridgeFactory.register(withLan, withLan, withLan, withLan)
     }
@@ -66,26 +79,19 @@ class CastDispatcherTest {
     @AfterTest
     fun resetBridges() {
         CastDispatcher.clearActive()
+        CastDispatcher.install(null, null)
         RigelBridgeFactory.register(null, null, null, null)
     }
 
-    private fun playing(
-        sourceUrl: String? = "http://origin/v.mkv",
-        proxyUrl: String? = null,
-        filename: String? = null,
-    ) = PlayerUiState(
-        phase = PlayerPhase.PLAYING,
-        sourceUrl = sourceUrl,
-        filename = filename,
-        proxyUrl = proxyUrl,
-    )
-
     @Test
     fun remoteUrlIsLanProxyWhenProxySessionActive() {
-        val state = playing(proxyUrl = "http://127.0.0.1:12345/session-abc/index.m3u8")
         assertEquals(
             "http://192.168.1.5:8080/session-abc/index.m3u8",
-            CastDispatcher.remoteCastUrl(state),
+            CastDispatcher.remoteCastUrl(
+                isPlaying = true,
+                proxyUrl = "http://127.0.0.1:12345/session-abc/index.m3u8",
+                sourceUrl = "http://origin/v.mkv",
+            ),
         )
     }
 
@@ -95,35 +101,46 @@ class CastDispatcherTest {
         // the path must be re-hosted at the current LAN base without the old
         // 127.0.0.1 delimiter (which would mangle it into //host:port/…).
         RigelBridgeFactory.register(null, null, null, FakeBridges(lan = "http://10.0.0.5:8090"))
-        val state = playing(proxyUrl = "http://192.168.1.5:8080/session-abc/index.m3u8")
         assertEquals(
             "http://10.0.0.5:8090/session-abc/index.m3u8",
-            CastDispatcher.remoteCastUrl(state),
+            CastDispatcher.remoteCastUrl(
+                isPlaying = true,
+                proxyUrl = "http://192.168.1.5:8080/session-abc/index.m3u8",
+                sourceUrl = "http://origin/v.mkv",
+            ),
         )
     }
 
     @Test
     fun remoteUrlIsSourceWhenPlayingDirect() {
-        assertEquals("http://origin/v.mkv", CastDispatcher.remoteCastUrl(playing()))
+        assertEquals(
+            "http://origin/v.mkv",
+            CastDispatcher.remoteCastUrl(isPlaying = true, proxyUrl = null, sourceUrl = "http://origin/v.mkv"),
+        )
     }
 
     @Test
     fun remoteUrlNullWhenNotPlaying() {
-        assertNull(CastDispatcher.remoteCastUrl(PlayerUiState(phase = PlayerPhase.IDLE)))
+        assertNull(CastDispatcher.remoteCastUrl(isPlaying = false, proxyUrl = null, sourceUrl = "http://origin/v.mkv"))
     }
 
     @Test
     fun remoteUrlNullWhenProxyWithoutLanUrl() {
         RigelBridgeFactory.register(null, null, null, FakeBridges(lan = null))
-        val state = playing(proxyUrl = "http://127.0.0.1:12345/session-x/index.m3u8")
-        assertNull(CastDispatcher.remoteCastUrl(state))
+        assertNull(
+            CastDispatcher.remoteCastUrl(
+                isPlaying = true,
+                proxyUrl = "http://127.0.0.1:12345/session-x/index.m3u8",
+                sourceUrl = "http://origin/v.mkv",
+            ),
+        )
     }
 
     @Test
     fun titlePrefersFilenameThenUrlBasenameThenFallback() {
-        assertEquals("Movie", CastDispatcher.remoteCastTitle(playing(filename = "Movie")))
-        assertEquals("v.mkv", CastDispatcher.remoteCastTitle(playing(filename = null)))
-        assertEquals("Stream", CastDispatcher.remoteCastTitle(playing(sourceUrl = null, filename = null)))
+        assertEquals("Movie", CastDispatcher.remoteCastTitle("Movie", "http://origin/v.mkv"))
+        assertEquals("v.mkv", CastDispatcher.remoteCastTitle(null, "http://origin/v.mkv"))
+        assertEquals("Stream", CastDispatcher.remoteCastTitle(null, null))
     }
 
     @Test
@@ -147,7 +164,7 @@ class CastDispatcherTest {
     fun jellyfinSessionCastNotAvailableFromDeviceSheet() {
         val session = CastTarget.JellyfinSessionTarget(JellyfinSession("s1", "Living Room", "Jellyfin Web"))
         val result = runBlocking { CastDispatcher.cast(session, "http://x/v.mkv", "Movie") }
-        assertTrue(result.contains("library items"))
+        assertTrue(result.message.contains("library items"))
     }
 
     // --- Adapter dispatch (mock HTTP engine) ---
@@ -167,7 +184,7 @@ class CastDispatcherTest {
 
         val result = runBlocking { CastDispatcher.cast(target, lanUrl, "Movie", client) }
 
-        assertEquals("Sent to TV", result)
+        assertEquals("Sent to TV", result.message)
         assertEquals(2, engine.requestHistory.size)
         val setUri = engine.requestHistory[0]
         val play = engine.requestHistory[1]
@@ -193,7 +210,7 @@ class CastDispatcherTest {
 
         val result = runBlocking { CastDispatcher.cast(target, "http://192.168.1.5:8080/session-x/index.m3u8", "Movie", client) }
 
-        assertEquals("Sent to Kodi", result)
+        assertEquals("Sent to Kodi", result.message)
         val req = engine.requestHistory.single()
         assertEquals("http://10.0.0.7:8080/jsonrpc", req.url.toString())
         val body = (req.body as? TextContent)?.text ?: ""
@@ -214,7 +231,7 @@ class CastDispatcherTest {
 
         val result = runBlocking { CastDispatcher.cast(target, "http://x/v.mkv", "Movie", client) }
 
-        assertEquals("Kodi rejected the URL", result)
+        assertEquals("Kodi rejected the URL", result.message)
     }
     @Test
     fun successfulCastTracksActiveTargetAndDlnaSeekUsesRelativeTime() {
@@ -230,6 +247,7 @@ class CastDispatcherTest {
 
         runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
         assertEquals(target, CastDispatcher.activeTarget())
+        assertTrue(port.active, "successful cast must mirror castActive through the port")
         assertTrue(runBlocking { CastDispatcher.seekActive(30_000, 60_000, client) })
 
         val seekBody = (engine.requestHistory[2].body as? TextContent)?.text ?: ""
@@ -283,8 +301,9 @@ class CastDispatcherTest {
 
         val result = runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
 
-        assertEquals("DLNA rejected the URL", result)
+        assertEquals("DLNA rejected the URL", result.message)
         assertNull(CastDispatcher.activeTarget())
+        assertFalse(port.active)
     }
 
 
@@ -308,7 +327,7 @@ class CastDispatcherTest {
 
         val result = runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
 
-        assertEquals("DLNA rejected the URL", result)
+        assertEquals("DLNA rejected the URL", result.message)
         assertNull(CastDispatcher.activeTarget())
         assertEquals(2, engine.requestHistory.size)
     }

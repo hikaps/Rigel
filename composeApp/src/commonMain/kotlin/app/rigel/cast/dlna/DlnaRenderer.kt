@@ -1,5 +1,6 @@
 package app.rigel.cast.dlna
 
+import app.rigel.cast.DlnaDevice
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -10,14 +11,6 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.userAgent
-
-data class DlnaDevice(
-    val usn: String,
-    val location: String,
-    val friendlyName: String,
-    val controlUrl: String,
-    val eventSubUrl: String? = null,
-)
 
 /**
  * Device-description parsing (no SCRD fetch per plan): extracts friendlyName
