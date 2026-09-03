@@ -16,6 +16,8 @@ object Bridges {
 
     suspend fun ssdpSearch(searchTargets: List<String>, timeoutMs: Int): List<SsdpDevice> {
         val bridge = requireBridge("Discovery", RigelBridgeFactory.discovery)
+        // No cancel seam on DiscoveryBridge: the search runs to its
+        // timeout; late results are dropped.
         return suspendCancellableCoroutine { cont ->
             bridge.ssdpSearch(searchTargets, timeoutMs) { devices ->
                 if (cont.isActive) cont.resume(devices)
@@ -25,6 +27,8 @@ object Bridges {
 
     suspend fun probe(url: String, headers: Map<String, String>): Pair<ProbeResult?, String?> {
         val bridge = requireBridge("Probe", RigelBridgeFactory.probe)
+        // No cancel seam on ProbeBridge: the probe runs to completion;
+        // late results are dropped.
         return suspendCancellableCoroutine { cont ->
             bridge.probe(url, headers) { result, error ->
                 if (cont.isActive) cont.resume(result to error)
@@ -55,6 +59,10 @@ object Bridges {
                 },
                 onError = onError,
             )
+            // Stop the session if the waiter goes away first.
+            cont.invokeOnCancellation {
+                bridge.stopHlsSession(sessionId)
+            }
         }
     }
 
@@ -68,6 +76,10 @@ object Bridges {
         return suspendCancellableCoroutine { cont ->
             bridge.start { port, error ->
                 if (cont.isActive) cont.resume(port to error)
+            }
+            // The start was already initiated; stop() is the only unwind.
+            cont.invokeOnCancellation {
+                bridge.stop()
             }
         }
     }

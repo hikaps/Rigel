@@ -11,8 +11,6 @@ import io.ktor.client.HttpClient
 object KodiAdapter : ReceiverAdapter {
     override val kind = "kodi"
 
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.Kodi
-
     override fun capabilities() = CastCapabilities(
         supportsSeek = true,
         supportsPosition = true,

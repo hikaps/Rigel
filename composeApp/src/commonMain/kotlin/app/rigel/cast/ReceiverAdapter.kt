@@ -16,9 +16,6 @@ interface ReceiverAdapter {
     /** SSDP search-target values this family contributes to discovery. */
     val ssdpTargets: List<String> get() = emptyList()
 
-    /** True when this adapter handles the given target variant. */
-    fun matches(target: CastTarget): Boolean
-
     fun capabilities(): CastCapabilities
 
     /** Send a URL to the remote renderer; [CastResult.message] is user-facing. */

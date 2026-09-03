@@ -74,6 +74,8 @@ class DevicesRepository(
         settings.removeManualDevice(target)
     }
     private suspend fun discoverChromecast(timeoutMs: Int): List<ChromeDevice> =
+        // No cancel seam on ChromecastBridge: the browse runs to its
+        // timeout; late results are dropped.
         suspendCancellableCoroutine { continuation ->
             val bridge = ChromecastBridgeFactory.current
             if (bridge == null) {

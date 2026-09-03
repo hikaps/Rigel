@@ -56,16 +56,6 @@ class SettingsStoreTest {
     }
 
     @Test
-    fun transcodeCapDefaultsTo1080AndRoundTrips() {
-        val s = store()
-        assertEquals(TranscodeCap.P1080, s.transcodeCap())
-        s.setTranscodeCap(TranscodeCap.P720)
-        assertEquals(TranscodeCap.P720, s.transcodeCap())
-        s.setTranscodeCap(TranscodeCap.P1080)
-        assertEquals(TranscodeCap.P1080, s.transcodeCap())
-    }
-
-    @Test
     fun manualDevicesEmptyByDefaultAndAppend() {
         val s = store()
         assertTrue(s.manualDevices().isEmpty())

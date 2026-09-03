@@ -12,8 +12,6 @@ object RokuAdapter : ReceiverAdapter {
 
     override val ssdpTargets = listOf("roku:ecp")
 
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.Roku
-
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
         supportsPosition = false,
