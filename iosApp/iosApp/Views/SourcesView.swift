@@ -31,7 +31,6 @@ struct SourcesView: View {
     @State private var sessionGeneration = 0
     @State private var playGeneration = 0
 
-
     private var settings: SettingsStore { RigelCore.shared.settings }
     private var jellyfin: JellyfinClient { RigelCore.shared.jellyfin }
     private var connected: Bool { !settings.jellyfinToken().isEmpty }
@@ -523,24 +522,6 @@ struct SourcesView: View {
                 self.noticeIsError = ok?.boolValue != true
             }
         }
-    }
-}
-
-/// Classifies completion-handler errors from the annotated Kotlin/Native
-/// bridge. Kotlin exceptions surface as NSError (domain "KotlinException")
-/// with the exported KotlinThrowable in userInfo["KotlinException"]; that
-/// throwable does not conform to Swift Error, so cancellation is identified
-/// by asking Kotlin.
-enum JellyfinCancellation {
-    static func isCancellation(_ error: Error) -> Bool {
-        if error is CancellationError { return true }
-        let ns = error as NSError
-        if ns.domain.contains("CancellationException") { return true }
-        let throwable = ns.kotlinException ?? ns.userInfo["KotlinException"]
-        guard let kotlinThrowable = throwable as? KotlinThrowable else {
-            return false
-        }
-        return JellyfinInterop.shared.isCancellation(throwable: kotlinThrowable)
     }
 }
 
