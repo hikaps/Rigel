@@ -6,41 +6,6 @@ import SwiftUI
 import ComposeApp
 import Combine
 
-private final class PlayerGradientView: UIView {
-    private let gradientLayer = CAGradientLayer()
-
-    init(colors: [UIColor]) {
-        super.init(frame: .zero)
-        gradientLayer.colors = colors.map(\.cgColor)
-        layer.addSublayer(gradientLayer)
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        gradientLayer.frame = bounds
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is not supported")
-    }
-}
-
-private final class SubtitleInsetLabel: UILabel {
-    var textInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
-
-    override func drawText(in rect: CGRect) {
-        super.drawText(in: rect.inset(by: textInsets))
-    }
-
-    override var intrinsicContentSize: CGSize {
-        let size = super.intrinsicContentSize
-        return CGSize(
-            width: size.width + textInsets.left + textInsets.right,
-            height: size.height + textInsets.top + textInsets.bottom
-        )
-    }
-}
-
 /// AVPlayer host with native title, route, audio/subtitle, and transport controls.
 /// The overlay chrome follows normal player behavior: it appears on interaction
 /// and fades while playback runs. HLS proxy playlists use Rigel's own
@@ -145,7 +110,6 @@ final class RigelPlayerViewController: UIViewController {
     private var customPlaybackControls = false
     private var controlsHideTimer: Timer?
     private var controlsVisible = true
-
 
     init(events: PlayerEvents) {
         self.events = events
@@ -413,7 +377,6 @@ final class RigelPlayerViewController: UIViewController {
         ])
     }
 
-
     private func setupControlsGesture() {
         let tap = UITapGestureRecognizer(target: self, action: #selector(controlsTapped(_:)))
         tap.cancelsTouchesInView = false
@@ -666,17 +629,9 @@ final class RigelPlayerViewController: UIViewController {
         )
         model.isExternalPlaybackActive = player?.isExternalPlaybackActive ?? false
         subtitleCustomizationModel = model
-        let sheet = UIHostingController(
-            rootView: SubtitleCustomizationSheet(model: model)
+        subtitleCustomizationHost = presentSheet(
+            SubtitleCustomizationSheet(model: model)
         )
-        sheet.modalPresentationStyle = .pageSheet
-        sheet.view.backgroundColor = .systemBackground
-        if let presentation = sheet.sheetPresentationController {
-            presentation.detents = [.medium(), .large()]
-            presentation.prefersGrabberVisible = true
-        }
-        subtitleCustomizationHost = sheet
-        present(sheet, animated: true)
     }
 
     /// Native track pickers own the selection after a user makes a choice.
@@ -699,8 +654,8 @@ final class RigelPlayerViewController: UIViewController {
         customizeAction: (() -> Void)? = nil,
         customizeEnabled: Bool = true
     ) {
-        let picker = UIHostingController(
-            rootView: TrackPickerSheet(
+        presentSheet(
+            TrackPickerSheet(
                 title: title,
                 options: options,
                 emptyMessage: emptyMessage,
@@ -709,15 +664,7 @@ final class RigelPlayerViewController: UIViewController {
                 customizeEnabled: customizeEnabled
             )
         )
-        picker.modalPresentationStyle = .pageSheet
-        picker.view.backgroundColor = .systemBackground
-        if let sheet = picker.sheetPresentationController {
-            sheet.detents = [.medium(), .large()]
-            sheet.prefersGrabberVisible = true
-        }
-        present(picker, animated: true)
     }
-
 
     private func presentOpenSubtitlesSearch() {
         guard !disposed else { return }
@@ -729,8 +676,8 @@ final class RigelPlayerViewController: UIViewController {
         } else {
             query = fallbackQuery
         }
-        let sheet = UIHostingController(
-            rootView: OpenSubtitlesSearchSheet(
+        presentSheet(
+            OpenSubtitlesSearchSheet(
                 query: query,
                 client: OpenSubtitlesClient.shared,
                 onDownloaded: { [weak self] track in
@@ -749,18 +696,21 @@ final class RigelPlayerViewController: UIViewController {
                 }
             )
         )
-        sheet.modalPresentationStyle = UIModalPresentationStyle.pageSheet
-        sheet.view.backgroundColor = UIColor.systemBackground
+    }
+
+    /// Shared page-sheet presentation: medium+large detents with a grabber.
+    @discardableResult
+    private func presentSheet(_ root: some View) -> UIHostingController<some View> {
+        let sheet = UIHostingController(rootView: root)
+        sheet.modalPresentationStyle = .pageSheet
+        sheet.view.backgroundColor = .systemBackground
         if let presentation = sheet.sheetPresentationController {
-            presentation.detents = [
-                UISheetPresentationController.Detent.medium(),
-                UISheetPresentationController.Detent.large(),
-            ]
+            presentation.detents = [.medium(), .large()]
             presentation.prefersGrabberVisible = true
         }
         present(sheet, animated: true)
+        return sheet
     }
-
 
     private func loadTrackGroups(for item: AVPlayerItem) {
         guard trackGroupsLoadedFor !== item else { return }
@@ -1165,7 +1115,6 @@ final class RigelPlayerViewController: UIViewController {
         updatePlaybackControls()
     }
 
-
     private var mediaSeconds: Double {
         let current = player?.currentTime().seconds ?? 0
         guard current.isFinite else { return startOffsetSeconds }
@@ -1281,7 +1230,6 @@ final class RigelPlayerViewController: UIViewController {
             ? String(format: "%d:%02d:%02d", hours, minutes, remaining)
             : String(format: "%02d:%02d", minutes, remaining)
     }
-
 
     func stopPlayback() {
         disposed = true
@@ -1405,437 +1353,5 @@ final class RigelPlayerViewController: UIViewController {
         default:
             break
         }
-    }
-private struct TrackPickerOption: Identifiable {
-    let id: String
-    let title: String
-    let isSelected: Bool
-    let select: () -> Void
-}
-
-private struct TrackPickerSheet: View {
-    let title: String
-    let options: [TrackPickerOption]
-    let emptyMessage: String
-    let moreAction: (() -> Void)?
-    let customizeAction: (() -> Void)?
-    let customizeEnabled: Bool
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if options.isEmpty {
-                    VStack {
-                        Spacer()
-                        Text(emptyMessage)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 24)
-                        actionButtons
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity)
-                } else {
-                    List {
-                        ForEach(options) { option in
-                            Button {
-                                option.select()
-                                dismiss()
-                            } label: {
-                                HStack {
-                                    Text(option.title)
-                                    Spacer()
-                                    if option.isSelected {
-                                        Image(systemName: "checkmark")
-                                            .foregroundStyle(.tint)
-                                            .fontWeight(.semibold)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityValue(option.isSelected ? "Selected" : "")
-                        }
-                        Section {
-                            actionButtons
-                        }
-                    }
-                }
-            }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var actionButtons: some View {
-        if let moreAction {
-            Button("Get More from OpenSubtitles") {
-                dismiss()
-                DispatchQueue.main.async { moreAction() }
-            }
-        }
-        if let customizeAction {
-            Button("Customize Subtitles") {
-                dismiss()
-                DispatchQueue.main.async { customizeAction() }
-            }
-            .disabled(!customizeEnabled)
-            .accessibilityIdentifier("player.customizeSubtitles")
-            .accessibilityHint(
-                customizeEnabled
-                    ? "Adjust the selected sidecar subtitle"
-                    : "Select a downloaded or sidecar subtitle to customize"
-            )
-        }
-    }
-}
-
-}
-
-@MainActor
-final class SubtitleCustomizationModel: ObservableObject {
-    @Published private(set) var appearance: SubtitleAppearance
-    @Published private(set) var delay: TimeInterval
-    @Published var isExternalPlaybackActive = false
-
-    private let onChange: (SubtitleAppearance, TimeInterval) -> Void
-
-    init(onChange: @escaping (SubtitleAppearance, TimeInterval) -> Void) {
-        appearance = SubtitlePreferences.appearance
-        delay = SubtitlePreferences.delay
-        self.onChange = onChange
-    }
-
-    func updateAppearance(_ update: (inout SubtitleAppearance) -> Void) {
-        var next = appearance
-        update(&next)
-        SubtitlePreferences.appearance = next
-        appearance = SubtitlePreferences.appearance
-        onChange(appearance, delay)
-    }
-
-    func setDelay(_ value: TimeInterval) {
-        SubtitlePreferences.delay = min(max(value, -10), 10)
-        delay = SubtitlePreferences.delay
-        onChange(appearance, delay)
-    }
-
-    func adjustFontSize(by delta: CGFloat) {
-        updateAppearance {
-            $0.fontSizePoints = min(max(($0.fontSizePoints + delta).rounded(), 12), 40)
-            $0.fontSizePoints = ($0.fontSizePoints / 2).rounded() * 2
-        }
-    }
-
-    func reset() {
-        SubtitlePreferences.reset()
-        appearance = SubtitlePreferences.appearance
-        delay = SubtitlePreferences.delay
-        onChange(appearance, delay)
-    }
-}
-
-private struct SubtitleCustomizationSheet: View {
-    @ObservedObject var model: SubtitleCustomizationModel
-    @Environment(\.dismiss) private var dismiss
-
-    private let textColors: [SubtitleColorPreset] = [
-        .white, .gold, .cyan, .red, .brightGreen, .purple, .orange, .blue, .black
-    ]
-    private let backgroundColors: [SubtitleColorPreset] = [
-        .transparent, .black, .navy, .darkRed, .darkGreen, .darkBlue
-    ]
-    private let outlineColors: [SubtitleColorPreset] = [.black, .white, .cyan, .red]
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Timing") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Subtitle delay")
-                            Spacer()
-                            Text(String(format: "%+.1f s", model.delay))
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(
-                            value: Binding(
-                                get: { model.delay },
-                                set: { model.setDelay($0) }
-                            ),
-                            in: -10...10,
-                            step: 0.1
-                        )
-                        .accessibilityIdentifier("player.subtitle.delay")
-                        .accessibilityLabel("Subtitle delay")
-                        .accessibilityValue(String(format: "%+.1f seconds", model.delay))
-                        Text("Positive values show subtitles later.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Section("Appearance") {
-                    HStack {
-                        Text("Font size")
-                        Spacer()
-                        Button {
-                            model.adjustFontSize(by: -2)
-                        } label: {
-                            Image(systemName: "minus")
-                        }
-                        .accessibilityLabel("Decrease subtitle font size")
-                        Text("\(Int(model.appearance.fontSizePoints)) pt")
-                            .frame(minWidth: 58)
-                            .accessibilityLabel("Subtitle font size")
-                            .accessibilityValue("\(Int(model.appearance.fontSizePoints)) points")
-                        Button {
-                            model.adjustFontSize(by: 2)
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                        .accessibilityLabel("Increase subtitle font size")
-                    }
-                    .accessibilityIdentifier("player.subtitle.fontSize")
-
-                    Toggle(
-                        "Bold",
-                        isOn: Binding(
-                            get: { model.appearance.bold },
-                            set: { value in model.updateAppearance { $0.bold = value } }
-                        )
-                    )
-                    .accessibilityIdentifier("player.subtitle.bold")
-
-                    colorSection(
-                        title: "Text color",
-                        presets: textColors,
-                        selected: model.appearance.textColor,
-                        identifier: "player.subtitle.textColor"
-                    ) { preset in
-                        model.updateAppearance { $0.textColor = preset }
-                    }
-
-                    opacitySlider(
-                        title: "Text opacity",
-                        value: Binding(
-                            get: { Double(model.appearance.textOpacity) },
-                            set: { value in model.updateAppearance { $0.textOpacity = CGFloat(value) } }
-                        ),
-                        identifier: "player.subtitle.textOpacity"
-                    )
-
-                    colorSection(
-                        title: "Background color",
-                        presets: backgroundColors,
-                        selected: model.appearance.backgroundColor,
-                        identifier: "player.subtitle.backgroundColor"
-                    ) { preset in
-                        model.updateAppearance { $0.backgroundColor = preset }
-                    }
-
-                    opacitySlider(
-                        title: "Background opacity",
-                        value: Binding(
-                            get: { Double(model.appearance.backgroundOpacity) },
-                            set: { value in model.updateAppearance { $0.backgroundOpacity = CGFloat(value) } }
-                        ),
-                        identifier: "player.subtitle.backgroundOpacity"
-                    )
-
-                    Toggle(
-                        "Outline",
-                        isOn: Binding(
-                            get: { model.appearance.outlineEnabled },
-                            set: { value in model.updateAppearance { $0.outlineEnabled = value } }
-                        )
-                    )
-                    .accessibilityIdentifier("player.subtitle.outline")
-
-                    colorSection(
-                        title: "Outline color",
-                        presets: outlineColors,
-                        selected: model.appearance.outlineColor,
-                        identifier: "player.subtitle.outlineColor",
-                        enabled: model.appearance.outlineEnabled
-                    ) { preset in
-                        model.updateAppearance {
-                            $0.outlineEnabled = true
-                            $0.outlineColor = preset
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Vertical position")
-                            Spacer()
-                            Text("\(Int(model.appearance.bottomInset)) pt")
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(
-                            value: Binding(
-                                get: { Double(model.appearance.bottomInset) },
-                                set: { value in model.updateAppearance { $0.bottomInset = CGFloat(value) } }
-                            ),
-                            in: 40...300,
-                            step: 10
-                        )
-                        .accessibilityIdentifier("player.subtitle.bottomInset")
-                        .accessibilityLabel("Subtitle vertical position")
-                        .accessibilityValue("\(Int(model.appearance.bottomInset)) points")
-                    }
-                }
-
-                if model.isExternalPlaybackActive {
-                    Section {
-                        Label(
-                            "AirPlay devices control final caption appearance.",
-                            systemImage: "airplayvideo"
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    }
-                }
-
-                Section {
-                    Button("Reset Defaults") {
-                        model.reset()
-                    }
-                    .accessibilityIdentifier("player.subtitle.reset")
-                }
-            }
-            .navigationTitle("Customize Subtitles")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func opacitySlider(
-        title: String,
-        value: Binding<Double>,
-        identifier: String
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text("\(Int((value.wrappedValue * 100).rounded()))%")
-                    .foregroundStyle(.secondary)
-            }
-            Slider(value: value, in: 0...1, step: 0.1)
-                .accessibilityIdentifier(identifier)
-                .accessibilityLabel(title)
-                .accessibilityValue("\(Int((value.wrappedValue * 100).rounded())) percent")
-        }
-    }
-
-    @ViewBuilder
-    private func colorSection(
-        title: String,
-        presets: [SubtitleColorPreset],
-        selected: SubtitleColorPreset,
-        identifier: String,
-        enabled: Bool = true,
-        onSelect: @escaping (SubtitleColorPreset) -> Void
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(presets, id: \.self) { preset in
-                        Button {
-                            onSelect(preset)
-                        } label: {
-                            Circle()
-                                .fill(Color(uiColor: preset.color))
-                                .frame(width: 30, height: 30)
-                                .overlay {
-                                    Circle()
-                                        .stroke(
-                                            preset == selected ? Color.primary : Color.secondary.opacity(0.45),
-                                            lineWidth: preset == selected ? 3 : 1
-                                        )
-                                }
-                        }
-                        .disabled(!enabled)
-                        .accessibilityLabel(preset.displayName)
-                        .accessibilityValue(preset == selected ? "Selected" : "")
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-            .accessibilityIdentifier(identifier)
-        }
-        .opacity(enabled ? 1 : 0.45)
-    }
-}
-
-final class RigelPlayerBridge: NSObject, NativePlayerBridge {
-    private var vc: RigelPlayerViewController?
-
-    func createPlayerViewController(events: PlayerEvents) -> UIViewController {
-        let v = RigelPlayerViewController(events: events)
-        vc = v
-        return v
-    }
-
-    func load(
-        url: String,
-        title: String?,
-        sender: String?,
-        longFormVideoAirPlayEligible: Bool,
-        subtitleTracks: [SubtitleTrack],
-        selectedExternalSubtitleUrl: String?,
-        durationMs: KotlinLong?,
-        isProxy: Bool,
-        startOffsetMs: Int64
-    ) {
-        vc?.load(
-            url: url,
-            title: title,
-            sender: sender,
-            longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
-            subtitleTracks: subtitleTracks,
-            selectedExternalSubtitleUrl: selectedExternalSubtitleUrl,
-            durationSeconds: durationMs.map { $0.doubleValue / 1000.0 },
-            isProxy: isProxy,
-            startOffsetSeconds: Double(startOffsetMs) / 1000.0
-        )
-    }
-
-    func isCurrent(viewController: RigelPlayerViewController) -> Bool {
-        vc === viewController
-    }
-
-    func stop() {
-        vc?.stopPlayback()
-        vc = nil
-    }
-
-    /// Stops the given controller (per-player disposal is always safe; audio
-    /// session release is reference-counted). Returns true only when that
-    /// controller was still the bridge's current one, letting callers discard
-    /// stale errors from dismantled players.
-    @discardableResult
-    func stop(viewController: RigelPlayerViewController) -> Bool {
-        viewController.stopPlayback()
-        guard vc === viewController else { return false }
-        vc = nil
-        return true
     }
 }

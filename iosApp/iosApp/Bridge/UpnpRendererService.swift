@@ -332,19 +332,3 @@ final class UpnpRendererService {
             "</scpd>\n"
     }
 }
-
-final class RigelRendererBridge: NSObject, RendererBridge {
-    private let service = UpnpRendererService()
-
-    func start(events: RendererEvents) -> String? {
-        service.start(events: events)
-    }
-
-    func stop() {
-        service.stop()
-    }
-
-    func isRunning() -> Bool {
-        service.isRunning
-    }
-}

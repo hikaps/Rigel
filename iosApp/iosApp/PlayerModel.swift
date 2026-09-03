@@ -144,28 +144,3 @@ final class PlayerModel: ObservableObject {
     }
 }
 
-/// Conforms the Kotlin PlayerEvents protocol (implemented by the native
-/// AVPlayerViewController host) to this model's closures.
-final class PlayerEventsImpl: NSObject, PlayerEvents {
-    private let readyHandler: () -> Void
-    private let errorHandler: (String) -> Void
-    private let backHandler: () -> Void
-
-    init(onReady: @escaping () -> Void, onError: @escaping (String) -> Void, onBack: @escaping () -> Void) {
-        self.readyHandler = onReady
-        self.errorHandler = onError
-        self.backHandler = onBack
-    }
-
-    func onReady() {
-        readyHandler()
-    }
-
-    func onError(message: String) {
-        errorHandler(message)
-    }
-
-    func onBack() {
-        backHandler()
-    }
-}
