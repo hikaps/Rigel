@@ -72,6 +72,8 @@ class PlayerController(
     private var loadGeneration = 0L
     private var pendingJob: Job? = null
     private var pendingSessionId: String? = null
+    /** Subtitle URL baked into the live proxy playlist, if any. */
+    private var proxySessionSubtitleUrl: String? = null
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
@@ -127,14 +129,12 @@ class PlayerController(
         if (current.phase == PlayerPhase.IDLE) return
         if (track == null) {
             val cleared = current.copy(selectedExternalSubtitleUrl = null)
-            // A local player deselects the HLS rendition itself, but a remote
-            // renderer keeps its own subtitle selection: it keeps fetching the
-            // old playlist where the sidecar is the default. Rebuild the proxy
-            // without the sidecar so the receiver stops rendering it.
-            val needsRebuild = current.selectedExternalSubtitleUrl != null &&
-                current.castActive &&
-                current.proxyUrl != null
-            if (!needsRebuild) {
+            // The live playlist may still mark the sidecar DEFAULT=YES: a
+            // local Off never rebuilt it, and a remote renderer fetches that
+            // same master and keeps its own subtitle selection. Rebuild
+            // without the sidecar whenever the running session includes it,
+            // local or cast, so no receiver inherits disabled captions.
+            if (proxySessionSubtitleUrl == null || current.proxyUrl == null) {
                 _uiState.value = cleared
                 return
             }
@@ -240,6 +240,7 @@ class PlayerController(
             Bridges.stopHttpServer()
         }
         pendingSessionId = null
+        proxySessionSubtitleUrl = null
     }
 
     private fun isCurrent(generation: Long): Boolean = generation == loadGeneration
@@ -385,6 +386,7 @@ class PlayerController(
             return
         }
         pendingSessionId = null
+        proxySessionSubtitleUrl = subtitleTracks.firstOrNull()?.url
         Logger.i(tag) { "proxy ready: $proxyUrl" }
         val activeTarget = if (_uiState.value.castActive) CastDispatcher.activeTarget() else null
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.PLAYING, proxyUrl = proxyUrl)

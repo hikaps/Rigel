@@ -204,20 +204,47 @@ class PlayerControllerTest {
     }
 
     @Test
-    fun clearingExternalSubtitleKeepsRetainedTracksWithoutRebuild() = runTest(dispatcher.scheduler) {
+    fun clearingSelectedSubtitleLocallyRebuildsWithoutSidecar() = runTest(dispatcher.scheduler) {
         val c = controller()
         c.loadRequest(request)
         advanceUntilIdle()
         val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
         c.selectExternalSubtitle(track, positionMs = 15_000)
         advanceUntilIdle()
-        val sessionCount = hlsSessionIds.size
 
-        c.selectExternalSubtitle(null, positionMs = 0)
+        c.selectExternalSubtitle(null, positionMs = 30_000)
+        advanceUntilIdle()
 
         assertNull(c.uiState.value.selectedExternalSubtitleUrl)
         assertEquals(listOf(track), c.uiState.value.subtitleTracks)
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertNotNull(c.uiState.value.proxyUrl)
+        assertTrue(hlsSubtitleTracks.last().isEmpty())
+        assertEquals(30_000, hlsOffsets.last())
+
+        // A second Off is a state-only no-op: the live session has no sidecar.
+        val sessionCount = hlsSessionIds.size
+        c.selectExternalSubtitle(null, positionMs = 0)
+        advanceUntilIdle()
         assertEquals(sessionCount, hlsSessionIds.size)
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+    }
+
+    @Test
+    fun clearingSubtitleWithoutSidecarSessionDoesNotRebuild() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult("mkv", "hevc", listOf("aac"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        val c = controller()
+        c.loadRequest(request)
+        advanceUntilIdle()
+        assertNotNull(c.uiState.value.proxyUrl)
+        assertTrue(hlsSubtitleTracks.last().isEmpty())
+        val sessionCount = hlsSessionIds.size
+
+        c.selectExternalSubtitle(null, positionMs = 0)
+        advanceUntilIdle()
+
+        assertEquals(sessionCount, hlsSessionIds.size)
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
     }
 
     @Test
