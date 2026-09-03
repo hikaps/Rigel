@@ -15,8 +15,6 @@ import io.ktor.client.HttpClient
 object JellyfinSessionAdapter : ReceiverAdapter {
     override val kind = "jellyfin"
 
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.JellyfinSessionTarget
-
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
         supportsPosition = false,

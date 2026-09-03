@@ -5,8 +5,6 @@ import app.rigel.cast.ReceiverRegistry
 import com.russhwolf.settings.Settings
 
 enum class RouteOverride { AUTO, DIRECT, ALWAYS_PROXY }
-enum class TranscodeCap(val label: String) { P720("720p"), P1080("1080p") }
-
 private const val MAX_LINK_HISTORY = 50
 
 data class LinkHistoryEntry(val url: String, val title: String?)
@@ -14,7 +12,6 @@ data class LinkHistoryEntry(val url: String, val title: String?)
 /** NSUserDefaults-backed preferences (multiplatform-settings). */
 class SettingsStore(private val settings: Settings) {
     private val routeKey = "route_override"
-    private val capKey = "transcode_cap"
     private val devicesKey = "manual_devices"
     private val jfServerKey = "jellyfin_server"
     private val jfTokenKey = "jellyfin_token"
@@ -38,11 +35,6 @@ class SettingsStore(private val settings: Settings) {
     }
 
     fun setRouteOverride(value: RouteOverride) = settings.putString(routeKey, value.name)
-
-    fun transcodeCap(): TranscodeCap =
-        if (settings.getString(capKey, "1080p") == "720p") TranscodeCap.P720 else TranscodeCap.P1080
-
-    fun setTranscodeCap(value: TranscodeCap) = settings.putString(capKey, value.label)
 
     fun manualDevices(): List<String> = settings.getString(devicesKey, "").split('\n').filter { it.isNotBlank() }
 

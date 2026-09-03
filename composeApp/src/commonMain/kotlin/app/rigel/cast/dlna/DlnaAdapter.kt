@@ -12,8 +12,6 @@ object DlnaAdapter : ReceiverAdapter {
 
     override val ssdpTargets = listOf("urn:schemas-upnp-org:device:MediaRenderer:1")
 
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.Dlna
-
     override fun capabilities() = CastCapabilities(
         supportsSeek = true,
         supportsPosition = true,

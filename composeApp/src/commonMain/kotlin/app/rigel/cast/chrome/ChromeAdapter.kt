@@ -9,8 +9,6 @@ import io.ktor.client.HttpClient
 object ChromeAdapter : ReceiverAdapter {
     override val kind = "chrome"
 
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.Chrome
-
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
         supportsPosition = false,
