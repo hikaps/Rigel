@@ -289,6 +289,43 @@ final class RigelHlsExporter {
         var selectedAudioIndices: [Int32] = []
         var defaultAudioIndex: Int32?
         var foundDefaultAudio = false
+        for (offset, track) in session.subtitleTracks.enumerated() {
+            var subtitleFmt: UnsafeMutablePointer<AVFormatContext>? = nil
+            guard openInput(url: track.url, headers: [:], fmt: &subtitleFmt),
+                  let subtitleCtx = subtitleFmt else {
+                closeInput(&subtitleFmt)
+                reportFailure("Could not prepare the selected subtitle")
+                return
+            }
+            let subtitleStreamIndex = (0..<Int(subtitleCtx.pointee.nb_streams)).compactMap { index -> Int32? in
+                guard let stream = subtitleCtx.pointee.streams[index],
+                      let codecpar = stream.pointee.codecpar,
+                      codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE,
+                      !isBitmapSubtitle(codecpar.pointee.codec_id) else { return nil }
+                return Int32(index)
+            }.first
+            guard let subtitleStreamIndex,
+                  let subtitleStream = subtitleCtx.pointee.streams[Int(subtitleStreamIndex)] else {
+                closeInput(&subtitleFmt)
+                reportFailure("Could not prepare the selected subtitle")
+                return
+            }
+            let language = hlsLanguageValue(track.language)
+                ?? hlsLanguage(for: subtitleStream.pointee.metadata)
+            let title = track.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            subtitleInputs.append(
+                SubtitleInput(
+                    sourceID: offset + 1,
+                    context: subtitleCtx,
+                    streamIndex: subtitleStreamIndex,
+                    timeBase: subtitleStream.pointee.time_base,
+                    language: language,
+                    title: title?.isEmpty == false
+                        ? title
+                        : streamMetadataValue(subtitleStream.pointee.metadata, key: "title"),
+                )
+            )
+        }
         for i in 0..<inCount {
             guard let stream = ctx.pointee.streams[i], let codecpar = stream.pointee.codecpar else { continue }
             let inputIndex = Int32(i)
@@ -327,43 +364,6 @@ final class RigelHlsExporter {
             }
         }
 
-        for (offset, track) in session.subtitleTracks.enumerated() {
-            var subtitleFmt: UnsafeMutablePointer<AVFormatContext>? = nil
-            guard openInput(url: track.url, headers: [:], fmt: &subtitleFmt),
-                  let subtitleCtx = subtitleFmt else {
-                closeInput(&subtitleFmt)
-                NSLog("[RigelHlsExporter] sidecar subtitle failed to open: %@", track.url)
-                continue
-            }
-            let subtitleStreamIndex = (0..<Int(subtitleCtx.pointee.nb_streams)).compactMap { index -> Int32? in
-                guard let stream = subtitleCtx.pointee.streams[index],
-                      let codecpar = stream.pointee.codecpar,
-                      codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE,
-                      !isBitmapSubtitle(codecpar.pointee.codec_id) else { return nil }
-                return Int32(index)
-            }.first
-            guard let subtitleStreamIndex,
-                  let subtitleStream = subtitleCtx.pointee.streams[Int(subtitleStreamIndex)] else {
-                closeInput(&subtitleFmt)
-                NSLog("[RigelHlsExporter] sidecar subtitle has no supported stream: %@", track.url)
-                continue
-            }
-            let language = hlsLanguageValue(track.language)
-                ?? hlsLanguage(for: subtitleStream.pointee.metadata)
-            let title = track.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-            subtitleInputs.append(
-                SubtitleInput(
-                    sourceID: offset + 1,
-                    context: subtitleCtx,
-                    streamIndex: subtitleStreamIndex,
-                    timeBase: subtitleStream.pointee.time_base,
-                    language: language,
-                    title: title?.isEmpty == false
-                        ? title
-                        : streamMetadataValue(subtitleStream.pointee.metadata, key: "title"),
-                )
-            )
-        }
 
         let outputAudioIndices: [Int32]
         if selectedVideoIndex == nil {
@@ -459,19 +459,40 @@ final class RigelHlsExporter {
         if let mainVideoOutput {
             videoOutputStreams = [mainVideoOutput]
             for input in subtitleInputs {
+                let isSelectedExternal = input.sourceID != 0
                 guard let inputStream = input.context.pointee.streams[Int(input.streamIndex)],
-                      let codecpar = inputStream.pointee.codecpar else { continue }
+                      let codecpar = inputStream.pointee.codecpar else {
+                    if isSelectedExternal {
+                        reportFailure("Could not prepare the selected subtitle")
+                        return
+                    }
+                    continue
+                }
                 let codec = codecpar.pointee.codec_id
                 if codec != AV_CODEC_ID_WEBVTT {
                     guard avcodec_find_decoder(codec) != nil else {
+                        if isSelectedExternal {
+                            reportFailure("Could not prepare the selected subtitle")
+                            return
+                        }
                         NSLog("[RigelHlsExporter] no subtitle decoder for stream %d", input.streamIndex)
                         continue
                     }
                 }
-                guard let outputStream = avformat_new_stream(out, nil) else { continue }
+                guard let outputStream = avformat_new_stream(out, nil) else {
+                    if isSelectedExternal {
+                        reportFailure("Could not prepare the selected subtitle")
+                        return
+                    }
+                    continue
+                }
                 let chain: SubtitleChain?
                 if codec == AV_CODEC_ID_WEBVTT {
                     guard avcodec_parameters_copy(outputStream.pointee.codecpar, codecpar) >= 0 else {
+                        if isSelectedExternal {
+                            reportFailure("Could not prepare the selected subtitle")
+                            return
+                        }
                         outputStream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_DATA
                         continue
                     }
@@ -481,6 +502,10 @@ final class RigelHlsExporter {
                 } else {
                     chain = makeSubtitleChain(inputStream: inputStream)
                     guard chain != nil else {
+                        if isSelectedExternal {
+                            reportFailure("Could not prepare the selected subtitle")
+                            return
+                        }
                         NSLog(
                             "[RigelHlsExporter] failed to initialize subtitle decoder for stream %d codec %d",
                             input.streamIndex,
@@ -512,6 +537,10 @@ final class RigelHlsExporter {
                     guard let duplicateVideo = avformat_new_stream(out, nil),
                           avcodec_parameters_copy(duplicateVideo.pointee.codecpar, mainVideoOutput.pointee.codecpar) >= 0 else {
                         chain?.release()
+                        if isSelectedExternal {
+                            reportFailure("Could not prepare the selected subtitle")
+                            return
+                        }
                         outputStream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_DATA
                         continue
                     }
@@ -863,6 +892,12 @@ final class RigelHlsExporter {
                 terminalError = videoError
                 break
             }
+            if !notified, let selectedSubtitle = subtitleOutputs.first(where: { $0.input.sourceID != 0 }) {
+                markSelectedSubtitleName(
+                    in: outDir,
+                    output: selectedSubtitle
+                )
+            }
             if !notified &&
                 playlistReady(
                     playlistPath: playlistPath,
@@ -901,6 +936,12 @@ final class RigelHlsExporter {
             return
         }
         av_write_trailer(out)
+        if let selectedSubtitle = subtitleOutputs.first(where: { $0.input.sourceID != 0 }) {
+            markSelectedSubtitleName(
+                in: outDir,
+                output: selectedSubtitle
+            )
+        }
         if !notified &&
             playlistReady(
                 playlistPath: playlistPath,
@@ -911,12 +952,34 @@ final class RigelHlsExporter {
             notified = publishReady(
                 session: session,
                 sessionId: sessionId,
+
                 path: "\(sessionId)/index.m3u8",
                 onReady: onReady
             )
         }
     }
 
+    private static func markSelectedSubtitleName(in outDir: URL, output: SubtitleOutput) {
+        let masterURL = outDir.appendingPathComponent("index.m3u8")
+        guard var master = try? String(contentsOf: masterURL, encoding: .utf8),
+              let mediaStart = master.range(of: "#EXT-X-MEDIA:TYPE=SUBTITLES"),
+              let nameStart = master.range(
+                  of: "NAME=\"",
+                  range: mediaStart.upperBound..<master.endIndex
+              ),
+              let nameEnd = master[nameStart.upperBound...].firstIndex(of: "\"") else {
+            return
+        }
+        let baseName = streamMapName(
+            output.input.title,
+            fallback: "Subtitle-\(output.ordinal + 1)"
+        )
+        master.replaceSubrange(
+            nameStart.upperBound..<nameEnd,
+            with: "RigelSelected__\(baseName)"
+        )
+        try? master.write(to: masterURL, atomically: true, encoding: .utf8)
+    }
     private static func playlistReady(
         playlistPath: String,
         outDir: URL,

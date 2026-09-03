@@ -15,6 +15,7 @@ final class PlayerModel: ObservableObject {
     @Published var error: String?
     @Published var sender: String?
     @Published var subtitleTracks: [SubtitleTrack] = []
+    @Published var selectedExternalSubtitleUrl: String?
     @Published var castActive = false
     @Published var longFormVideoAirPlayEligible = false
     @Published var probeDurationMs: Double?
@@ -69,6 +70,7 @@ final class PlayerModel: ObservableObject {
         error = state.error
         sender = state.sender
         subtitleTracks = state.subtitleTracks
+        selectedExternalSubtitleUrl = state.selectedExternalSubtitleUrl
         castActive = state.castActive
         startPositionMs = state.startPositionMs
         longFormVideoAirPlayEligible = state.longFormVideoAirPlayEligible
@@ -114,8 +116,12 @@ final class PlayerModel: ObservableObject {
         )
     }
 
-    func addSubtitleTrack(_ track: SubtitleTrack) {
-        SwiftPlayer.shared.addSubtitleTrack(track: track)
+    func selectExternalSubtitle(_ track: SubtitleTrack?, positionSeconds: Double) {
+        let safeSeconds = positionSeconds.isFinite ? max(0, positionSeconds) : 0
+        let maxMilliseconds = Double(Int64.max - 1)
+        let milliseconds = min(safeSeconds * 1_000, maxMilliseconds)
+        let positionMs = Int64(milliseconds.rounded(.down))
+        SwiftPlayer.shared.selectExternalSubtitle(track: track, positionMs: positionMs)
     }
 
     func stop() {

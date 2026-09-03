@@ -16,6 +16,7 @@ final class PlayerModelTests: XCTestCase {
             sourceUrl: "http://origin/v.mkv",
             filename: nil,
             subtitleTracks: [SubtitleTrack(url: "https://origin/en.vtt", language: nil, title: nil)],
+            selectedExternalSubtitleUrl: "https://origin/en.vtt",
             route: PlaybackRoute.direct,
             proxyUrl: nil,
             probe: nil,
@@ -29,6 +30,7 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertEqual(model.phase, PlayerPhase.playing)
         XCTAssertEqual(model.sourceUrl, "http://origin/v.mkv")
         XCTAssertEqual(model.sender, "kodi-remote")
+        XCTAssertEqual(model.selectedExternalSubtitleUrl, "https://origin/en.vtt")
         XCTAssertEqual(model.subtitleTracks, [SubtitleTrack(url: "https://origin/en.vtt", language: nil, title: nil)])
         XCTAssertTrue(model.showPlayer)
         XCTAssertTrue(model.isPlaying)
@@ -43,6 +45,7 @@ final class PlayerModelTests: XCTestCase {
             sourceUrl: "http://origin/v.mkv",
             filename: nil,
             subtitleTracks: [],
+            selectedExternalSubtitleUrl: nil,
             route: PlaybackRoute.remux,
             proxyUrl: "http://127.0.0.1:12345/session-x/index.m3u8",
             probe: nil,
@@ -273,6 +276,7 @@ final class PlayerModelTests: XCTestCase {
             sourceUrl: nil,
             filename: nil,
             subtitleTracks: [],
+            selectedExternalSubtitleUrl: nil,
             route: nil,
             proxyUrl: nil,
             probe: nil,
@@ -292,6 +296,7 @@ final class PlayerModelTests: XCTestCase {
             sourceUrl: "http://origin/v.mkv",
             filename: nil,
             subtitleTracks: [],
+            selectedExternalSubtitleUrl: nil,
             route: nil,
             proxyUrl: nil,
             probe: nil,
@@ -437,9 +442,95 @@ final class PlayerModelTests: XCTestCase {
             isLive: isLive,
             pixFmt: "yuv420p",
             width: 1920,
+
             height: 1080
         )
     }
+    @MainActor
+    func testSubtitleCustomizationModelPersistsImmediateChanges() {
+        let originalAppearance = SubtitlePreferences.appearance
+        let originalDelay = SubtitlePreferences.delay
+        defer {
+            SubtitlePreferences.appearance = originalAppearance
+            SubtitlePreferences.delay = originalDelay
+        }
+        var callbackCount = 0
+        let model = SubtitleCustomizationModel { appearance, delay in
+            callbackCount += 1
+            XCTAssertEqual(SubtitlePreferences.appearance, appearance)
+            XCTAssertEqual(SubtitlePreferences.delay, delay, accuracy: 0.0001)
+        }
+
+        model.updateAppearance {
+            $0.fontSizePoints = 30
+            $0.textColor = .gold
+            $0.textOpacity = 0.6
+            $0.backgroundColor = .navy
+            $0.backgroundOpacity = 0.5
+            $0.outlineEnabled = false
+            $0.bottomInset = 200
+        }
+        model.setDelay(1.2)
+
+        XCTAssertEqual(model.appearance.fontSizePoints, 30)
+        XCTAssertEqual(model.appearance.textColor, .gold)
+        XCTAssertEqual(model.appearance.textOpacity, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(model.appearance.backgroundColor, .navy)
+        XCTAssertEqual(model.appearance.backgroundOpacity, 0.5, accuracy: 0.0001)
+        XCTAssertFalse(model.appearance.outlineEnabled)
+        XCTAssertEqual(model.appearance.bottomInset, 200)
+        XCTAssertEqual(model.delay, 1.2, accuracy: 0.0001)
+        XCTAssertEqual(callbackCount, 2)
+    }
+
+    @MainActor
+    func testParsedSidecarUsesPersistedStyledLabel() {
+        let originalAppearance = SubtitlePreferences.appearance
+        let originalDelay = SubtitlePreferences.delay
+        defer {
+            SubtitlePreferences.appearance = originalAppearance
+            SubtitlePreferences.delay = originalDelay
+        }
+        SubtitlePreferences.appearance = SubtitleAppearance(
+            fontSizePoints: 28,
+            bold: true,
+            textColor: .gold,
+            textOpacity: 0.7,
+            backgroundColor: .navy,
+            backgroundOpacity: 0.5,
+            outlineEnabled: true,
+            outlineColor: .red,
+            bottomInset: 180
+        )
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let controller = RigelPlayerViewController(events: events)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let track = SubtitleTrack(url: "https://origin/subtitles.srt", language: "en", title: "English")
+        controller.load(
+            url: "http://127.0.0.1/session/video.mp4",
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false,
+            subtitleTracks: [],
+            selectedExternalSubtitleUrl: track.url
+        )
+        controller.installLoadedSidecar(
+            track: track,
+            order: 0,
+            cues: [.init(start: 0, end: 10, text: "Styled subtitle")]
+        )
+        defer { controller.stopPlayback() }
+
+        let label = view(controller.view, withAccessibilityIdentifier: "player.subtitleLabel") as? UILabel
+        XCTAssertEqual(label?.attributedText?.string, "Styled subtitle")
+        XCTAssertEqual(label?.font.pointSize ?? 0, 28, accuracy: 0.1)
+        XCTAssertEqual(label?.backgroundColor?.cgColor.alpha ?? 0, 0.5, accuracy: 0.01)
+        XCTAssertEqual(
+            label?.attributedText?.attribute(.strokeWidth, at: 0, effectiveRange: nil) as? NSNumber,
+            -3
+        )
+    }
+
 
     private func state(
         phase: PlayerPhase = .playing,
@@ -452,6 +543,7 @@ final class PlayerModelTests: XCTestCase {
             sourceUrl: "http://origin/video",
             filename: "video.mp4",
             subtitleTracks: [],
+            selectedExternalSubtitleUrl: nil,
             route: route,
             proxyUrl: proxyUrl,
             probe: probe,

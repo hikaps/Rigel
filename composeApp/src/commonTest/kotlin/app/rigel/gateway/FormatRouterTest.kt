@@ -117,13 +117,28 @@ class FormatRouterTest {
     }
 
     @Test
-    fun externalSubtitlesDoNotChangeHlsRoute() {
-        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("m3u8", "h264", listOf("aac")), true))
+    fun externalSubtitlesForceRemuxForHls() {
+        assertEquals(PlaybackRoute.REMUX, FormatRouter.decide(probe("m3u8", "h264", listOf("aac")), true))
     }
 
     @Test
-    fun externalSubtitlesDoNotChangeLiveRoute() {
-        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("mpegts", "h264", listOf("aac"), isLive = true), true))
+    fun externalSubtitlesForceRemuxForLiveVideo() {
+        assertEquals(PlaybackRoute.REMUX, FormatRouter.decide(probe("mpegts", "h264", listOf("aac"), isLive = true), true))
+    }
+
+    @Test
+    fun externalSubtitlesKeepUnsafeHlsVideoOnTranscode() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("m3u8", "h264", listOf("aac"), pixFmt = "yuv420p10le"), true))
+    }
+
+    @Test
+    fun externalSubtitlesKeepAudioOnlyHlsDirect() {
+        assertEquals(PlaybackRoute.DIRECT, FormatRouter.decide(probe("m3u8", null), true))
+    }
+
+    @Test
+    fun externalSubtitlesKeepAudioOnlyFileOnExistingRoute() {
+        assertEquals(PlaybackRoute.TRANSCODE, FormatRouter.decide(probe("mp4", null), true))
     }
 
     @Test

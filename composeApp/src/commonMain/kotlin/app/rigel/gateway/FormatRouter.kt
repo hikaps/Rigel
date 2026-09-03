@@ -20,23 +20,31 @@ object FormatRouter {
     private val remuxContainers = setOf("matroska", "mkv", "webm", "avi", "mpegts", "asf")
     private val hlsContainers = setOf("m3u8", "hls")
 
-    fun decide(probe: ProbeResult, hasExternalSubs: Boolean): PlaybackRoute {
+    fun decide(probe: ProbeResult, hasSelectedExternalSubtitle: Boolean): PlaybackRoute {
         val container = probe.container.lowercase()
         val video = probe.videoCodec?.lowercase()
         val audio = probe.audioCodecs.map { it.lowercase() }.toSet()
 
-        // Apply the video safety gate before live/HLS early returns. A live or
-        // HLS container does not make an unsupported H.264/HEVC pixel format
-        // decodable by AVPlayer. HEVC Main10 is the only 10-bit exception.
+        // Apply the video safety gate before any subtitle or live/HLS policy.
+        // A remux cannot make an unsupported pixel format decodable.
         val hevcMain10 = video == "hevc" && probe.pixFmt?.lowercase() == "yuv420p10le"
         if (video in directVideo && !hevcMain10 && !directPlayablePixelFormat(probe.pixFmt)) {
             return PlaybackRoute.TRANSCODE
         }
 
+        // An app-rendered sidecar must become an HLS WebVTT rendition before
+        // AirPlay. Video that can be stream-copied uses REMUX; all other video
+        // goes through the existing full transcode path.
+        if (hasSelectedExternalSubtitle && video != null) {
+            return if (video == "h264" && directPlayablePixelFormat(probe.pixFmt)) {
+                PlaybackRoute.REMUX
+            } else {
+                PlaybackRoute.TRANSCODE
+            }
+        }
+
         if (probe.isLive) return PlaybackRoute.DIRECT
         if (container in hlsContainers) return PlaybackRoute.DIRECT
-
-        if (hasExternalSubs && video in directVideo) return PlaybackRoute.REMUX
 
         if (container in directContainers && video in directVideo &&
             audio.all { it in directAudio }
