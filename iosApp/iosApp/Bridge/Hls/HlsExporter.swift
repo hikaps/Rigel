@@ -68,6 +68,22 @@ final class RigelHlsExporter {
     }
 
     static func stopSession(sessionId: String) {
-        lock.lock(); sessions[sessionId]?.cancel = true; lock.unlock()
+        lock.lock()
+        let queue = sessions[sessionId]?.queue
+        sessions[sessionId]?.cancel = true
+        lock.unlock()
+        deleteSessionDir(sessionId: sessionId, writerQueue: queue)
+    }
+
+    /// The directory must outlive the writer: deleting mid-write races
+    /// ffmpeg's segment opens. An active session deletes on its own serial
+    /// queue, so the removal runs strictly after run() finishes; a session
+    /// that already ended has no writer and is removed right away.
+    private static func deleteSessionDir(sessionId: String, writerQueue: DispatchQueue?) {
+        if let writerQueue {
+            writerQueue.async { try? FileManager.default.removeItem(at: sessionDir(sessionId: sessionId)) }
+        } else {
+            try? FileManager.default.removeItem(at: sessionDir(sessionId: sessionId))
+        }
     }
 }

@@ -124,6 +124,47 @@ final class ProbeTest: XCTestCase {
         XCTAssertNil(error)
     }
 
+    func testStopSessionDeletesSessionDirectory() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let sessionId = "test-cleanup-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        let finished = expectation(description: "session delivers playlist")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 10)
+        XCTAssertNotNil(readyPath, error ?? "remux session did not produce a playlist")
+
+        // The writer may still be running; stopping must remove the directory
+        // only after run() has finished, and no later than the poll timeout.
+        RigelHlsExporter.stopSession(sessionId: sessionId)
+        let removed = expectation(description: "session directory removed")
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+            if !FileManager.default.fileExists(atPath: outputDir.path) {
+                timer.invalidate()
+                removed.fulfill()
+            }
+        }
+        wait(for: [removed], timeout: 10)
+    }
+
     func testMultiAudioRemuxPublishesAlternateAudioMaster() throws {
         let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_multi", withExtension: "mkv"))
         let sessionId = "test-multi-audio-\(UUID().uuidString)"

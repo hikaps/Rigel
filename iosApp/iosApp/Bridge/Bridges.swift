@@ -43,14 +43,6 @@ final class RigelTranscodeBridge: NSObject, TranscodeBridge {
 
     func stopHlsSession(sessionId: String) {
         RigelHlsExporter.stopSession(sessionId: sessionId)
-        removeSessionDirectory(sessionId: sessionId)
-    }
-
-    /// Session directories are rewritten per playback; without this,
-    /// Documents/proxy grows without bound. Failure is harmless: the
-    /// startup sweep retries next launch.
-    private func removeSessionDirectory(sessionId: String) {
-        try? FileManager.default.removeItem(at: RigelHlsExporter.sessionDir(sessionId: sessionId))
     }
 }
 
