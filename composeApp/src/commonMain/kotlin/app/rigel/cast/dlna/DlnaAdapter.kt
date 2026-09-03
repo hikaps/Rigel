@@ -2,6 +2,7 @@ package app.rigel.cast.dlna
 
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
+import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
 import app.rigel.cast.ReceiverAdapter
 import io.ktor.client.HttpClient
@@ -11,8 +12,6 @@ object DlnaAdapter : ReceiverAdapter {
     override val kind = "dlna"
 
     override val ssdpTargets = listOf("urn:schemas-upnp-org:device:MediaRenderer:1")
-
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.Dlna
 
     override fun capabilities() = CastCapabilities(
         supportsSeek = true,
@@ -25,15 +24,15 @@ object DlnaAdapter : ReceiverAdapter {
         url: String,
         title: String,
         client: HttpClient,
-    ): String {
+    ): CastResult {
         val device = (target as CastTarget.Dlna).device
         val renderer = DlnaRenderer(client)
         val uriAccepted = renderer.setAvTransportUri(device, url, title)
         val playbackStarted = uriAccepted && renderer.play(device)
         return if (playbackStarted) {
-            "Sent to ${target.name}"
+            CastResult.Sent("Sent to ${target.name}")
         } else {
-            "DLNA rejected the URL"
+            CastResult.Rejected("DLNA rejected the URL")
         }
     }
 

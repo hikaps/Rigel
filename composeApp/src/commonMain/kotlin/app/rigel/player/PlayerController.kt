@@ -1,6 +1,7 @@
 package app.rigel.player
 
 import app.rigel.cast.CastDispatcher
+import app.rigel.cast.CastPlaybackPort
 
 import app.rigel.bridge.Bridges
 import app.rigel.bridge.ProbeResult
@@ -65,7 +66,7 @@ data class PlayerUiState(
  */
 class PlayerController(
     private val settings: SettingsStore,
-) {
+) : CastPlaybackPort {
     private val tag = "PlayerController"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var directFallbackUsed = false
@@ -116,8 +117,22 @@ class PlayerController(
         pendingJob = scope.launch { probeAndRoute(request, generation) }
     }
 
-    fun setCastActive(active: Boolean) {
+    override fun setCastActive(active: Boolean) {
         _uiState.value = _uiState.value.copy(castActive = active)
+    }
+
+    override fun remoteCastUrl(): String? {
+        val state = _uiState.value
+        return CastDispatcher.remoteCastUrl(
+            isPlaying = state.phase == PlayerPhase.PLAYING,
+            proxyUrl = state.proxyUrl,
+            sourceUrl = state.sourceUrl,
+        )
+    }
+
+    override fun remoteCastTitle(): String {
+        val state = _uiState.value
+        return CastDispatcher.remoteCastTitle(state.filename, state.sourceUrl)
     }
 
     /**
@@ -391,14 +406,19 @@ class PlayerController(
         val activeTarget = if (_uiState.value.castActive) CastDispatcher.activeTarget() else null
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.PLAYING, proxyUrl = proxyUrl)
         if (activeTarget != null) {
-            val remoteUrl = CastDispatcher.remoteCastUrl(_uiState.value)
+            val state = _uiState.value
+            val remoteUrl = CastDispatcher.remoteCastUrl(
+                isPlaying = state.phase == PlayerPhase.PLAYING,
+                proxyUrl = state.proxyUrl,
+                sourceUrl = state.sourceUrl,
+            )
             if (remoteUrl != null) {
                 scope.launch {
                     runCatching {
                         CastDispatcher.recastIfActive(
                             activeTarget,
                             remoteUrl,
-                            CastDispatcher.remoteCastTitle(_uiState.value),
+                            CastDispatcher.remoteCastTitle(state.filename, state.sourceUrl),
                         )
                     }.onFailure { error ->
                         Logger.w(tag) { "proxy recast failed: ${error.message}" }
@@ -478,38 +498,3 @@ class PlayerController(
     private fun extractSessionId(proxyUrl: String): String =
         proxyUrl.substringBeforeLast('/').substringAfterLast('/')
 }
-
-/** Exposed to Swift (RigelIntake.shared.handle(url:)) for onOpenURL. */
-object RigelIntake {
-    private var controller: PlayerController? = null
-    private val pending = mutableListOf<Pair<String, String?>>()
-
-    private fun current(): PlayerController = controller ?: app.rigel.RigelCore.controller
-
-    fun attach(controller: PlayerController) {
-        this.controller = controller
-        val queued = pending.toList()
-        pending.clear()
-        for ((url, title) in queued) handle(url, title)
-    }
-
-    fun handle(url: String): Boolean = handle(url, null)
-
-    fun handle(url: String, title: String?): Boolean {
-        val ok = current().loadRaw(url, title)
-        if (!ok && controller == null) {
-            pending += url to title
-            return true
-        }
-        return ok
-    }
-
-    /** Test-only: clear attach state and the pending queue. */
-    internal fun resetForTest() {
-        controller = null
-        pending.clear()
-    }
-}
-
-/** DLNA-renderer receive mode: control-point pushes map onto the same pipeline. */
-// RendererEventsImpl lives in iosMain (RendererEvents is an iosMain interface).

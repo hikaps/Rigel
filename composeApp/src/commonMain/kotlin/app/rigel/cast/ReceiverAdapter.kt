@@ -16,13 +16,10 @@ interface ReceiverAdapter {
     /** SSDP search-target values this family contributes to discovery. */
     val ssdpTargets: List<String> get() = emptyList()
 
-    /** True when this adapter handles the given target variant. */
-    fun matches(target: CastTarget): Boolean
-
     fun capabilities(): CastCapabilities
 
-    /** Send a URL to the remote renderer. Returns a human-readable result or error. */
-    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): String
+    /** Send a URL to the remote renderer; [CastResult.message] is user-facing. */
+    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): CastResult
     /** Seek the active remote item; false means this receiver cannot seek. */
     suspend fun seek(
         target: CastTarget,

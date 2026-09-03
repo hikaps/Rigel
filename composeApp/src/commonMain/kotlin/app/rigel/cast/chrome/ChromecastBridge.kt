@@ -1,12 +1,7 @@
 package app.rigel.cast.chrome
 
-/** Device discovered through Google Cast mDNS or entered manually. */
-data class ChromeDevice(
-    val id: String,
-    val host: String,
-    val port: Int,
-    val name: String,
-)
+import app.rigel.bridge.BridgeSlot
+import app.rigel.cast.ChromeDevice
 
 /** Native transport pipe; CASTV2 framing and protocol sequencing stay in common Kotlin. */
 interface CastWireConnection {
@@ -28,9 +23,11 @@ interface ChromecastBridge {
 
 /** Mutable startup registry, matching the existing native bridge factories. */
 object ChromecastBridgeFactory {
-    internal var bridge: ChromecastBridge? = null
+    private val slot = BridgeSlot<ChromecastBridge>()
 
     fun register(bridge: ChromecastBridge?) {
-        this.bridge = bridge
+        slot.register(bridge)
     }
+
+    val current: ChromecastBridge? get() = slot.current
 }

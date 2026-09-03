@@ -1,5 +1,7 @@
 package app.rigel.cast.chrome
 
+import app.rigel.cast.CastResult
+import app.rigel.cast.ChromeDevice
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.TimeoutCancellationException
@@ -16,18 +18,18 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
     private val senderId = "sender-rigel"
     private val receiverId = "receiver-0"
 
-    suspend fun launch(device: ChromeDevice, url: String, title: String): String = try {
+    suspend fun launch(device: ChromeDevice, url: String, title: String): CastResult = try {
         withTimeout(15_000) {
             launchInternal(device, url, title)
         }
     } catch (_: TimeoutCancellationException) {
-        "Chromecast did not confirm playback"
+        CastResult.Rejected("Chromecast did not confirm playback")
     } catch (e: CancellationException) {
         throw e
     } catch (e: ChromecastTransportException) {
-        "Chromecast connection failed: ${e.message}"
+        CastResult.Rejected("Chromecast connection failed: ${e.message}")
     } catch (_: Throwable) {
-        "Chromecast did not respond"
+        CastResult.Rejected("Chromecast did not respond")
     }
 
     suspend fun probe(host: String, port: Int): Boolean = try {
@@ -65,7 +67,7 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
         false
     }
 
-    private suspend fun launchInternal(device: ChromeDevice, url: String, title: String): String {
+    private suspend fun launchInternal(device: ChromeDevice, url: String, title: String): CastResult {
         val events = Channel<Incoming>(Channel.UNLIMITED)
         val connection = open(
             device.host,
@@ -92,7 +94,7 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
                 when (ChromePayloads.messageType(frame.payloadUtf8)) {
                     "LAUNCH_ERROR" -> {
                         val reason = ChromePayloads.errorReason(frame.payloadUtf8) ?: "unknown error"
-                        return "Chromecast launch failed ($reason)"
+                        return CastResult.Rejected("Chromecast launch failed ($reason)")
                     }
                     "RECEIVER_STATUS" -> transportId = ChromePayloads.extractTransportId(frame.payloadUtf8)
                 }
@@ -123,10 +125,10 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
                 if (!isReply(frame, mediaTransportId, ChromePayloads.NS_MEDIA)) continue
                 if (ChromePayloads.requestId(frame.payloadUtf8) != loadRequestId) continue
                 when (ChromePayloads.messageType(frame.payloadUtf8)) {
-                    "LOAD_FAILED" -> return "Chromecast load failed"
+                    "LOAD_FAILED" -> return CastResult.Rejected("Chromecast load failed")
                     "MEDIA_STATUS" -> {
                         if (frame.payloadUtf8.contains("\"playerState\"")) {
-                            return "Sent to ${device.name.ifBlank { "Chromecast" }}"
+                            return CastResult.Sent("Sent to ${device.name.ifBlank { "Chromecast" }}")
                         }
                     }
                 }

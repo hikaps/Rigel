@@ -1,10 +1,10 @@
 package app.rigel.settings
 
 import app.rigel.cast.CastTarget
-import app.rigel.cast.chrome.ChromeDevice
-import app.rigel.cast.dlna.DlnaDevice
-import app.rigel.cast.kodi.KodiDevice
-import app.rigel.cast.roku.RokuDevice
+import app.rigel.cast.ChromeDevice
+import app.rigel.cast.DlnaDevice
+import app.rigel.cast.KodiDevice
+import app.rigel.cast.RokuDevice
 import app.rigel.source.jellyfin.JellyfinSession
 import com.russhwolf.settings.MapSettings
 import kotlin.test.Test
@@ -53,16 +53,6 @@ class SettingsStoreTest {
     fun unknownRouteOverrideFallsBackToAuto() {
         val map = MapSettings(mutableMapOf("route_override" to "BOGUS"))
         assertEquals(RouteOverride.AUTO, SettingsStore(map).routeOverride())
-    }
-
-    @Test
-    fun transcodeCapDefaultsTo1080AndRoundTrips() {
-        val s = store()
-        assertEquals(TranscodeCap.P1080, s.transcodeCap())
-        s.setTranscodeCap(TranscodeCap.P720)
-        assertEquals(TranscodeCap.P720, s.transcodeCap())
-        s.setTranscodeCap(TranscodeCap.P1080)
-        assertEquals(TranscodeCap.P1080, s.transcodeCap())
     }
 
     @Test

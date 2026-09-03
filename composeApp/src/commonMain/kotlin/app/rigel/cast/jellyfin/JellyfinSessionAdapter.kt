@@ -2,6 +2,7 @@ package app.rigel.cast.jellyfin
 
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
+import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
 import app.rigel.cast.ReceiverAdapter
 import app.rigel.source.jellyfin.JellyfinSession
@@ -15,8 +16,6 @@ import io.ktor.client.HttpClient
 object JellyfinSessionAdapter : ReceiverAdapter {
     override val kind = "jellyfin"
 
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.JellyfinSessionTarget
-
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
         supportsPosition = false,
@@ -28,7 +27,7 @@ object JellyfinSessionAdapter : ReceiverAdapter {
         url: String,
         title: String,
         client: HttpClient,
-    ): String = "Jellyfin clients accept library items only — cast from the Sources tab"
+    ): CastResult = CastResult.Rejected("Jellyfin clients accept library items only — cast from the Sources tab")
 
     // fromSsdp/fromRow/probeManual stay null: Jellyfin is source-specific, not a discoverable renderer.
 

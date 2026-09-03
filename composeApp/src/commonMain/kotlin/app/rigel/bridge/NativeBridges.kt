@@ -65,10 +65,10 @@ interface HttpServerBridge {
 
 /** Registry mirroring NuvioPlayerBridgeFactory; Swift calls [register] at startup. */
 object RigelBridgeFactory {
-    private var discoveryImpl: DiscoveryBridge? = null
-    private var probeImpl: ProbeBridge? = null
-    private var transcodeImpl: TranscodeBridge? = null
-    private var httpServerImpl: HttpServerBridge? = null
+    private val discoverySlot = BridgeSlot<DiscoveryBridge>()
+    private val probeSlot = BridgeSlot<ProbeBridge>()
+    private val transcodeSlot = BridgeSlot<TranscodeBridge>()
+    private val httpServerSlot = BridgeSlot<HttpServerBridge>()
 
     fun register(
         discovery: DiscoveryBridge?,
@@ -76,19 +76,20 @@ object RigelBridgeFactory {
         transcode: TranscodeBridge?,
         httpServer: HttpServerBridge?,
     ) {
-        discoveryImpl = discovery
-        probeImpl = probe
-        transcodeImpl = transcode
-        httpServerImpl = httpServer
+        discoverySlot.register(discovery)
+        probeSlot.register(probe)
+        transcodeSlot.register(transcode)
+        httpServerSlot.register(httpServer)
     }
 
-    val discovery: DiscoveryBridge? get() = discoveryImpl
-    val probe: ProbeBridge? get() = probeImpl
-    val transcode: TranscodeBridge? get() = transcodeImpl
-    val httpServer: HttpServerBridge? get() = httpServerImpl
+    val discovery: DiscoveryBridge? get() = discoverySlot.current
+    val probe: ProbeBridge? get() = probeSlot.current
+    val transcode: TranscodeBridge? get() = transcodeSlot.current
+    val httpServer: HttpServerBridge? get() = httpServerSlot.current
 
     val isRegistered: Boolean
-        get() = discoveryImpl != null && probeImpl != null && transcodeImpl != null && httpServerImpl != null
+        get() = discoverySlot.isRegistered && probeSlot.isRegistered &&
+            transcodeSlot.isRegistered && httpServerSlot.isRegistered
 }
 
 /** Common-facing access to the DLNA renderer receive mode (iosMain actual). */

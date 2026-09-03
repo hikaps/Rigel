@@ -1,9 +1,24 @@
 import SwiftUI
 import ComposeApp
 
+/// Mapping between the persisted route value (Kotlin stores the enum name)
+/// and the exported enum cases.
+extension RouteOverride {
+    var pickerKey: String {
+        if self == RouteOverride.direct { return "DIRECT" }
+        if self == RouteOverride.alwaysProxy { return "ALWAYS_PROXY" }
+        return "AUTO"
+    }
+
+    static func from(pickerKey: String) -> RouteOverride {
+        if pickerKey == "DIRECT" { return RouteOverride.direct }
+        if pickerKey == "ALWAYS_PROXY" { return RouteOverride.alwaysProxy }
+        return RouteOverride.auto_
+    }
+}
+
 struct SettingsView: View {
     @State private var routeKey = ""
-    @State private var capKey = ""
     @State private var rendererOn = false
     @State private var rendererNotice: String?
     @State private var openSubtitlesAPIKey = ""
@@ -25,16 +40,12 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .onAppear {
-                routeKey = settings.routeOverride().name
-                capKey = settings.transcodeCap().name == "P720" ? "720p" : "1080p"
+                routeKey = settings.routeOverride().pickerKey
                 rendererOn = RendererBridgeAccess.shared.isRunning()
                 loadOpenSubtitlesSettings()
             }
             .onChange(of: routeKey) { newValue in
-                settings.setRouteOverride(value: routeOverride(for: newValue))
-            }
-            .onChange(of: capKey) { newValue in
-                settings.setTranscodeCap(value: newValue == "720p" ? TranscodeCap.p720 : TranscodeCap.p1080)
+                settings.setRouteOverride(value: RouteOverride.from(pickerKey: newValue))
             }
         }
     }
@@ -50,12 +61,6 @@ struct SettingsView: View {
             Text(routeDetail)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-
-            Picker("Transcode cap", selection: $capKey) {
-                Text("720p").tag("720p")
-                Text("1080p").tag("1080p")
-            }
-            .pickerStyle(.segmented)
         }
     }
 
@@ -170,14 +175,6 @@ struct SettingsView: View {
         case "DIRECT": return "Hand the URL straight to AVPlayer"
         case "ALWAYS_PROXY": return "Remux/transcode through the local HLS proxy"
         default: return "Probe the stream and pick the best path"
-        }
-    }
-
-    private func routeOverride(for key: String) -> RouteOverride {
-        switch key {
-        case "DIRECT": return RouteOverride.direct
-        case "ALWAYS_PROXY": return RouteOverride.alwaysProxy
-        default: return RouteOverride.auto_
         }
     }
 

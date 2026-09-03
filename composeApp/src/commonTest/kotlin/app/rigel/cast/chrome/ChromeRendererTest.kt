@@ -1,6 +1,8 @@
 package app.rigel.cast.chrome
 
+import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.ChromeDevice
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -36,7 +38,8 @@ class ChromeRendererTest {
     fun launchSendsCastV2SequenceAndConfirmsPlayback() = runTest {
         val result = ChromeRenderer(bridge).launch(device, "http://host/movie.mp4", "Movie")
 
-        assertEquals("Sent to Living Room TV", result)
+        assertTrue(result is CastResult.Sent)
+        assertEquals("Sent to Living Room TV", result.message)
         assertEquals(
             listOf("CONNECT", "LAUNCH", "PONG", "CONNECT", "LOAD"),
             bridge.sent.map { ChromePayloads.messageType(it.payloadUtf8) },
@@ -50,7 +53,8 @@ class ChromeRendererTest {
         val target = CastTarget.Chrome(device)
         val result = ChromeAdapter.cast(target, "http://host/movie.mp4", "Movie", HttpClient(MockEngine { respond("") }))
 
-        assertEquals("Sent to Living Room TV", result)
+        assertTrue(result is CastResult.Sent)
+        assertEquals("Sent to Living Room TV", result.message)
         assertFalse(ChromeAdapter.capabilities().supportsSeek)
         assertFalse(ChromeAdapter.capabilities().supportsPosition)
     }
@@ -58,10 +62,9 @@ class ChromeRendererTest {
     @Test
     fun launchErrorIsReported() = runTest {
         bridge.launchError = true
-        assertEquals(
-            "Chromecast launch failed (NOT_FOUND)",
-            ChromeRenderer(bridge).launch(device, "http://host/movie.mp4", "Movie"),
-        )
+        val result = ChromeRenderer(bridge).launch(device, "http://host/movie.mp4", "Movie")
+        assertTrue(result is CastResult.Rejected)
+        assertEquals("Chromecast launch failed (NOT_FOUND)", result.message)
     }
 
     @Test
@@ -77,7 +80,8 @@ class ChromeRendererTest {
         val result = async { ChromeRenderer(bridge).launch(device, "http://host/movie.mp4", "Movie") }
         runCurrent()
         advanceTimeBy(15_001)
-        assertEquals("Chromecast did not confirm playback", result.await())
+        assertTrue(result.await() is CastResult.Rejected)
+        assertEquals("Chromecast did not confirm playback", result.await().message)
     }
 
     private class ScriptedBridge : ChromecastBridge {

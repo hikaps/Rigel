@@ -43,6 +43,14 @@ final class RigelTranscodeBridge: NSObject, TranscodeBridge {
 
     func stopHlsSession(sessionId: String) {
         RigelHlsExporter.stopSession(sessionId: sessionId)
+        removeSessionDirectory(sessionId: sessionId)
+    }
+
+    /// Session directories are rewritten per playback; without this,
+    /// Documents/proxy grows without bound. Failure is harmless: the
+    /// startup sweep retries next launch.
+    private func removeSessionDirectory(sessionId: String) {
+        try? FileManager.default.removeItem(at: RigelHlsExporter.sessionDir(sessionId: sessionId))
     }
 }
 
@@ -69,6 +77,7 @@ final class RigelHttpServerBridge: NSObject, HttpServerBridge {
 
 enum BridgeRegistry {
     static func register() {
+        sweepStaleProxySessions()
         RigelBridgeFactory.shared.register(
             discovery: RigelDiscoveryBridge(),
             probe: RigelProbeBridge(),
@@ -78,5 +87,17 @@ enum BridgeRegistry {
         PlayerBridgeFactory.shared.register(bridge: RigelPlayerBridge())
         RendererBridgeFactory.shared.register(bridge: RigelRendererBridge())
         ChromecastBridgeFactory.shared.register(bridge: RigelChromecastBridge())
+    }
+
+    /// Removes session directories left behind if the process died mid-playback.
+    private static func sweepStaleProxySessions() {
+        let root = RigelHttpServer.proxyRootURL()
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        for item in items where item.lastPathComponent.hasPrefix("session-") {
+            try? FileManager.default.removeItem(at: item)
+        }
     }
 }

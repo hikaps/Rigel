@@ -1,5 +1,6 @@
 package app.rigel.cast.roku
 
+import app.rigel.cast.RokuDevice
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond

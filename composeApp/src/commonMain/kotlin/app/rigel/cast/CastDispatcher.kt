@@ -1,11 +1,21 @@
 package app.rigel.cast
 
-import app.rigel.RigelCore
 import app.rigel.bridge.Bridges
-import app.rigel.player.PlayerPhase
-import app.rigel.player.PlayerUiState
 import io.ktor.client.HttpClient
 import io.ktor.http.Url
+
+/**
+ * Read/write access the cast layer needs into playback orchestration.
+ * [app.rigel.player.PlayerController] implements it; RigelCore wires the pair
+ * at startup so the cast package never depends on the player layer.
+ */
+interface CastPlaybackPort {
+    fun setCastActive(active: Boolean)
+
+    fun remoteCastUrl(): String?
+
+    fun remoteCastTitle(): String
+}
 
 /**
  * Send-flow entry point shared by every host UI. Resolves the URL a remote
@@ -15,17 +25,27 @@ import io.ktor.http.Url
 object CastDispatcher {
     private val session = CastSession()
 
+    /** Composition-root wiring (RigelCore); tests install fakes and clear in teardown. */
+    internal var playbackPort: CastPlaybackPort? = null
+    internal var defaultClient: HttpClient? = null
+
+    /** Wire the production (or test) playback port and default HTTP client. */
+    fun install(playbackPort: CastPlaybackPort?, client: HttpClient?) {
+        this.playbackPort = playbackPort
+        this.defaultClient = client
+    }
+
     fun capabilities(target: CastTarget): CastCapabilities = session.capabilities(target)
 
     fun activeTarget(): CastTarget? = session.activeTarget()
 
     fun clearActive() {
         session.clearActive()
-        RigelCore.controller.setCastActive(false)
+        playbackPort?.setCastActive(false)
     }
 
     suspend fun seekActive(positionMs: Long, durationMs: Long): Boolean =
-        seekActive(positionMs, durationMs, RigelCore.client)
+        seekActive(positionMs, durationMs, requireClient())
 
     suspend fun seekActive(positionMs: Long, durationMs: Long, client: HttpClient): Boolean {
         val target = session.activeTarget() ?: return false
@@ -38,11 +58,11 @@ object CastDispatcher {
     }
 
 
-    fun remoteCastUrl(): String? = remoteCastUrl(RigelCore.controller.uiState.value)
+    fun remoteCastUrl(): String? = playbackPort?.remoteCastUrl()
 
-    fun remoteCastUrl(state: PlayerUiState): String? {
-        if (state.phase != PlayerPhase.PLAYING) return null
-        state.proxyUrl?.let { proxy ->
+    fun remoteCastUrl(isPlaying: Boolean, proxyUrl: String?, sourceUrl: String?): String? {
+        if (!isPlaying) return null
+        proxyUrl?.let { proxy ->
             val lan = Bridges.lanBaseUrl() ?: return null
             // Re-host the proxy's relative path at the current LAN base. Parse
             // the URL properly: the proxy is LAN-formatted since the AirPlay
@@ -52,18 +72,19 @@ object CastDispatcher {
             if (path.isNotEmpty()) return lan.trimEnd('/') + path
             return null
         }
-        return state.sourceUrl
+        return sourceUrl
     }
 
-    fun remoteCastTitle(): String = remoteCastTitle(RigelCore.controller.uiState.value)
+    fun remoteCastTitle(): String = playbackPort?.remoteCastTitle() ?: "Stream"
 
-    fun remoteCastTitle(state: PlayerUiState): String =
-        state.filename
-            ?: state.sourceUrl?.substringAfterLast('/')
+    fun remoteCastTitle(filename: String?, sourceUrl: String?): String =
+        filename
+            ?: sourceUrl?.substringAfterLast('/')
             ?: "Stream"
-    /** Returns a human-readable result/error string. */
-    suspend fun cast(target: CastTarget, url: String, title: String): String =
-        cast(target, url, title, RigelCore.client)
+
+    /** Dispatch with the installed default client. */
+    suspend fun cast(target: CastTarget, url: String, title: String): CastResult =
+        cast(target, url, title, requireClient())
 
     /**
      * Re-send media only while [target] remains the active receiver. The
@@ -75,23 +96,27 @@ object CastDispatcher {
         target: CastTarget,
         url: String,
         title: String,
-        client: HttpClient = RigelCore.client,
-    ): String? {
+        client: HttpClient = requireClient(),
+    ): CastResult? {
         val attempt = session.beginAttemptFor(target) ?: return null
         val result = ReceiverRegistry.adapterFor(target).cast(target, url, title, client)
-        if (result.startsWith("Sent to ") && session.commitActive(target, attempt)) {
-            RigelCore.controller.setCastActive(true)
+        if (result is CastResult.Sent && session.commitActive(target, attempt)) {
+            playbackPort?.setCastActive(true)
         }
         return result
     }
 
     /** Same dispatch with an injectable HTTP client (tests use a mock engine). */
-    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): String {
+    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): CastResult {
         val attempt = session.beginAttempt()
         val result = ReceiverRegistry.adapterFor(target).cast(target, url, title, client)
-        if (result.startsWith("Sent to ") && session.commitActive(target, attempt)) {
-            RigelCore.controller.setCastActive(true)
+        if (result is CastResult.Sent && session.commitActive(target, attempt)) {
+            playbackPort?.setCastActive(true)
         }
         return result
     }
+
+    private fun requireClient(): HttpClient =
+        defaultClient
+            ?: throw IllegalStateException("CastDispatcher client not installed — call install() at app startup")
 }

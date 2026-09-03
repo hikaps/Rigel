@@ -42,8 +42,8 @@ struct PlayerHostView: View {
 
     @ViewBuilder
     private var content: some View {
-        switch player.phase.name {
-        case "IDLE":
+        let phase = player.phase
+        if phase == .idle {
             stateContent {
                 Image(systemName: "play.rectangle.fill")
                     .font(.system(size: 42, weight: .medium))
@@ -71,8 +71,8 @@ struct PlayerHostView: View {
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
-        case "PROBING", "PREPARING_PROXY":
-            let preparingProxy = player.phase.name == "PREPARING_PROXY"
+        } else if phase == .probing || phase == .preparingProxy {
+            let preparingProxy = phase == .preparingProxy
             stateContent {
                 Image(systemName: preparingProxy ? "gearshape.2.fill" : "magnifyingglass")
                     .font(.system(size: 34, weight: .medium))
@@ -111,8 +111,8 @@ struct PlayerHostView: View {
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
-        case "PLAYING", "BUFFERING":
-            let buffering = player.phase.name == "BUFFERING"
+        } else if phase == .playing || phase == .buffering {
+            let buffering = phase == .buffering
             ZStack {
                 if let url = player.playableURL {
                     PlayerView(
@@ -160,7 +160,7 @@ struct PlayerHostView: View {
                         .allowsHitTesting(false)
                 }
             }
-        default: // ERROR
+        } else { // ERROR
             stateContent {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 36, weight: .medium))

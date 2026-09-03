@@ -1,8 +1,8 @@
 package app.rigel.cast
 
-import app.rigel.cast.dlna.DlnaDevice
-import app.rigel.cast.kodi.KodiDevice
-import app.rigel.cast.roku.RokuDevice
+import app.rigel.cast.DlnaDevice
+import app.rigel.cast.KodiDevice
+import app.rigel.cast.RokuDevice
 import app.rigel.source.jellyfin.JellyfinSession
 import kotlin.test.Test
 import kotlin.test.assertEquals

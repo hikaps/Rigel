@@ -2,14 +2,14 @@ package app.rigel.cast.chrome
 
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
+import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.ChromeDevice
 import app.rigel.cast.ReceiverAdapter
 import io.ktor.client.HttpClient
 
 object ChromeAdapter : ReceiverAdapter {
     override val kind = "chrome"
-
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.Chrome
 
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
@@ -22,8 +22,9 @@ object ChromeAdapter : ReceiverAdapter {
         url: String,
         title: String,
         client: HttpClient,
-    ): String {
-        val bridge = ChromecastBridgeFactory.bridge ?: return "Chromecast bridge not registered"
+    ): CastResult {
+        val bridge = ChromecastBridgeFactory.current
+            ?: return CastResult.Rejected("Chromecast bridge not registered")
         return ChromeRenderer(bridge).launch((target as CastTarget.Chrome).device, url, title)
     }
 
@@ -42,7 +43,7 @@ object ChromeAdapter : ReceiverAdapter {
     }
 
     override suspend fun probeManual(ip: String, client: HttpClient): CastTarget? {
-        val bridge = ChromecastBridgeFactory.bridge ?: return null
+        val bridge = ChromecastBridgeFactory.current ?: return null
         val port = 8009
         if (!ChromeRenderer(bridge).probe(ip, port)) return null
         return CastTarget.Chrome(ChromeDevice("manual-chrome-$ip", ip, port, "Chromecast"))

@@ -3,7 +3,7 @@ package app.rigel.devices
 import app.rigel.bridge.Bridges
 import app.rigel.cast.CastTarget
 import app.rigel.cast.ReceiverRegistry
-import app.rigel.cast.chrome.ChromeDevice
+import app.rigel.cast.ChromeDevice
 import app.rigel.cast.chrome.ChromecastBridgeFactory
 import app.rigel.settings.SettingsStore
 import co.touchlab.kermit.Logger
@@ -40,7 +40,7 @@ class DevicesRepository(
                 .firstNotNullOfOrNull { it.fromSsdp(device, client) } ?: continue
             found += DiscoveredDevice(target, "ssdp")
         }
-        if (ChromecastBridgeFactory.bridge != null) {
+        if (ChromecastBridgeFactory.current != null) {
             runCatching { discoverChromecast(timeoutMs.toInt()) }
                 .getOrDefault(emptyList())
                 .forEach { device ->
@@ -74,8 +74,10 @@ class DevicesRepository(
         settings.removeManualDevice(target)
     }
     private suspend fun discoverChromecast(timeoutMs: Int): List<ChromeDevice> =
+        // No cancel seam on ChromecastBridge: the browse runs to its
+        // timeout; late results are dropped.
         suspendCancellableCoroutine { continuation ->
-            val bridge = ChromecastBridgeFactory.bridge
+            val bridge = ChromecastBridgeFactory.current
             if (bridge == null) {
                 continuation.resume(emptyList())
             } else {
