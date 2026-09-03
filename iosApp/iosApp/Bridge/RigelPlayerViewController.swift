@@ -567,15 +567,19 @@ final class RigelPlayerViewController: UIViewController {
             )
         }
         for (index, sidecar) in sidecarSubtitles.enumerated() {
+            let order = sidecar.order
             let label = sidecar.language ?? sidecar.name
             options.append(
                 TrackPickerOption(
-                    id: "sidecar-\(index)",
+                    id: "sidecar-\(order)",
                     title: label,
                     isSelected: activeSidecarSubtitleIndex == index,
                     select: { [weak self] in
-                        guard let self, self.sidecarSubtitles.indices.contains(index) else { return }
-                        self.activeSidecarSubtitleIndex = index
+                        guard let self,
+                              let currentIndex = self.sidecarSubtitles.firstIndex(where: { $0.order == order }) else {
+                            return
+                        }
+                        self.activeSidecarSubtitleIndex = currentIndex
                         if let group = self.subtitleGroup {
                             self.selectMediaOption(nil, in: group)
                         }

@@ -93,7 +93,7 @@ struct SettingsView: View {
                 HStack {
                     Text("Subtitle height")
                     Spacer()
-                    Text(subtitleBottomInset < 130 ? "Low" : subtitleBottomInset > 210 ? "High" : "Default")
+                    Text(subtitleBottomInset < 90 ? "Low" : subtitleBottomInset > 110 ? "High" : "Default")
                         .foregroundStyle(.secondary)
                 }
                 Slider(value: $subtitleBottomInset, in: 40...300, step: 10)
