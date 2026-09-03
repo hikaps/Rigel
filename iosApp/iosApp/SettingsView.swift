@@ -97,6 +97,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Slider(value: $subtitleBottomInset, in: 40...300, step: 10)
+                    .accessibilityLabel("Subtitle height")
                 Text("Moves downloaded and sidecar subtitles up or down.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -109,6 +110,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Slider(value: $subtitleDelay, in: -10...10, step: 0.1)
+                    .accessibilityLabel("Subtitle delay")
                 Text("Positive values show subtitles later.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)

@@ -529,7 +529,8 @@ final class RigelPlayerViewController: UIViewController {
         let selectedNative = subtitleGroup.flatMap {
             player?.currentItem?.currentMediaSelection.selectedMediaOption(in: $0)
         }
-        if !nativeOptions.isEmpty || !sidecarSubtitles.isEmpty {
+        let canShowOff = nativeOptions.isEmpty || subtitleGroup?.allowsEmptySelection == true
+        if canShowOff && (!nativeOptions.isEmpty || !sidecarSubtitles.isEmpty) {
             options.append(
                 TrackPickerOption(
                     id: "subtitles-off",
