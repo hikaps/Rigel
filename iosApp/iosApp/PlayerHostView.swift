@@ -369,6 +369,7 @@ struct PlayerView: UIViewControllerRepresentable {
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
                 subtitleTracks: subtitleTracks,
                 selectedExternalSubtitleUrl: selectedExternalSubtitleUrl,
+                durationMs: probeDurationMs.map { KotlinLong(longLong: Int64($0)) },
                 isProxy: isProxy,
                 startOffsetMs: startPositionMs
             )

@@ -1593,14 +1593,10 @@ private struct SubtitleCustomizationSheet: View {
                             Image(systemName: "minus")
                         }
                         .accessibilityLabel("Decrease subtitle font size")
-                        Button {
-                            model.adjustFontSize(by: 2)
-                        } label: {
-                            Text("\(Int(model.appearance.fontSizePoints)) pt")
-                                .frame(minWidth: 58)
-                        }
-                        .accessibilityLabel("Subtitle font size")
-                        .accessibilityValue("\(Int(model.appearance.fontSizePoints)) points")
+                        Text("\(Int(model.appearance.fontSizePoints)) pt")
+                            .frame(minWidth: 58)
+                            .accessibilityLabel("Subtitle font size")
+                            .accessibilityValue("\(Int(model.appearance.fontSizePoints)) points")
                         Button {
                             model.adjustFontSize(by: 2)
                         } label: {
@@ -1805,6 +1801,7 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         longFormVideoAirPlayEligible: Bool,
         subtitleTracks: [SubtitleTrack],
         selectedExternalSubtitleUrl: String?,
+        durationMs: KotlinLong?,
         isProxy: Bool,
         startOffsetMs: Int64
     ) {
@@ -1815,6 +1812,7 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
             longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
             subtitleTracks: subtitleTracks,
             selectedExternalSubtitleUrl: selectedExternalSubtitleUrl,
+            durationSeconds: durationMs.map { $0.doubleValue / 1000.0 },
             isProxy: isProxy,
             startOffsetSeconds: Double(startOffsetMs) / 1000.0
         )

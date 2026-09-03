@@ -221,6 +221,27 @@ class PlayerControllerTest {
     }
 
     @Test
+    fun clearingSelectedSubtitleDuringCastRebuildsWithoutSidecar() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request)
+        advanceUntilIdle()
+        val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
+        c.selectExternalSubtitle(track, positionMs = 15_000)
+        advanceUntilIdle()
+        c.setCastActive(true)
+
+        c.selectExternalSubtitle(null, positionMs = 30_000)
+        advanceUntilIdle()
+
+        assertNull(c.uiState.value.selectedExternalSubtitleUrl)
+        assertEquals(listOf(track), c.uiState.value.subtitleTracks)
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertNotNull(c.uiState.value.proxyUrl)
+        assertTrue(hlsSubtitleTracks.last().isEmpty())
+        assertEquals(30_000, hlsOffsets.last())
+    }
+
+    @Test
     fun selectingSameExternalSubtitleRebuildsWithoutDuplicatingTrack() = runTest(dispatcher.scheduler) {
         val c = controller()
         c.loadRequest(request)

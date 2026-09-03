@@ -22,6 +22,7 @@ interface NativePlayerBridge {
         longFormVideoAirPlayEligible: Boolean,
         subtitleTracks: List<SubtitleTrack>,
         selectedExternalSubtitleUrl: String?,
+        durationMs: Long?,
         isProxy: Boolean,
         startOffsetMs: Long,
     )

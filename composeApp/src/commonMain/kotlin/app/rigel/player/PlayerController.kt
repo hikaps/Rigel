@@ -126,7 +126,35 @@ class PlayerController(
         val current = _uiState.value
         if (current.phase == PlayerPhase.IDLE) return
         if (track == null) {
-            _uiState.value = current.copy(selectedExternalSubtitleUrl = null)
+            val cleared = current.copy(selectedExternalSubtitleUrl = null)
+            // A local player deselects the HLS rendition itself, but a remote
+            // renderer keeps its own subtitle selection: it keeps fetching the
+            // old playlist where the sidecar is the default. Rebuild the proxy
+            // without the sidecar so the receiver stops rendering it.
+            val needsRebuild = current.selectedExternalSubtitleUrl != null &&
+                current.castActive &&
+                current.proxyUrl != null
+            if (!needsRebuild) {
+                _uiState.value = cleared
+                return
+            }
+            val probe = current.probe ?: run {
+                _uiState.value = cleared
+                return
+            }
+            val route = current.route ?: PlaybackRoute.REMUX
+            val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
+                ?: positionMs.coerceAtLeast(0)
+            invalidatePendingWork()
+            directFallbackUsed = false
+            val generation = loadGeneration
+            _uiState.value = cleared.copy(
+                phase = PlayerPhase.PREPARING_PROXY,
+                route = route,
+                proxyUrl = null,
+                startPositionMs = target,
+            )
+            pendingJob = scope.launch { prepareProxy(probe, route, generation) }
             return
         }
         if (track.url.isBlank()) return
