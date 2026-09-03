@@ -2,6 +2,7 @@ package app.rigel.cast.roku
 
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
+import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
 import app.rigel.cast.ReceiverAdapter
 import io.ktor.client.HttpClient
@@ -24,10 +25,14 @@ object RokuAdapter : ReceiverAdapter {
         url: String,
         title: String,
         client: HttpClient,
-    ): String {
+    ): CastResult {
         val device = (target as CastTarget.Roku).device
         val ok = RokuRenderer(client).launchPlayOnRoku(device, url)
-        return if (ok) "Sent to ${target.name}" else "Roku launch failed (Play on Roku channel required)"
+        return if (ok) {
+            CastResult.Sent("Sent to ${target.name}")
+        } else {
+            CastResult.Rejected("Roku launch failed (Play on Roku channel required)")
+        }
     }
 
     override suspend fun fromSsdp(device: SsdpDevice, client: HttpClient): CastTarget? {

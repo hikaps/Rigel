@@ -121,7 +121,7 @@ struct DevicesView: View {
         ) { result, _ in
             Task { @MainActor in
                 self.busyTarget = nil
-                self.notice = result ?? "Cast failed"
+                self.notice = result?.message ?? "Cast failed"
             }
         }
     }

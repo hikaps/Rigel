@@ -1,10 +1,10 @@
 package app.rigel.settings
 
 import app.rigel.cast.CastTarget
-import app.rigel.cast.chrome.ChromeDevice
-import app.rigel.cast.dlna.DlnaDevice
-import app.rigel.cast.kodi.KodiDevice
-import app.rigel.cast.roku.RokuDevice
+import app.rigel.cast.ChromeDevice
+import app.rigel.cast.DlnaDevice
+import app.rigel.cast.KodiDevice
+import app.rigel.cast.RokuDevice
 import app.rigel.source.jellyfin.JellyfinSession
 import com.russhwolf.settings.MapSettings
 import kotlin.test.Test

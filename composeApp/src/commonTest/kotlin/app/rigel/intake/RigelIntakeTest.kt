@@ -5,11 +5,9 @@ import app.rigel.bridge.ProbeResult
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.player.PlayerController
 import app.rigel.player.PlayerPhase
-import app.rigel.player.RigelIntake
 import app.rigel.settings.LinkHistoryEntry
 import app.rigel.settings.SettingsStore
 import com.russhwolf.settings.MapSettings
-import com.russhwolf.settings.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -29,7 +27,7 @@ class RigelIntakeTest {
 
     private val dispatcher = StandardTestDispatcher()
 
-    private fun controller() = PlayerController(SettingsStore(Settings()))
+    private fun controller() = PlayerController(SettingsStore(MapSettings(mutableMapOf())))
 
     @BeforeTest
     fun setUp() {

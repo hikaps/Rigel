@@ -23,11 +23,11 @@ interface RendererBridge {
 }
 
 object RendererBridgeFactory {
-    private var impl: RendererBridge? = null
+    private val slot = BridgeSlot<RendererBridge>()
 
     fun register(bridge: RendererBridge) {
-        impl = bridge
+        slot.register(bridge)
     }
 
-    fun create(): RendererBridge? = impl
+    fun create(): RendererBridge? = slot.current
 }

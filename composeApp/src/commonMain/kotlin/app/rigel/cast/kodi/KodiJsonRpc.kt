@@ -10,12 +10,6 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.userAgent
 
-data class KodiDevice(
-    val usn: String,
-    val endpoint: String, // http://<host>:8080
-    val name: String?,
-)
-
 /**
  * Pure JSON-RPC builders for Kodi (HTTP port 8080, JSON-RPC 2.0).
  * Kodi settings: Settings → Services → Control → "Allow remote control via HTTP".

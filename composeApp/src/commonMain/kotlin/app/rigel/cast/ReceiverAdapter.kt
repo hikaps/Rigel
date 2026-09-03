@@ -21,8 +21,8 @@ interface ReceiverAdapter {
 
     fun capabilities(): CastCapabilities
 
-    /** Send a URL to the remote renderer. Returns a human-readable result or error. */
-    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): String
+    /** Send a URL to the remote renderer; [CastResult.message] is user-facing. */
+    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): CastResult
     /** Seek the active remote item; false means this receiver cannot seek. */
     suspend fun seek(
         target: CastTarget,

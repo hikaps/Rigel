@@ -110,12 +110,33 @@ class PlayerControllerTest {
 
     @BeforeTest
     fun setUp() {
+        // Tests mutate the fixture fields; reset so order can't leak state.
+        resetFixtures()
         Dispatchers.setMain(dispatcher)
     }
 
     @AfterTest
     fun tearDown() {
         Dispatchers.resetMain()
+        RigelBridgeFactory.register(discovery = null, probe = null, transcode = null, httpServer = null)
+    }
+
+    private fun resetFixtures() {
+        probeResult = ProbeResult("mp4", "h264", listOf("aac"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        probeError = null
+        hlsPath = "hls/s1/out.m3u8"
+        hlsError = null
+        serverPort = 8090
+        serverError = null
+        serverStopped = false
+        lanBase = null
+        stoppedSessions.clear()
+        hlsModes.clear()
+        hlsOffsets.clear()
+        hlsSessionIds.clear()
+        hlsSubtitleTracks.clear()
+        transcodeErrorCallback = null
+        pendingReady = null
     }
 
     @Test
