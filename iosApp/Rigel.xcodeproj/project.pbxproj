@@ -26,6 +26,7 @@
 		55ACB229D7C9A9EEBE3AB22C /* DevicesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D4BD15281EBF63805BCE13B /* DevicesView.swift */; };
 		581C58ABE626229814E0ED2D /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA7FB6CB41BECFF4B3DA0F4 /* HistoryView.swift */; };
 		5DC5A24EC5F274A8CE95C3D4 /* SsdpTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F0F93065A26FD713AD4C18D /* SsdpTest.swift */; };
+		6065A2896A859B0ADD9DB996 /* JellyfinAsync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E4280FB564D181C3EF80346 /* JellyfinAsync.swift */; };
 		60A1BB0A2115E62590F4FB9B /* UpnpRendererService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFB95112E586DE9EC94C62B3 /* UpnpRendererService.swift */; };
 		73AF4CB47F7B8244539FAF84 /* fixture.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 3D60E26950EAB07D1E35774B /* fixture.mp4 */; };
 		7E5E27A6A6A57535C6E72064 /* ChromecastFramingTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A299CAB8D951E6208155A5B6 /* ChromecastFramingTest.swift */; };
@@ -42,6 +43,7 @@
 		90C9A61FE25F6820CF18762D /* PlayerModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C88DEE30A1887F3F2D74F5D7 /* PlayerModelTests.swift */; };
 		9503AD3831DD2E48D3F60825 /* JellyfinSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58F497B8CE4B18C52A2FA793 /* JellyfinSupport.swift */; };
 		992C5F304BCD67E08D16EAF8 /* HlsExporterIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6149C13D84A4ADF6B8A96411 /* HlsExporterIO.swift */; };
+		9A0EF6E2BAD5108A28DEF303 /* JellyfinViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7564F580CEE1922380DBAC68 /* JellyfinViewModel.swift */; };
 		9ACF36E8EC1BAE920F544580 /* PlayerChromeViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23506D9F47ACB0814B259811 /* PlayerChromeViews.swift */; };
 		A46049877E4FF3742A7FB16A /* BridgeAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1783BE55CF934AA43EC8DE34 /* BridgeAdapters.swift */; };
 		A736676548D0CC33C02ECFA7 /* HlsExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0C01D2B513E5A89B689474 /* HlsExporter.swift */; };
@@ -64,6 +66,7 @@
 		F4B1AD0E21573717A8A1F728 /* DeviceSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2051C23C328C7C22C8B3632A /* DeviceSetupView.swift */; };
 		F9254DF13AA8D1E8B8F12B26 /* Ssdp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0A77D73BD53FB477190213 /* Ssdp.swift */; };
 		FABF00F346D31526946B6F8E /* HlsVideoPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1931CB8B2731B064F91DB089 /* HlsVideoPipeline.swift */; };
+		FC6124DC32844B1AB0F1808E /* JellyfinAsyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6ADFF405DA904BE40B0D3E /* JellyfinAsyncTests.swift */; };
 		FE6501ADC8903E3517CDED07 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E20CC30AFCA65D53397B118 /* HomeView.swift */; };
 		FEFAD4FE14DF390979D2DED1 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 523A8D7C5525838C63DC0274 /* ShareViewController.swift */; };
 /* End PBXBuildFile section */
@@ -113,8 +116,10 @@
 		23506D9F47ACB0814B259811 /* PlayerChromeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerChromeViews.swift; sourceTree = "<group>"; };
 		28078C8B475E60D15BD05567 /* Bridges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bridges.swift; sourceTree = "<group>"; };
 		29FBA85EFEB98888671E853F /* SubtitlePreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitlePreferencesTests.swift; sourceTree = "<group>"; };
+		2F6ADFF405DA904BE40B0D3E /* JellyfinAsyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinAsyncTests.swift; sourceTree = "<group>"; };
 		3995BE78A381573663358A1E /* SubtitleCustomizationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleCustomizationSheet.swift; sourceTree = "<group>"; };
 		3D60E26950EAB07D1E35774B /* fixture.mp4 */ = {isa = PBXFileReference; path = fixture.mp4; sourceTree = "<group>"; };
+		3E4280FB564D181C3EF80346 /* JellyfinAsync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinAsync.swift; sourceTree = "<group>"; };
 		41C5990A1CA969D7CF4D0639 /* fixture_sub_en.srt */ = {isa = PBXFileReference; path = fixture_sub_en.srt; sourceTree = "<group>"; };
 		43A80DAD29CA264E11AE1E2A /* RigelPlayerViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigelPlayerViewController.swift; sourceTree = "<group>"; };
 		447A68C1A13FE16EF24829F3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -133,6 +138,7 @@
 		6B4E410582355FDD47D375C2 /* fixture_sub_fr.srt */ = {isa = PBXFileReference; path = fixture_sub_fr.srt; sourceTree = "<group>"; };
 		6D9328475D81883279D9EB6F /* OpenSubtitlesSearchSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenSubtitlesSearchSheet.swift; sourceTree = "<group>"; };
 		6DE32A6746C3E597664C10F4 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		7564F580CEE1922380DBAC68 /* JellyfinViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinViewModel.swift; sourceTree = "<group>"; };
 		79688BECFCAC2D74B3BA7974 /* PlayerOrientation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerOrientation.swift; sourceTree = "<group>"; };
 		7F0F93065A26FD713AD4C18D /* SsdpTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SsdpTest.swift; sourceTree = "<group>"; };
 		823C4F6AC1746D30C1238B88 /* RigelPlayerBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigelPlayerBridge.swift; sourceTree = "<group>"; };
@@ -172,6 +178,7 @@
 			children = (
 				447A68C1A13FE16EF24829F3 /* Assets.xcassets */,
 				FF3357516386402A9A76D43E /* Info.plist */,
+				7564F580CEE1922380DBAC68 /* JellyfinViewModel.swift */,
 				09F3E4E0C6B00EC13043EECB /* PlayerModel.swift */,
 				13A2B46286CE87F507945849 /* RigelApp.swift */,
 				90029D92694D0869C85D2255 /* Theme.swift */,
@@ -293,6 +300,7 @@
 		99AE06FA26661543CBC21682 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				3E4280FB564D181C3EF80346 /* JellyfinAsync.swift */,
 				58F497B8CE4B18C52A2FA793 /* JellyfinSupport.swift */,
 				1DDF70300D69370704A14D9A /* OpenSubtitles.swift */,
 				A84E7E5EA7BD9D28381175BE /* SubtitlePreferences.swift */,
@@ -314,6 +322,7 @@
 			children = (
 				A299CAB8D951E6208155A5B6 /* ChromecastFramingTest.swift */,
 				105784B8EDEF8B49A8E1C87C /* HttpServerTest.swift */,
+				2F6ADFF405DA904BE40B0D3E /* JellyfinAsyncTests.swift */,
 				D792E661D7FEE1597802AE07 /* JellyfinCancellationTests.swift */,
 				FCB21DE62511183304BF4F7E /* OpenSubtitlesTests.swift */,
 				C88DEE30A1887F3F2D74F5D7 /* PlayerModelTests.swift */,
@@ -502,6 +511,7 @@
 			files = (
 				7E5E27A6A6A57535C6E72064 /* ChromecastFramingTest.swift in Sources */,
 				80534E653B01068DE5C7873C /* HttpServerTest.swift in Sources */,
+				FC6124DC32844B1AB0F1808E /* JellyfinAsyncTests.swift in Sources */,
 				F07CAC55C7125B9570772B51 /* JellyfinCancellationTests.swift in Sources */,
 				0860A7704B7365B9F164CB7E /* OpenSubtitlesTests.swift in Sources */,
 				90C9A61FE25F6820CF18762D /* PlayerModelTests.swift in Sources */,
@@ -533,7 +543,9 @@
 				FABF00F346D31526946B6F8E /* HlsVideoPipeline.swift in Sources */,
 				FE6501ADC8903E3517CDED07 /* HomeView.swift in Sources */,
 				CEF57BDA41A823F25B6532D3 /* HttpServer.swift in Sources */,
+				6065A2896A859B0ADD9DB996 /* JellyfinAsync.swift in Sources */,
 				9503AD3831DD2E48D3F60825 /* JellyfinSupport.swift in Sources */,
+				9A0EF6E2BAD5108A28DEF303 /* JellyfinViewModel.swift in Sources */,
 				CE96A7957AD6EED370D54E87 /* OpenSubtitles.swift in Sources */,
 				4FDA46F1E38B929A93CECB72 /* OpenSubtitlesSearchSheet.swift in Sources */,
 				9ACF36E8EC1BAE920F544580 /* PlayerChromeViews.swift in Sources */,
