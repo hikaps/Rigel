@@ -1,47 +1,17 @@
 import SwiftUI
 import ComposeApp
 
-/// Jellyfin source: connect, browse the library, play locally or push a
-/// library item to a logged-in client session. All calls go to the Kotlin
-/// JellyfinClient through completion handlers.
+/// Jellyfin source screen. Rendering only — state and requests live in
+/// [JellyfinViewModel]; playback opens through the shared PlayerModel.
 struct SourcesView: View {
     @EnvironmentObject private var player: PlayerModel
-    @State private var server = ""
-    @State private var username = ""
-    @State private var password = ""
+    @StateObject private var model = JellyfinViewModel()
     @State private var showPassword = false
-    @State private var busy = false
-    @State private var notice: String?
-    @State private var noticeIsError = false
-
-    @State private var items: [JellyfinItem] = []
-    @State private var searchText = ""
-    @State private var searchResults: [JellyfinItem] = []
-    @State private var searchPerformed = false
-    @State private var searchBusy = false
-    @State private var searchError: String?
-    @State private var libraryError: String?
-    @State private var sessions: [JellyfinSession] = []
-    @State private var parentId: String?
-    @State private var parentName: String?
-    @State private var loadedOnce = false
-    @State private var connectionGeneration = 0
-    @State private var libraryGeneration = 0
-    @State private var searchGeneration = 0
-    @State private var sessionGeneration = 0
-    @State private var playGeneration = 0
-
-    private var settings: SettingsStore { RigelCore.shared.settings }
-    private var jellyfin: JellyfinClient { RigelCore.shared.jellyfin }
-    private var connected: Bool { !settings.jellyfinToken().isEmpty }
-    private var base: String { settings.jellyfinServer() }
-    private var token: String { settings.jellyfinToken() }
-    private var userId: String { settings.jellyfinUserId() }
 
     var body: some View {
         NavigationStack {
             Group {
-                if connected {
+                if model.connected {
                     connectedList
                 } else {
                     connectForm
@@ -69,20 +39,20 @@ struct SourcesView: View {
             }
 
             Section("Server") {
-                TextField("Server URL", text: $server)
+                TextField("Server URL", text: $model.server)
                     .textFieldStyle(.roundedBorder)
                     .keyboardType(.URL)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                TextField("Username", text: $username)
+                TextField("Username", text: $model.username)
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                 HStack {
                     if showPassword {
-                        TextField("Password", text: $password)
+                        TextField("Password", text: $model.password)
                     } else {
-                        SecureField("Password", text: $password)
+                        SecureField("Password", text: $model.password)
                     }
                     Button {
                         showPassword.toggle()
@@ -94,21 +64,21 @@ struct SourcesView: View {
                 .textFieldStyle(.roundedBorder)
             }
 
-            if let notice {
+            if let notice = model.notice {
                 Section {
                     Text(notice)
                         .font(.footnote)
-                        .foregroundStyle(noticeIsError ? .red : Color.rigelStar)
+                        .foregroundStyle(model.noticeIsError ? .red : Color.rigelStar)
                 }
             }
 
             Section {
                 Button {
-                    connect()
+                    model.connect()
                 } label: {
                     HStack {
                         Spacer()
-                        if busy {
+                        if model.busy {
                             ProgressView()
                         } else {
                             Text("Connect").font(.headline)
@@ -116,15 +86,14 @@ struct SourcesView: View {
                         Spacer()
                     }
                 }
-                .disabled(busy || server.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(model.busy || model.server.trimmingCharacters(in: .whitespaces).isEmpty)
                 .buttonStyle(.borderedProminent)
                 .tint(Color.rigelStar)
                 .listRowBackground(Color.clear)
             }
         }
         .onAppear {
-            server = settings.jellyfinServer()
-            username = settings.jellyfinUsername()
+            model.prepareForm()
         }
     }
 
@@ -133,50 +102,41 @@ struct SourcesView: View {
             Section {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(displayServer)
+                        Text(model.displayServer)
                             .font(.headline)
                             .lineLimit(1)
-                        Text(username)
+                        Text(model.username)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Disconnect") { disconnect() }
+                    Button("Disconnect") { model.disconnect() }
                         .buttonStyle(.borderless)
                 }
             }
 
             Section {
                 HStack {
-                    Text(parentName ?? "Library")
+                    Text(model.parentName ?? "Library")
                         .font(.headline)
                     Spacer()
-                    if parentId != nil {
+                    if model.parentId != nil {
                         Button {
-                            parentId = nil
-                            parentName = nil
-                            items = []
-                            loadedOnce = false
-                            searchGeneration &+= 1
-                            searchBusy = false
-                            searchResults = []
-                            searchPerformed = false
-                            searchError = nil
-                            loadLibrary(at: nil)
+                            model.backToRoot()
                         } label: {
                             Image(systemName: "arrow.uturn.backward")
                         }
                         .buttonStyle(.borderless)
                     }
                     Button {
-                        loadLibrary(at: parentId)
+                        model.loadLibrary(at: model.parentId)
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(.borderless)
-                    .disabled(busy)
+                    .disabled(model.busy)
                 }
-                if busy {
+                if model.busy {
                     HStack(spacing: 10) {
                         ProgressView()
                         Text("Loading library…")
@@ -184,13 +144,13 @@ struct SourcesView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                if let libraryError {
+                if let libraryError = model.libraryError {
                     Text(libraryError)
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
-                if !loadedOnce && items.isEmpty && !busy && libraryError == nil {
-                    Button("Load library") { loadLibrary(at: parentId) }
+                if !model.loadedOnce && model.items.isEmpty && !model.busy && model.libraryError == nil {
+                    Button("Load library") { model.loadLibrary(at: model.parentId) }
                         .buttonStyle(.borderedProminent)
                         .tint(Color.rigelStar)
                         .listRowBackground(Color.clear)
@@ -199,19 +159,19 @@ struct SourcesView: View {
 
             Section("Search Jellyfin") {
                 HStack(spacing: 8) {
-                    TextField("Movies, shows, or episodes", text: $searchText)
+                    TextField("Movies, shows, or episodes", text: $model.searchText)
                         .textFieldStyle(.roundedBorder)
                         .submitLabel(.search)
-                        .onSubmit { searchLibrary() }
+                        .onSubmit { model.search() }
                     Button {
-                        searchLibrary()
+                        model.search()
                     } label: {
                         Image(systemName: "magnifyingglass")
                     }
                     .buttonStyle(.borderless)
-                    .disabled(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                if searchBusy {
+                if model.searchBusy {
                     HStack(spacing: 10) {
                         ProgressView()
                         Text("Searching Jellyfin…")
@@ -221,20 +181,20 @@ struct SourcesView: View {
                 }
             }
 
-            if searchPerformed {
+            if model.searchPerformed {
                 Section("Search results") {
-                    if let searchError {
+                    if let searchError = model.searchError {
                         Text(searchError)
                             .font(.footnote)
                             .foregroundStyle(.red)
-                    } else if !searchBusy && searchResults.isEmpty {
+                    } else if !model.searchBusy && model.searchResults.isEmpty {
                         Text("No matches")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                    ForEach(searchResults, id: \.id) { item in
+                    ForEach(model.searchResults, id: \.id) { item in
                         LibraryRow(item: item) {
-                            openFolder(item)
+                            model.openFolder(item)
                         } onPlay: {
                             play(item)
                         }
@@ -243,18 +203,18 @@ struct SourcesView: View {
             }
 
             Section("Library") {
-                ForEach(items, id: \.id) { item in
+                ForEach(model.items, id: \.id) { item in
                     LibraryRow(item: item) {
-                        openFolder(item)
+                        model.openFolder(item)
                     } onPlay: {
                         play(item)
                     }
                 }
             }
 
-            if !sessions.isEmpty {
+            if !model.sessions.isEmpty {
                 Section("Cast library item to a client") {
-                    ForEach(sessions, id: \.id) { session in
+                    ForEach(model.sessions, id: \.id) { session in
                         HStack {
                             Image(systemName: "airplayvideo")
                                 .foregroundStyle(Color.rigelStar)
@@ -267,20 +227,20 @@ struct SourcesView: View {
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Button("Cast") { castToSession(session) }
+                            Button("Cast") { model.castToSession(session) }
                                 .buttonStyle(.borderedProminent)
                                 .tint(Color.rigelStar)
-                                .disabled(busy)
+                                .disabled(model.busy)
                         }
                     }
                 }
             }
 
-            if let notice {
+            if let notice = model.notice {
                 Section {
                     Text(notice)
                         .font(.footnote)
-                        .foregroundStyle(noticeIsError ? .red : Color.rigelStar)
+                        .foregroundStyle(model.noticeIsError ? .red : Color.rigelStar)
                 }
             }
 
@@ -292,235 +252,9 @@ struct SourcesView: View {
         }
     }
 
-    private var displayServer: String {
-        base.replacingOccurrences(of: "https://", with: "")
-            .replacingOccurrences(of: "http://", with: "")
-    }
-
-    private func connect() {
-        connectionGeneration &+= 1
-        libraryGeneration &+= 1
-        searchGeneration &+= 1
-        sessionGeneration &+= 1
-        let requestGeneration = connectionGeneration
-        busy = true
-        notice = nil
-        noticeIsError = false
-        jellyfin.authenticate(
-            base: server.trimmingCharacters(in: .whitespaces),
-            username: username.trimmingCharacters(in: .whitespaces),
-            password: password,
-            deviceId: "rigel-ios"
-        ) { auth, _ in
-            Task { @MainActor in
-                guard self.connectionGeneration == requestGeneration else { return }
-                self.busy = false
-                if let auth {
-                    self.settings.setJellyfinServer(v: self.server.trimmingCharacters(in: .whitespaces))
-                    self.settings.setJellyfinUsername(v: self.username.trimmingCharacters(in: .whitespaces))
-                    self.settings.setJellyfinToken(v: auth.token)
-                    self.settings.setJellyfinUserId(v: auth.userId)
-                    self.password = ""
-                    self.loadedOnce = false
-                    self.items = []
-                    self.sessions = []
-                    self.searchResults = []
-                    self.searchPerformed = false
-                    self.searchError = nil
-                    self.libraryError = nil
-                    self.loadLibrary(at: nil)
-                } else {
-                    self.notice = "Authentication failed — check the server URL and credentials"
-                    self.noticeIsError = true
-                }
-            }
-        }
-    }
-
-    private func disconnect() {
-        connectionGeneration &+= 1
-        libraryGeneration &+= 1
-        searchGeneration &+= 1
-        sessionGeneration &+= 1
-        settings.setJellyfinToken(v: "")
-        busy = false
-        searchBusy = false
-        items = []
-        sessions = []
-        parentId = nil
-        parentName = nil
-        loadedOnce = false
-        searchResults = []
-        searchPerformed = false
-        searchText = ""
-        searchError = nil
-        libraryError = nil
-        notice = nil
-    }
-
-    private func loadLibrary(at requestedParentId: String?) {
-        libraryGeneration &+= 1
-        let requestGeneration = libraryGeneration
-        let connection = connectionGeneration
-        let requestBase = base
-        let requestToken = token
-        let requestUserId = userId
-        busy = true
-        libraryError = nil
-        jellyfin.browse(
-            base: requestBase,
-            token: requestToken,
-            userId: requestUserId,
-            parentId: requestedParentId
-        ) { found, error in
-            Task { @MainActor in
-                guard self.connectionGeneration == connection,
-                      self.libraryGeneration == requestGeneration else { return }
-                self.busy = false
-                self.loadedOnce = true
-                if let error {
-                    guard !isCancellation(error) else { return }
-                    self.items = []
-                    self.libraryError = self.errorMessage(error)
-                    return
-                }
-                self.libraryError = nil
-                self.items = found ?? []
-                if self.sessions.isEmpty {
-                    self.loadSessions(connection: connection)
-                }
-            }
-        }
-    }
-
-    private func loadSessions(connection: Int) {
-        sessionGeneration &+= 1
-        let requestGeneration = sessionGeneration
-        let requestBase = base
-        let requestToken = token
-        jellyfin.sessions(base: requestBase, token: requestToken) { list, _ in
-            Task { @MainActor in
-                guard self.connectionGeneration == connection,
-                      self.sessionGeneration == requestGeneration else { return }
-                self.sessions = list ?? []
-            }
-        }
-    }
-
-    private func searchLibrary() {
-        let term = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty else { return }
-        searchGeneration &+= 1
-        let requestGeneration = searchGeneration
-        let connection = connectionGeneration
-        let requestBase = base
-        let requestToken = token
-        let requestUserId = userId
-        searchBusy = true
-        searchPerformed = true
-        searchResults = []
-        searchError = nil
-        notice = nil
-        jellyfin.search(
-            base: requestBase,
-            token: requestToken,
-            userId: requestUserId,
-            term: term
-        ) { found, error in
-            Task { @MainActor in
-                guard self.connectionGeneration == connection,
-                      self.searchGeneration == requestGeneration else { return }
-                self.searchBusy = false
-                if let error {
-                    guard !isCancellation(error) else { return }
-                    self.searchResults = []
-                    self.searchError = self.errorMessage(error)
-                    return
-                }
-                self.searchError = nil
-                self.searchResults = found ?? []
-            }
-        }
-    }
-
-    private func openFolder(_ item: JellyfinItem) {
-        parentId = item.id
-        parentName = item.name
-        items = []
-        loadedOnce = false
-        searchGeneration &+= 1
-        searchBusy = false
-        searchResults = []
-        searchPerformed = false
-        searchError = nil
-        loadLibrary(at: item.id)
-    }
-
     private func play(_ item: JellyfinItem) {
-        playGeneration &+= 1
-        let requestGeneration = playGeneration
-        let requestBase = base
-        let requestToken = token
-        let requestUserId = userId
-        let connection = connectionGeneration
-        let url = JellyfinApi.shared.streamUrl(
-            base: requestBase,
-            itemId: item.id,
-            token: requestToken
-        )
-        busy = true
-        jellyfin.itemSubtitleTracks(
-            base: requestBase,
-            token: requestToken,
-            userId: requestUserId,
-            itemId: item.id
-        ) { tracks, error in
-            Task { @MainActor in
-                guard self.connectionGeneration == connection,
-                      self.playGeneration == requestGeneration else { return }
-                self.busy = false
-                if let error {
-                    guard !self.isCancellation(error) else { return }
-                    NSLog("[Rigel] Jellyfin subtitle lookup failed: %@", error.localizedDescription)
-                    _ = self.player.open(url: url, title: item.name)
-                    return
-                }
-                _ = self.player.open(
-                    url: url,
-                    title: item.name,
-                    subtitleTracks: tracks ?? []
-                )
-            }
-        }
-    }
-
-    private func isCancellation(_ error: Error) -> Bool {
-        JellyfinCancellation.isCancellation(error)
-    }
-
-    private func errorMessage(_ error: Error) -> String {
-        let detail = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        return detail.isEmpty ? "Jellyfin request failed" : "Jellyfin request failed: \(detail)"
-    }
-
-    private func castToSession(_ session: JellyfinSession) {
-        guard let firstItem = items.first(where: { !$0.isFolder }) else {
-            notice = "No playable item loaded"
-            noticeIsError = true
-            return
-        }
-        busy = true
-        jellyfin.playToSession(
-            base: base,
-            token: token,
-            sessionId: session.id,
-            itemIds: [firstItem.id]
-        ) { ok, _ in
-            Task { @MainActor in
-                self.busy = false
-                self.notice = ok?.boolValue == true ? "Sent to \(session.deviceName)" : "Cast failed"
-                self.noticeIsError = ok?.boolValue != true
-            }
+        model.play(item) { url, title, tracks in
+            _ = player.open(url: url, title: title, subtitleTracks: tracks)
         }
     }
 }
