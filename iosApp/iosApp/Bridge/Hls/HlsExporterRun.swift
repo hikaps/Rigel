@@ -74,7 +74,8 @@ extension RigelHlsExporter {
         var foundDefaultAudio = false
         for (offset, track) in session.subtitleTracks.enumerated() {
             var subtitleFmt: UnsafeMutablePointer<AVFormatContext>? = nil
-            guard openInput(url: track.url, headers: [:], fmt: &subtitleFmt),
+            let watchdog = InputWatchdog(timeoutSeconds: 10)
+            guard openSidecarInput(url: track.url, headers: [:], watchdog: watchdog, fmt: &subtitleFmt),
                   let subtitleCtx = subtitleFmt else {
                 closeInput(&subtitleFmt)
                 reportFailure("Could not prepare the selected subtitle")
@@ -106,6 +107,7 @@ extension RigelHlsExporter {
                     title: title?.isEmpty == false
                         ? title
                         : streamMetadataValue(subtitleStream.pointee.metadata, key: "title"),
+                    ioWatchdog: watchdog
                 )
             )
         }
@@ -139,6 +141,7 @@ extension RigelHlsExporter {
                             timeBase: stream.pointee.time_base,
                             language: hlsLanguage(for: stream.pointee.metadata),
                             title: streamMetadataValue(stream.pointee.metadata, key: "title"),
+                            ioWatchdog: nil
                         )
                     )
                 }
@@ -660,6 +663,7 @@ extension RigelHlsExporter {
                 if readRet < 0 {
                     endedExternalSources.insert(sourceID)
                 } else {
+                    subtitleOutput.input.ioWatchdog?.touch()
                     didRead = true
                     writeSubtitlePacket(subtitleOutput, packet: &subtitlePacket)
                     av_packet_unref(&subtitlePacket)

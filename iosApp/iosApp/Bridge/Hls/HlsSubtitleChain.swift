@@ -7,6 +7,10 @@ struct SubtitleInput {
     let timeBase: AVRational
     let language: String?
     let title: String?
+    /// Non-nil for external sidecar sources opened with an I/O watchdog;
+    /// the reference must outlive the context because the C interrupt
+    /// callback holds an unretained pointer.
+    let ioWatchdog: InputWatchdog?
 }
 
 final class SubtitleOutput {
