@@ -30,6 +30,11 @@ final class OpenSubtitlesTests: XCTestCase {
                     request: request,
                     body: "{\"link\":\"https://downloads.example/subtitle.srt\"}"
                 )
+            case "/subtitle.srt":
+                return Self.response(
+                    request: request,
+                    body: "1\n00:00:00,000 --> 00:00:01,000\nHello\n"
+                )
             default:
                 return Self.response(request: request, statusCode: 404, body: "{}")
             }
@@ -63,11 +68,19 @@ final class OpenSubtitlesTests: XCTestCase {
         XCTAssertEqual(results[0].language, "en")
         XCTAssertEqual(results[0].fileName, "Matrix.en.srt")
 
-        let downloadURL = try await client.download(results[0])
-        XCTAssertEqual(downloadURL.absoluteString, "https://downloads.example/subtitle.srt")
+        // The download must land on disk: the HLS exporter cannot be pointed
+        // at the remote link (no network timeouts in its FFmpeg stack).
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensubtitles-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let downloadURL = try await client.download(results[0], destinationDirectory: destination)
+        XCTAssertTrue(downloadURL.isFileURL, downloadURL.absoluteString)
+        XCTAssertEqual(downloadURL.lastPathComponent, "Matrix.en-987.srt")
+        let saved = try String(contentsOf: downloadURL, encoding: .utf8)
+        XCTAssertTrue(saved.contains("Hello"), saved)
 
         let capturedRequests = requests
-        XCTAssertEqual(capturedRequests.count, 3)
+        XCTAssertEqual(capturedRequests.count, 4)
 
         let loginRequest = try XCTUnwrap(capturedRequests.first)
         XCTAssertEqual(loginRequest.value(forHTTPHeaderField: "Api-Key"), "app-key")
@@ -101,6 +114,132 @@ final class OpenSubtitlesTests: XCTestCase {
         )
         XCTAssertEqual(downloadJSON["file_id"] as? Int, 987)
         XCTAssertEqual(downloadJSON["sub_format"] as? String, "srt")
+
+        let fileRequest = try XCTUnwrap(capturedRequests[3])
+        XCTAssertEqual(fileRequest.url?.absoluteString, "https://downloads.example/subtitle.srt")
+    }
+
+    func testDownloadRejectsArchivePayloads() async throws {
+        OpenSubtitlesURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/api/v1/download":
+                return Self.response(
+                    request: request,
+                    body: "{\"link\":\"https://downloads.example/batch.zip\"}"
+                )
+            case "/batch.zip":
+                return Self.response(
+                    request: request,
+                    body: "PK\u{03}\u{04}not-a-plain-subtitle"
+                )
+            default:
+                return Self.response(request: request, statusCode: 404, body: "{}")
+            }
+        }
+        defer { OpenSubtitlesURLProtocol.handler = nil }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenSubtitlesURLProtocol.self]
+        let store = TestCredentialStore()
+        store.apiKey = "app-key"
+        store.token = "token-123"
+        store.baseURL = "api.opensubtitles.com"
+        let client = OpenSubtitlesClient(
+            store: store,
+            session: URLSession(configuration: configuration)
+        )
+        let result = OpenSubtitlesSearchResult(
+            id: 5,
+            title: "Batch",
+            language: "en",
+            fileName: "batch.srt",
+            downloadCount: nil,
+            hearingImpaired: false,
+            machineTranslated: false,
+            aiTranslated: false
+        )
+
+        do {
+            _ = try await client.download(result)
+            XCTFail("archive payload must not be saved as a subtitle")
+        } catch let error as OpenSubtitlesError {
+            XCTAssertEqual(error.localizedDescription, OpenSubtitlesError.unsupportedFile.localizedDescription)
+        }
+    }
+
+    func testDownloadSurfacesHTTPFailures() async throws {
+        OpenSubtitlesURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/api/v1/download":
+                return Self.response(
+                    request: request,
+                    body: "{\"link\":\"https://downloads.example/gone.srt\"}"
+                )
+            case "/gone.srt":
+                return Self.response(request: request, statusCode: 403, body: "forbidden")
+            default:
+                return Self.response(request: request, statusCode: 404, body: "{}")
+            }
+        }
+        defer { OpenSubtitlesURLProtocol.handler = nil }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenSubtitlesURLProtocol.self]
+        let store = TestCredentialStore()
+        store.apiKey = "app-key"
+        store.token = "token-123"
+        store.baseURL = "api.opensubtitles.com"
+        let client = OpenSubtitlesClient(
+            store: store,
+            session: URLSession(configuration: configuration)
+        )
+        let result = OpenSubtitlesSearchResult(
+            id: 6,
+            title: "Gone",
+            language: "en",
+            fileName: "gone.srt",
+            downloadCount: nil,
+            hearingImpaired: false,
+            machineTranslated: false,
+            aiTranslated: false
+        )
+
+        do {
+            _ = try await client.download(result)
+            XCTFail("HTTP failure must surface")
+        } catch let error as OpenSubtitlesError {
+            guard case let .httpStatus(status, _) = error else {
+                return XCTFail("expected httpStatus, got \(error)")
+            }
+            XCTAssertEqual(status, 403)
+        }
+    }
+
+    func testLocalFileNameIsSanitizedAndUnique() {
+        func result(_ title: String, _ fileName: String?, id: Int) -> OpenSubtitlesSearchResult {
+            OpenSubtitlesSearchResult(
+                id: id,
+                title: title,
+                language: "en",
+                fileName: fileName,
+                downloadCount: nil,
+                hearingImpaired: false,
+                machineTranslated: false,
+                aiTranslated: false
+            )
+        }
+        XCTAssertEqual(
+            OpenSubtitlesClient.localFileName(for: result("The Matrix", "Matrix.en.srt", id: 987)),
+            "Matrix.en-987.srt"
+        )
+        XCTAssertEqual(
+            OpenSubtitlesClient.localFileName(for: result("Movie: A Title?", nil, id: 12)),
+            "Movie_ A Title-12.srt"
+        )
+        XCTAssertEqual(
+            OpenSubtitlesClient.localFileName(for: result("###", "///", id: 3)),
+            "subtitle-3.srt"
+        )
     }
 
     private static func response(

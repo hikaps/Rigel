@@ -1,4 +1,5 @@
 import XCTest
+import Network
 import ComposeApp
 
 @testable import Rigel
@@ -589,5 +590,73 @@ final class ProbeTest: XCTestCase {
         guard case .eof = RigelHlsExporter.classifyPrimingRead(-541_478_725) else { return XCTFail("expected eof") }
         guard case .again = RigelHlsExporter.classifyPrimingRead(-EAGAIN) else { return XCTFail("expected again") }
         guard case .readError = RigelHlsExporter.classifyPrimingRead(-5) else { return XCTFail("expected readError") }
+    }
+
+    func testInputWatchdogDeadlineSemantics() {
+        let watchdog = InputWatchdog(timeoutSeconds: 1)
+        XCTAssertFalse(watchdog.shouldAbort(), "fresh open budget must not abort")
+        Thread.sleep(forTimeInterval: 1.1)
+        XCTAssertTrue(watchdog.shouldAbort(), "open budget must expire")
+
+        watchdog.startReading()
+        XCTAssertFalse(watchdog.shouldAbort(), "reading resets the budget")
+        Thread.sleep(forTimeInterval: 1.1)
+        XCTAssertTrue(watchdog.shouldAbort(), "a read stalled past the budget must abort")
+
+        watchdog.touch()
+        XCTAssertFalse(watchdog.shouldAbort(), "touch must refresh the read budget")
+    }
+
+    /// A sidecar source whose server accepts the connection and then stalls
+    /// must fail the session within the watchdog budget, never hang it.
+    func testStalledSidecarSourceFailsSession() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let listener = try NWListener(using: .tcp, on: .any)
+        let ready = expectation(description: "stall server ready")
+        var port: UInt16 = 0
+        listener.stateUpdateHandler = { state in
+            if case .ready = state {
+                port = listener.port?.rawValue ?? 0
+                ready.fulfill()
+            }
+        }
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: .global())
+            // Intentionally never reads or replies: the stall is the point.
+        }
+        listener.start(queue: .global())
+        wait(for: [ready], timeout: 5)
+        defer { listener.cancel() }
+
+        let sessionId = "test-stalled-sidecar-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer { try? FileManager.default.removeItem(at: outputDir) }
+        let finished = expectation(description: "stalled sidecar session settles")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [SubtitleTrack(url: "http://127.0.0.1:\(port)/stalled.srt", language: "eng", title: "Stalled")],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        // Watchdog budget is 10s; allow generous slack before declaring a hang.
+        wait(for: [finished], timeout: 20)
+        RigelHlsExporter.stopSession(sessionId: sessionId)
+
+        XCTAssertNil(readyPath, "a stalled sidecar must not publish a playlist")
+        XCTAssertEqual(error, "Could not prepare the selected subtitle")
     }
 }

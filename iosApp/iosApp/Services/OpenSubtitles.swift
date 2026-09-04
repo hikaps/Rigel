@@ -130,6 +130,7 @@ enum OpenSubtitlesError: LocalizedError {
     case invalidResponse
     case httpStatus(Int, String?)
     case missingDownloadLink
+    case unsupportedFile
 
     var errorDescription: String? {
         switch self {
@@ -144,6 +145,8 @@ enum OpenSubtitlesError: LocalizedError {
             return "OpenSubtitles error (HTTP \(status))."
         case .missingDownloadLink:
             return "OpenSubtitles did not provide a subtitle download link."
+        case .unsupportedFile:
+            return "The downloaded subtitle file is not a supported text format."
         }
     }
 }
@@ -225,7 +228,14 @@ final class OpenSubtitlesClient {
         }
     }
 
-    func download(_ result: OpenSubtitlesSearchResult) async throws -> URL {
+    /// Downloads the subtitle bytes and returns a local file URL. The remote
+    /// link must never reach the HLS exporter: its FFmpeg network stack has
+    /// no request timeout, so a stalled CDN connection would block session
+    /// startup (and the player) indefinitely.
+    func download(
+        _ result: OpenSubtitlesSearchResult,
+        destinationDirectory: URL? = nil
+    ) async throws -> URL {
         guard let apiKey = store.apiKey,
               let token = store.token,
               let baseURL = store.baseURL,
@@ -248,7 +258,77 @@ final class OpenSubtitlesClient {
         guard let link = URL(string: decoded.link), link.scheme == "https" || link.scheme == "http" else {
             throw OpenSubtitlesError.missingDownloadLink
         }
-        return link
+        return try await Self.fetchSubtitleFile(
+            from: link,
+            for: result,
+            session: session,
+            directory: destinationDirectory
+        )
+    }
+
+    static func fetchSubtitleFile(
+        from link: URL,
+        for result: OpenSubtitlesSearchResult,
+        session: URLSession,
+        directory: URL?
+    ) async throws -> URL {
+        var request = URLRequest(url: link)
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw OpenSubtitlesError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw OpenSubtitlesError.httpStatus(
+                http.statusCode,
+                HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
+            )
+        }
+        // OpenSubtitles may serve an archive or a gzip file instead of plain
+        // text; the player only renders text SRT/VTT.
+        let isZip = data.starts(with: [0x50, 0x4B])
+        let isGzip = data.starts(with: [0x1F, 0x8B])
+        guard !data.isEmpty, !isZip, !isGzip else {
+            throw OpenSubtitlesError.unsupportedFile
+        }
+
+        let targetDirectory = directory ?? defaultSubtitleDirectory()
+        try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+        let fileURL = targetDirectory.appendingPathComponent(localFileName(for: result))
+        try data.write(to: fileURL, options: .atomic)
+        return fileURL
+    }
+
+    static func defaultSubtitleDirectory() -> URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return documents.appendingPathComponent("Subtitles", isDirectory: true)
+    }
+
+    /// Unique per result id, stable across re-downloads (overwrites in place).
+    static func localFileName(for result: OpenSubtitlesSearchResult) -> String {
+        let baseName: String
+        let requestedFile = (result.fileName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !requestedFile.isEmpty {
+            baseName = requestedFile
+        } else {
+            baseName = result.title
+        }
+        let stem = sanitizedFileName(baseName)
+        return "\(stem)-\(result.id).srt"
+    }
+
+    static func sanitizedFileName(_ raw: String) -> String {
+        var stem = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if stem.hasSuffix(".srt") || stem.hasSuffix(".vtt") {
+            stem = String(stem.dropLast(4))
+        }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_."))
+        let replaced = String(String.UnicodeScalarView(stem.unicodeScalars.map {
+            allowed.contains($0) ? $0 : "_"
+        }))
+        let trimmed = replaced.trimmingCharacters(in: CharacterSet(charactersIn: " -_"))
+        let capped = String(trimmed.prefix(80))
+        return capped.isEmpty ? "subtitle" : capped
     }
 
     private func makeRequest(
