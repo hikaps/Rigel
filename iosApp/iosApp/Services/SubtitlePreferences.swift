@@ -82,7 +82,7 @@ struct SubtitleAppearance: Equatable {
     var bottomInset: CGFloat
 
     static let `default` = SubtitleAppearance(
-        fontSizePoints: 20,
+        fontSizePoints: 30,
         bold: false,
         textColor: .white,
         textOpacity: 1,

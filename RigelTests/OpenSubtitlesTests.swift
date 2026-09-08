@@ -217,6 +217,64 @@ final class OpenSubtitlesTests: XCTestCase {
         }
     }
 
+    func testDownloadNormalizesEncodedSubtitlesToUtf8() async throws {
+        OpenSubtitlesURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/api/v1/download":
+                return Self.response(
+                    request: request,
+                    body: "{\"link\":\"https://downloads.example/utf16.srt\"}"
+                )
+            case "/utf16.srt":
+                let text = "1\n00:00:00,000 --> 00:00:01,000\nCafé — é\n"
+                var utf16 = Data([0xFF, 0xFE])
+                utf16.append(contentsOf: text.data(using: .utf16LittleEndian) ?? Data())
+                return (
+                    HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!,
+                    utf16
+                )
+            default:
+                return Self.response(request: request, statusCode: 404, body: "{}")
+            }
+        }
+        defer { OpenSubtitlesURLProtocol.handler = nil }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenSubtitlesURLProtocol.self]
+        let store = TestCredentialStore()
+        store.apiKey = "app-key"
+        store.token = "token-123"
+        store.baseURL = "api.opensubtitles.com"
+        let client = OpenSubtitlesClient(
+            store: store,
+            session: URLSession(configuration: configuration)
+        )
+        let result = OpenSubtitlesSearchResult(
+            id: 7,
+            title: "Encoded",
+            language: "en",
+            fileName: "encoded.srt",
+            downloadCount: nil,
+            hearingImpaired: false,
+            machineTranslated: false,
+            aiTranslated: false
+        )
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensubtitles-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        let fileURL = try await client.download(result, destinationDirectory: destination)
+        let saved = try Data(contentsOf: fileURL)
+        // Clean UTF-8 without BOM: FFmpeg's SRT demuxer reads this byte-for-byte.
+        XCTAssertEqual(saved.first, UInt8(ascii: "1"), "saved file must start with the cue, no BOM")
+        XCTAssertEqual(String(decoding: saved, as: UTF8.self), "1\n00:00:00,000 --> 00:00:01,000\nCafé — é\n")
+    }
+
     func testLocalFileNameIsSanitizedAndUnique() {
         func result(_ title: String, _ fileName: String?, id: Int) -> OpenSubtitlesSearchResult {
             OpenSubtitlesSearchResult(

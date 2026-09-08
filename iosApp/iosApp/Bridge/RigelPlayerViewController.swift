@@ -26,6 +26,10 @@ final class RigelPlayerViewController: UIViewController {
     /// Called when the active subtitle selection changes. A non-nil track is
     /// rebuilt through the Kotlin-owned proxy so an AirPlay receiver can fetch it.
     var onExternalSubtitleSelected: ((SubtitleTrack?, Double) -> Void)?
+    /// Reports AVPlayer's own buffering state (waiting for the next frame).
+    /// The host overlays a spinner until both the Kotlin phase and the native
+    /// pipeline have frames ready.
+    var onNativeBufferingChange: ((Bool) -> Void)?
 
     private var player: AVPlayer?
     /// Raw URL of the item currently installed in AVPlayer. Delayed failures
@@ -42,6 +46,10 @@ final class RigelPlayerViewController: UIViewController {
     private static var activeAudioSessionCount = 0
     private static let audioSessionLock = NSLock()
     private var notifiedPlaying = false
+    /// True while Kotlin is rebuilding the proxy (seek): the frame freezes
+    /// instead of playing a stale item whose session is being torn down.
+    private var phaseBufferingRequested = false
+    private var lastReportedNativeBuffering = false
 
     /// Configure AVAudioSession for the current media so only eligible
     /// long-form video selects the shared video AirPlay route.
@@ -1172,6 +1180,9 @@ final class RigelPlayerViewController: UIViewController {
     }
     @objc private func playPauseTapped() {
         showControls()
+        // A proxy rebuild is in flight: the installed item is stale and its
+        // session is gone, so resuming it would play doomed media.
+        guard !phaseBufferingRequested else { return }
         guard let player else { return }
         if player.timeControlStatus == .playing {
             player.pause()
@@ -1179,6 +1190,23 @@ final class RigelPlayerViewController: UIViewController {
             player.play()
         }
         updatePlaybackControls()
+    }
+
+    /// Kotlin enters BUFFERING while it rebuilds the proxy (seek, subtitle
+    /// rebuild): freeze the current frame. The replacement item plays when
+    /// load() installs it, and the spinner clears once frames render.
+    func setPhaseBuffering(_ buffering: Bool) {
+        guard phaseBufferingRequested != buffering else { return }
+        phaseBufferingRequested = buffering
+        if buffering {
+            player?.pause()
+        }
+    }
+
+    private func reportNativeBuffering(_ buffering: Bool) {
+        guard buffering != lastReportedNativeBuffering else { return }
+        lastReportedNativeBuffering = buffering
+        onNativeBufferingChange?(buffering)
     }
 
     private var mediaSeconds: Double {
@@ -1336,6 +1364,8 @@ final class RigelPlayerViewController: UIViewController {
         knownDurationSeconds = nil
         startOffsetSeconds = 0
         isProxyPlayback = false
+        phaseBufferingRequested = false
+        lastReportedNativeBuffering = false
         selectedExternalSubtitleUrl = nil
         selectedExternalSubtitleOption = nil
         proxyExternalSubtitleUrl = nil
@@ -1387,6 +1417,10 @@ final class RigelPlayerViewController: UIViewController {
         if trackGroupsLoadedFor !== item {
             loadTrackGroups(for: item)
         }
+        if phaseBufferingRequested, player.timeControlStatus == .playing {
+            player.pause()
+        }
+        reportNativeBuffering(player.timeControlStatus == .waitingToPlayAtSpecifiedRate)
         updatePlaybackControls()
         updateSidecarSubtitle()
         if player.timeControlStatus == .playing {

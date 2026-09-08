@@ -607,6 +607,30 @@ final class ProbeTest: XCTestCase {
         XCTAssertFalse(watchdog.shouldAbort(), "touch must refresh the read budget")
     }
 
+    /// Exporters receive sidecar URLs exactly as Kotlin holds them:
+    /// percent-encoded absoluteString file URLs. A filename with a space
+    /// ("EN 23.976") must open even though the URL reads "EN%2023.976".
+    func testSidecarFileURLPercentEscapesAreDecoded() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pct-sidecar-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("EN 23.976 sidecar.srt")
+        try Data("1\n00:00:00,000 --> 00:00:01,000\nHello\n".utf8).write(to: fileURL)
+        XCTAssertTrue(fileURL.absoluteString.contains("%20"), fileURL.absoluteString)
+
+        var fmt: UnsafeMutablePointer<AVFormatContext>? = nil
+        let watchdog = InputWatchdog(timeoutSeconds: 10)
+        let opened = RigelHlsExporter.openSidecarInput(
+            url: fileURL.absoluteString,
+            headers: [:],
+            watchdog: watchdog,
+            fmt: &fmt
+        )
+        RigelHlsExporter.closeInput(&fmt)
+        XCTAssertTrue(opened, "exporter must open percent-encoded file URLs: \(fileURL.absoluteString)")
+    }
+
     /// A sidecar source whose server accepts the connection and then stalls
     /// must fail the session within the watchdog budget, never hang it.
     func testStalledSidecarSourceFailsSession() throws {
