@@ -117,6 +117,8 @@ final class OpenSubtitlesTests: XCTestCase {
 
         let fileRequest = try XCTUnwrap(capturedRequests[3])
         XCTAssertEqual(fileRequest.url?.absoluteString, "https://downloads.example/subtitle.srt")
+        XCTAssertEqual(fileRequest.value(forHTTPHeaderField: "Api-Key"), "app-key")
+        XCTAssertNotNil(fileRequest.value(forHTTPHeaderField: "User-Agent"))
     }
 
     func testDownloadRejectsArchivePayloads() async throws {

@@ -121,4 +121,48 @@ final class SubtitleParserTests: XCTestCase {
         )
     }
 
+    func testSidecarCueDecodingAcceptsValidFilesAndRejectsEmptyOnes() {
+        let srt = Data("""
+        1
+        00:00:01,000 --> 00:00:02,000
+        Later
+
+        2
+        00:00:00,000 --> 00:00:01,000
+        First
+        """.utf8)
+        XCTAssertEqual(
+            RigelPlayerViewController.decodeSidecarCues(
+                data: srt,
+                encodingName: nil,
+                extensionName: "srt",
+                rawURL: "file:///tmp/test.srt"
+            ),
+            [
+                .init(start: 0, end: 1, text: "First"),
+                .init(start: 1, end: 2, text: "Later"),
+            ]
+        )
+
+        XCTAssertNil(
+            RigelPlayerViewController.decodeSidecarCues(
+                data: Data([0xFF, 0xFE, 0x00, 0xD8]),
+                encodingName: nil,
+                extensionName: "srt",
+                rawURL: "file:///tmp/binary.srt"
+            ),
+            "undecodable bytes must be rejected"
+        )
+
+        XCTAssertNil(
+            RigelPlayerViewController.decodeSidecarCues(
+                data: Data("just text, no cues".utf8),
+                encodingName: nil,
+                extensionName: "srt",
+                rawURL: "file:///tmp/empty.srt"
+            ),
+            "files without valid cues must be rejected"
+        )
+    }
+
 }
