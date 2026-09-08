@@ -295,15 +295,23 @@ final class OpenSubtitlesClient {
         // text; the player only renders text SRT/VTT.
         let isZip = data.starts(with: [0x50, 0x4B])
         let isGzip = data.starts(with: [0x1F, 0x8B])
-        guard !data.isEmpty, !isZip, !isGzip else {
-            NSLog("[OpenSubtitles] subtitle file is not plain text (%zu bytes): %@", data.count, link.absoluteString)
+        guard !data.isEmpty, !isZip, !isGzip,
+              var text = SubtitleParser.decode(data: data),
+              !SubtitleParser.parseSRT(text).isEmpty else {
+            NSLog("[OpenSubtitles] subtitle file is not decodable text with cues (%zu bytes): %@", data.count, link.absoluteString)
             throw OpenSubtitlesError.unsupportedFile
+        }
+        // Normalize to clean UTF-8: FFmpeg's SRT demuxer only reads
+        // byte-oriented text, while the overlay parser also accepts UTF-16
+        // and BOMs. Saving normalized bytes keeps both paths working.
+        if text.hasPrefix("\u{feff}") {
+            text.removeFirst()
         }
 
         let targetDirectory = directory ?? defaultSubtitleDirectory()
         try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
         let fileURL = targetDirectory.appendingPathComponent(localFileName(for: result))
-        try data.write(to: fileURL, options: .atomic)
+        try Data(text.utf8).write(to: fileURL, options: .atomic)
         return fileURL
     }
 

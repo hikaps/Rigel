@@ -78,11 +78,21 @@ extension RigelHlsExporter {
     /// in the session aborts that sidecar (drops its cues) instead of
     /// freezing the whole session.
     static func openSidecarInput(
-        url: String,
+        url rawURL: String,
         headers: [String: String],
         watchdog: InputWatchdog,
         fmt: inout UnsafeMutablePointer<AVFormatContext>?
     ) -> Bool {
+        // Sidecar URLs arrive exactly as Swift built them: percent-encoded
+        // absoluteString file URLs. FFmpeg's file protocol does not decode
+        // percent-escapes, so a downloaded file named "EN 23.976" would fail
+        // to open as "EN%2023.976" — decode file URLs back to plain paths.
+        let url: String
+        if let fileURL = URL(string: rawURL), fileURL.isFileURL {
+            url = fileURL.path(percentEncoded: false)
+        } else {
+            url = rawURL
+        }
         guard let allocated = avformat_alloc_context() else {
             return openInput(url: url, headers: headers, fmt: &fmt)
         }

@@ -9,6 +9,7 @@ import ComposeApp
 struct PlayerHostView: View {
     @EnvironmentObject private var player: PlayerModel
     @State private var showDevicesPicker = false
+    @State private var nativeBuffering = false
 
     private struct LoadSignature: Equatable {
         let url: String
@@ -112,7 +113,10 @@ struct PlayerHostView: View {
                 .contentShape(Rectangle())
             }
         } else if phase == .playing || phase == .buffering {
-            let buffering = phase == .buffering
+            // The spinner stays until both Kotlin reports readiness and
+            // AVPlayer has frames rendering again (no ghost playback over a
+            // stale proxy item).
+            let buffering = phase == .buffering || nativeBuffering
             ZStack {
                 if let url = player.playableURL {
                     PlayerView(
@@ -128,6 +132,8 @@ struct PlayerHostView: View {
                         isProxy: player.proxyUrl != nil,
                         probeDurationMs: player.probeDurationMs,
                         startPositionMs: player.startPositionMs,
+                        isPhaseBuffering: player.phase == .buffering,
+                        onNativeBufferingChange: { nativeBuffering = $0 },
                         onReady: {},
                         onError: { player.reportError($0) },
                         onBack: { player.stop() },
@@ -231,6 +237,10 @@ struct PlayerView: UIViewControllerRepresentable {
     let isProxy: Bool
     let probeDurationMs: Double?
     let startPositionMs: Int64
+    /// True while Kotlin rebuilds the proxy (seek): the native side freezes
+    /// the frame instead of playing the doomed stale item.
+    let isPhaseBuffering: Bool
+    let onNativeBufferingChange: (Bool) -> Void
     let onReady: () -> Void
     let onError: (String) -> Void
     let onBack: () -> Void
@@ -320,6 +330,8 @@ struct PlayerView: UIViewControllerRepresentable {
             player.onExternalSubtitleSelected = onExternalSubtitleSelected
             player.onDevicesRequested = onDevices
             player.onSeekRequested = onSeek
+            player.onNativeBufferingChange = onNativeBufferingChange
+            player.setPhaseBuffering(isPhaseBuffering)
         }
         origin.controller = created as? RigelPlayerViewController
         context.coordinator.errorOrigin = origin
@@ -333,6 +345,9 @@ struct PlayerView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
         if let player = uiViewController as? RigelPlayerViewController {
             player.onExternalSubtitleSelected = onExternalSubtitleSelected
+            player.onNativeBufferingChange = onNativeBufferingChange
+            // Clear the freeze before a changed URL reloads and plays.
+            player.setPhaseBuffering(isPhaseBuffering)
         }
         guard let bridge = PlayerBridgeFactory.shared.create() else { return }
         let loaded = context.coordinator.loaded
