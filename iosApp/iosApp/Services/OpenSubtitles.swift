@@ -261,6 +261,7 @@ final class OpenSubtitlesClient {
         return try await Self.fetchSubtitleFile(
             from: link,
             for: result,
+            apiKey: apiKey,
             session: session,
             directory: destinationDirectory
         )
@@ -269,16 +270,22 @@ final class OpenSubtitlesClient {
     static func fetchSubtitleFile(
         from link: URL,
         for result: OpenSubtitlesSearchResult,
+        apiKey: String,
         session: URLSession,
         directory: URL?
     ) async throws -> URL {
         var request = URLRequest(url: link)
         request.timeoutInterval = 30
+        // The download CDN rejects requests without the account's Api-Key.
+        request.setValue(apiKey, forHTTPHeaderField: "Api-Key")
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
+            NSLog("[OpenSubtitles] subtitle file fetch got a non-HTTP response: %@", link.absoluteString)
             throw OpenSubtitlesError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
+            NSLog("[OpenSubtitles] subtitle file fetch failed: HTTP %ld for %@", http.statusCode, link.absoluteString)
             throw OpenSubtitlesError.httpStatus(
                 http.statusCode,
                 HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
@@ -289,6 +296,7 @@ final class OpenSubtitlesClient {
         let isZip = data.starts(with: [0x50, 0x4B])
         let isGzip = data.starts(with: [0x1F, 0x8B])
         guard !data.isEmpty, !isZip, !isGzip else {
+            NSLog("[OpenSubtitles] subtitle file is not plain text (%zu bytes): %@", data.count, link.absoluteString)
             throw OpenSubtitlesError.unsupportedFile
         }
 

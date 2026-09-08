@@ -900,6 +900,18 @@ final class RigelPlayerViewController: UIViewController {
                 NSLog("[RigelPlayer] sidecar %@ skipped: ASS is unsupported", rawURL)
                 continue
             }
+            if url.isFileURL {
+                loadLocalSidecar(
+                    url: url,
+                    extensionName: extensionName,
+                    rawURL: rawURL,
+                    track: track,
+                    order: sidecarOrder,
+                    generation: generation,
+                    onLoaded: onLoaded
+                )
+                continue
+            }
             var request = URLRequest(url: url)
             request.timeoutInterval = 10
             URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
@@ -912,19 +924,12 @@ final class RigelPlayerViewController: UIViewController {
                     NSLog("[RigelPlayer] sidecar %@ failed: %@", rawURL, detail)
                     return
                 }
-                guard let text = SubtitleParser.decode(
+                guard let cues = Self.decodeSidecarCues(
                     data: data,
-                    encodingName: http.textEncodingName
+                    encodingName: http.textEncodingName,
+                    extensionName: extensionName,
+                    rawURL: rawURL
                 ) else {
-                    NSLog("[RigelPlayer] sidecar %@ failed: unsupported text encoding", rawURL)
-                    return
-                }
-                var cues = extensionName == "vtt"
-                    ? SubtitleParser.parseVTT(text)
-                    : SubtitleParser.parseSRT(text)
-                cues.sort { $0.start < $1.start }
-                guard !cues.isEmpty else {
-                    NSLog("[RigelPlayer] sidecar %@ failed: no valid cues", rawURL)
                     return
                 }
                 DispatchQueue.main.async {
@@ -939,6 +944,67 @@ final class RigelPlayerViewController: UIViewController {
                 }
             }.resume()
         }
+    }
+
+    /// Downloaded subtitles arrive as local file URLs (the HLS exporter must
+    /// not be handed remote links), so read them straight from disk instead
+    /// of pretending they are HTTP resources.
+    private func loadLocalSidecar(
+        url: URL,
+        extensionName: String,
+        rawURL: String,
+        track: SubtitleTrack,
+        order: Int,
+        generation: Int,
+        onLoaded: @escaping (Int) -> Void
+    ) {
+        DispatchQueue.global().async { [weak self] in
+            guard let data = try? Data(contentsOf: url) else {
+                NSLog("[RigelPlayer] sidecar %@ failed: file not readable", rawURL)
+                return
+            }
+            guard let cues = RigelPlayerViewController.decodeSidecarCues(
+                data: data,
+                encodingName: nil,
+                extensionName: extensionName,
+                rawURL: rawURL
+            ) else {
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self, self.sidecarGeneration == generation, !self.disposed else { return }
+                self.installLoadedSidecar(
+                    track: track,
+                    order: order,
+                    cues: cues,
+                    onLoaded: onLoaded
+                )
+                NSLog("[RigelPlayer] sidecar %@ ok", rawURL)
+            }
+        }
+    }
+
+    /// Decodes raw subtitle bytes into sorted cues, or nil (with a log) when
+    /// the payload is not decodable text with at least one valid cue.
+    static func decodeSidecarCues(
+        data: Data,
+        encodingName: String?,
+        extensionName: String,
+        rawURL: String
+    ) -> [SubtitleParser.Cue]? {
+        guard let text = SubtitleParser.decode(data: data, encodingName: encodingName) else {
+            NSLog("[RigelPlayer] sidecar %@ failed: unsupported text encoding", rawURL)
+            return nil
+        }
+        var cues = extensionName == "vtt"
+            ? SubtitleParser.parseVTT(text)
+            : SubtitleParser.parseSRT(text)
+        cues.sort { $0.start < $1.start }
+        guard !cues.isEmpty else {
+            NSLog("[RigelPlayer] sidecar %@ failed: no valid cues", rawURL)
+            return nil
+        }
+        return cues
     }
 
     private static func sidecarName(for url: URL, fallback: String) -> String {
