@@ -281,29 +281,24 @@ final class OpenSubtitlesClient {
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
-            NSLog("[OpenSubtitles] subtitle file fetch got a non-HTTP response: %@", link.absoluteString)
             throw OpenSubtitlesError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            NSLog("[OpenSubtitles] subtitle file fetch failed: HTTP %ld for %@", http.statusCode, link.absoluteString)
             throw OpenSubtitlesError.httpStatus(
                 http.statusCode,
                 HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
             )
         }
-        // OpenSubtitles may serve an archive or a gzip file instead of plain
-        // text; the player only renders text SRT/VTT.
+        // Reject archives/gzip, require decodable text with at least one cue,
+        // then save normalized UTF-8: FFmpeg's SRT demuxer only reads
+        // byte-oriented text, unlike the overlay parser.
         let isZip = data.starts(with: [0x50, 0x4B])
         let isGzip = data.starts(with: [0x1F, 0x8B])
-        guard !data.isEmpty, !isZip, !isGzip,
+        guard !isZip, !isGzip,
               var text = SubtitleParser.decode(data: data),
               !SubtitleParser.parseSRT(text).isEmpty else {
-            NSLog("[OpenSubtitles] subtitle file is not decodable text with cues (%zu bytes): %@", data.count, link.absoluteString)
             throw OpenSubtitlesError.unsupportedFile
         }
-        // Normalize to clean UTF-8: FFmpeg's SRT demuxer only reads
-        // byte-oriented text, while the overlay parser also accepts UTF-16
-        // and BOMs. Saving normalized bytes keeps both paths working.
         if text.hasPrefix("\u{feff}") {
             text.removeFirst()
         }

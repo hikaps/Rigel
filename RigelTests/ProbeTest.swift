@@ -607,9 +607,8 @@ final class ProbeTest: XCTestCase {
         XCTAssertFalse(watchdog.shouldAbort(), "touch must refresh the read budget")
     }
 
-    /// Exporters receive sidecar URLs exactly as Kotlin holds them:
-    /// percent-encoded absoluteString file URLs. A filename with a space
-    /// ("EN 23.976") must open even though the URL reads "EN%2023.976".
+    /// Sidecar URLs arrive percent-encoded (absoluteString); FFmpeg cannot
+    /// open them that way, so the exporter must resolve file URLs to paths.
     func testSidecarFileURLPercentEscapesAreDecoded() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("pct-sidecar-\(UUID().uuidString)", isDirectory: true)
