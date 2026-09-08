@@ -26,9 +26,8 @@ final class RigelPlayerViewController: UIViewController {
     /// Called when the active subtitle selection changes. A non-nil track is
     /// rebuilt through the Kotlin-owned proxy so an AirPlay receiver can fetch it.
     var onExternalSubtitleSelected: ((SubtitleTrack?, Double) -> Void)?
-    /// Reports AVPlayer's own buffering state (waiting for the next frame).
-    /// The host overlays a spinner until both the Kotlin phase and the native
-    /// pipeline have frames ready.
+    /// Reports whether AVPlayer is waiting for its next frame; the host
+    /// keeps the buffering spinner up until this clears.
     var onNativeBufferingChange: ((Bool) -> Void)?
 
     private var player: AVPlayer?
@@ -1180,8 +1179,7 @@ final class RigelPlayerViewController: UIViewController {
     }
     @objc private func playPauseTapped() {
         showControls()
-        // A proxy rebuild is in flight: the installed item is stale and its
-        // session is gone, so resuming it would play doomed media.
+        // Resuming during a proxy rebuild would play the stale, doomed item.
         guard !phaseBufferingRequested else { return }
         guard let player else { return }
         if player.timeControlStatus == .playing {
@@ -1192,9 +1190,8 @@ final class RigelPlayerViewController: UIViewController {
         updatePlaybackControls()
     }
 
-    /// Kotlin enters BUFFERING while it rebuilds the proxy (seek, subtitle
-    /// rebuild): freeze the current frame. The replacement item plays when
-    /// load() installs it, and the spinner clears once frames render.
+    /// Kotlin's BUFFERING phase (proxy rebuild): freeze the current frame;
+    /// the replacement item plays once load() installs it.
     func setPhaseBuffering(_ buffering: Bool) {
         guard phaseBufferingRequested != buffering else { return }
         phaseBufferingRequested = buffering

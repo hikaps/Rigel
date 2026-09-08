@@ -113,9 +113,6 @@ struct PlayerHostView: View {
                 .contentShape(Rectangle())
             }
         } else if phase == .playing || phase == .buffering {
-            // The spinner stays until both Kotlin reports readiness and
-            // AVPlayer has frames rendering again (no ghost playback over a
-            // stale proxy item).
             let buffering = phase == .buffering || nativeBuffering
             ZStack {
                 if let url = player.playableURL {
@@ -237,8 +234,7 @@ struct PlayerView: UIViewControllerRepresentable {
     let isProxy: Bool
     let probeDurationMs: Double?
     let startPositionMs: Int64
-    /// True while Kotlin rebuilds the proxy (seek): the native side freezes
-    /// the frame instead of playing the doomed stale item.
+    /// True during Kotlin's BUFFERING phase: freeze the stale item.
     let isPhaseBuffering: Bool
     let onNativeBufferingChange: (Bool) -> Void
     let onReady: () -> Void
