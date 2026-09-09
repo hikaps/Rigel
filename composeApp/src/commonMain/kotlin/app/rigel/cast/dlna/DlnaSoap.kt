@@ -7,12 +7,13 @@ package app.rigel.cast.dlna
  */
 object DlnaSoap {
     const val SERVICE_TYPE = "urn:schemas-upnp-org:service:AVTransport:1"
+    const val RENDERING_CONTROL_TYPE = "urn:schemas-upnp-org:service:RenderingControl:1"
 
-    fun envelope(action: String, argsXml: String): String =
+    fun envelope(action: String, argsXml: String, serviceType: String = SERVICE_TYPE): String =
         """<?xml version="1.0" encoding="utf-8"?>""" +
             """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" """ +
             """s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">""" +
-            """<s:Body><u:$action xmlns:u="$SERVICE_TYPE">$argsXml</u:$action></s:Body></s:Envelope>"""
+            """<s:Body><u:$action xmlns:u="$serviceType">$argsXml</u:$action></s:Body></s:Envelope>"""
 
     fun setAvTransportUriBody(uri: String, title: String?): String =
         envelope(
@@ -46,6 +47,42 @@ object DlnaSoap {
 
     fun getTransportStateBody(): String =
         envelope("GetTransportInfo", "<InstanceID>0</InstanceID>")
+
+    fun setVolumeBody(volume: Int): String =
+        envelope(
+            "SetVolume",
+            "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>$volume</DesiredVolume>",
+            serviceType = RENDERING_CONTROL_TYPE,
+        )
+
+    fun getVolumeBody(): String =
+        envelope(
+            "GetVolume",
+            "<InstanceID>0</InstanceID><Channel>Master</Channel>",
+            serviceType = RENDERING_CONTROL_TYPE,
+        )
+
+    fun setMuteBody(muted: Boolean): String =
+        envelope(
+            "SetMute",
+            "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>${if (muted) 1 else 0}</DesiredMute>",
+            serviceType = RENDERING_CONTROL_TYPE,
+        )
+
+    fun getMuteBody(): String =
+        envelope(
+            "GetMute",
+            "<InstanceID>0</InstanceID><Channel>Master</Channel>",
+            serviceType = RENDERING_CONTROL_TYPE,
+        )
+
+    fun parseVolume(responseXml: String): Int? =
+        Regex("""<CurrentVolume>\s*(\d+)\s*</CurrentVolume>""")
+            .find(responseXml)?.groupValues?.get(1)?.toIntOrNull()
+
+    fun parseMuted(responseXml: String): Boolean? =
+        Regex("""<CurrentMute>\s*([01])\s*</CurrentMute>""")
+            .find(responseXml)?.groupValues?.get(1)?.let { it == "1" }
 
     fun parsePositionInfo(responseXml: String): Pair<Long, Long>? {
         val rel = parseTime(responseXml, "RelTime") ?: return null

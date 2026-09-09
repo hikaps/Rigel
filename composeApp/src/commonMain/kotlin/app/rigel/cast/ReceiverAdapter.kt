@@ -28,6 +28,26 @@ interface ReceiverAdapter {
         client: HttpClient,
     ): Boolean = false
 
+    /** Pause the active remote item; false means this receiver cannot pause. */
+    suspend fun pause(target: CastTarget, client: HttpClient): Boolean = false
+
+    /** Resume the paused remote item; false means this receiver cannot resume. */
+    suspend fun resume(target: CastTarget, client: HttpClient): Boolean = false
+
+    /** Stop the remote item; false means this receiver cannot stop. */
+    suspend fun stop(target: CastTarget, client: HttpClient): Boolean = false
+
+    /**
+     * Raise the receiver volume one relative step; false means unsupported.
+     * Families without absolute volume (Roku) only step up/down/toggle.
+     */
+    suspend fun volumeUp(target: CastTarget, client: HttpClient): Boolean = false
+
+    /** Lower the receiver volume one relative step; false means unsupported. */
+    suspend fun volumeDown(target: CastTarget, client: HttpClient): Boolean = false
+
+    /** Toggle the receiver mute; false means unsupported. */
+    suspend fun toggleMute(target: CastTarget, client: HttpClient): Boolean = false
 
     /** Enrich an SSDP response into a [CastTarget], or null to skip. */
     suspend fun fromSsdp(device: SsdpDevice, client: HttpClient): CastTarget? = null

@@ -8,6 +8,7 @@ data class DlnaDevice(
     val location: String,
     val friendlyName: String,
     val controlUrl: String,
+    val renderingControlUrl: String? = null,
     val eventSubUrl: String? = null,
 )
 

@@ -13,8 +13,9 @@ import io.ktor.http.contentType
 import io.ktor.http.userAgent
 
 /**
- * Device-description parsing (no SCRD fetch per plan): extracts friendlyName
- * and the AVTransport controlURL. Pure function — unit-testable.
+ * Device-description parsing (no SCRD fetch per plan): extracts friendlyName,
+ * the AVTransport controlURL, and (when present) the RenderingControl
+ * controlURL used for volume. Pure function — unit-testable.
  */
 object DlnaDeviceDescription {
     fun parse(usn: String, location: String, deviceXml: String): DlnaDevice? {
@@ -30,23 +31,38 @@ object DlnaDeviceDescription {
             RegexOption.DOT_MATCHES_ALL,
         ).findAll(servicesBlock).toList()
 
+        var avControlUrl: String? = null
+        var eventSubUrl: String? = null
+        var renderingControlUrl: String? = null
+
+        fun controlUrlOf(serviceXml: String): String? =
+            Regex("""<controlURL>\s*([^<]+?)\s*</controlURL>""")
+                .find(serviceXml)?.groupValues?.get(1)?.trim()
+
         for (service in serviceBlocks) {
             val serviceType = Regex("""<serviceType>\s*([^<]+?)\s*</serviceType>""")
-                .find(service.value)?.groupValues?.get(1)?.orEmpty()
-            if (serviceType?.contains("AVTransport") == true) {
-                val control = Regex("""<controlURL>\s*([^<]+?)\s*</controlURL>""")
-                    .find(service.value)?.groupValues?.get(1)?.trim() ?: return null
-                return DlnaDevice(
-                    usn = usn,
-                    location = location,
-                    friendlyName = friendlyName,
-                    controlUrl = resolveUrl(location, control),
+                .find(service.value)?.groupValues?.getOrNull(1).orEmpty()
+            when {
+                serviceType.contains("AVTransport") && avControlUrl == null -> {
+                    avControlUrl = controlUrlOf(service.value) ?: return null
                     eventSubUrl = Regex("""<eventSubURL>\s*([^<]+?)\s*</eventSubURL>""")
-                        .find(service.value)?.groupValues?.get(1)?.trim(),
-                )
+                        .find(service.value)?.groupValues?.get(1)?.trim()
+                }
+                serviceType.contains("RenderingControl") && renderingControlUrl == null -> {
+                    renderingControlUrl = controlUrlOf(service.value)
+                }
             }
         }
-        return null
+
+        val control = avControlUrl ?: return null
+        return DlnaDevice(
+            usn = usn,
+            location = location,
+            friendlyName = friendlyName,
+            controlUrl = resolveUrl(location, control),
+            renderingControlUrl = renderingControlUrl?.let { resolveUrl(location, it) },
+            eventSubUrl = eventSubUrl,
+        )
     }
 
     /** controlURL is often relative; resolve against the LOCATION origin. */
@@ -61,7 +77,7 @@ object DlnaDeviceDescription {
     }
 }
 
-/** DLNA renderer control over UPnP AVTransport SOAP. */
+/** DLNA renderer control over UPnP AVTransport (playback) and RenderingControl (volume) SOAP. */
 class DlnaRenderer(private val client: HttpClient) {
     private val tag = "DlnaRenderer"
 
@@ -89,6 +105,7 @@ class DlnaRenderer(private val client: HttpClient) {
 
     suspend fun play(device: DlnaDevice): Boolean = control(device, "Play", DlnaSoap.playBody())
     suspend fun pause(device: DlnaDevice): Boolean = control(device, "Pause", DlnaSoap.pauseBody())
+    suspend fun resume(device: DlnaDevice): Boolean = play(device)
     suspend fun stop(device: DlnaDevice): Boolean = control(device, "Stop", DlnaSoap.stopBody())
     suspend fun seek(device: DlnaDevice, positionMs: Long): Boolean =
         control(device, "Seek", DlnaSoap.seekBody(positionMs))
@@ -102,20 +119,77 @@ class DlnaRenderer(private val client: HttpClient) {
         return DlnaSoap.parseTransportState(xml)
     }
 
+    suspend fun volumeUp(device: DlnaDevice): Boolean = adjustVolume(device, VOLUME_STEP)
+
+    suspend fun volumeDown(device: DlnaDevice): Boolean = adjustVolume(device, -VOLUME_STEP)
+
+    /** Read the master volume, then step it by [delta] within 0..100. */
+    private suspend fun adjustVolume(device: DlnaDevice, delta: Int): Boolean {
+        val url = device.renderingControlUrl ?: return false
+        val xml = postForBody(
+            url,
+            DlnaSoap.RENDERING_CONTROL_TYPE,
+            "GetVolume",
+            DlnaSoap.getVolumeBody(),
+            device.friendlyName,
+        ) ?: return false
+        val current = DlnaSoap.parseVolume(xml) ?: return false
+        val target = (current + delta).coerceIn(0, 100)
+        return postForBody(
+            url,
+            DlnaSoap.RENDERING_CONTROL_TYPE,
+            "SetVolume",
+            DlnaSoap.setVolumeBody(target),
+            device.friendlyName,
+        ) != null
+    }
+
+    suspend fun toggleMute(device: DlnaDevice): Boolean {
+        val url = device.renderingControlUrl ?: return false
+        val xml = postForBody(
+            url,
+            DlnaSoap.RENDERING_CONTROL_TYPE,
+            "GetMute",
+            DlnaSoap.getMuteBody(),
+            device.friendlyName,
+        ) ?: return false
+        val muted = DlnaSoap.parseMuted(xml) ?: return false
+        return postForBody(
+            url,
+            DlnaSoap.RENDERING_CONTROL_TYPE,
+            "SetMute",
+            DlnaSoap.setMuteBody(!muted),
+            device.friendlyName,
+        ) != null
+    }
+
     /** True when the SOAP action round-tripped successfully. */
     private suspend fun control(device: DlnaDevice, action: String, body: String): Boolean =
         postForBody(device, action, body) != null
 
-    private suspend fun postForBody(device: DlnaDevice, action: String, body: String): String? {
+    private suspend fun postForBody(device: DlnaDevice, action: String, body: String): String? =
+        postForBody(device.controlUrl, DlnaSoap.SERVICE_TYPE, action, body, device.friendlyName)
+
+    private suspend fun postForBody(
+        serviceUrl: String,
+        serviceType: String,
+        action: String,
+        body: String,
+        deviceName: String,
+    ): String? {
         return runCatching {
-            val response = client.post(device.controlUrl) {
+            val response = client.post(serviceUrl) {
                 contentType(ContentType.Text.Xml)
                 userAgent("Rigel/1.0")
-                header("SOAPACTION", "\"${DlnaSoap.SERVICE_TYPE}#$action\"")
+                header("SOAPACTION", "\"$serviceType#$action\"")
                 setBody(body)
             }
             if (response.status.value !in 200..299) return@runCatching null
             response.bodyAsText()
-        }.onFailure { Logger.w(tag, it) { "$action failed: ${device.friendlyName}" } }.getOrNull()
+        }.onFailure { Logger.w(tag, it) { "$action failed: $deviceName" } }.getOrNull()
+    }
+
+    private companion object {
+        const val VOLUME_STEP = 10
     }
 }

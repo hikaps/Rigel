@@ -14,6 +14,9 @@ object ChromeAdapter : ReceiverAdapter {
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
         supportsPosition = false,
+        supportsPauseResume = false,
+        supportsStop = false,
+        supportsVolume = false,
         note = "Chromecast playback continues on the device; control it there",
     )
 

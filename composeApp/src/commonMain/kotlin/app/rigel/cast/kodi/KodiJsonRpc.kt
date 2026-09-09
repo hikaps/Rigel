@@ -35,8 +35,15 @@ object KodiJsonRpc {
     fun playerGetProperties(): String =
         request(
             "Player.GetProperties",
-            """{"playerid":1,"properties":["percentage","time","totaltime"]}""",
+            """{"playerid":1,"properties":["percentage","time","totaltime","speed"]}""",
         )
+
+    /** Relative volume step; Kodi accepts "increment"/"decrement" literals. */
+    fun applicationSetVolume(volume: String): String =
+        request("Application.SetVolume", """{"volume":"$volume"}""")
+
+    fun applicationSetMute(): String =
+        request("Application.SetMute", """{"mute":"toggle"}""")
 
     fun jsonEscape(s: String): String =
         s.replace("\\", "\\\\").replace("\"", "\\\"")
@@ -53,6 +60,10 @@ object KodiJsonRpc {
         val ms = grab("milliseconds")
         return ((h * 3600 + min * 60 + s) * 1000) + ms
     }
+
+    /** Player speed: 0 = paused, 1 = playing (faster/rewind speeds are nonzero). Pure — testable. */
+    internal fun parseSpeed(json: String): Int? =
+        Regex("\"speed\"\\s*:\\s*(-?\\d+)").find(json)?.groupValues?.get(1)?.toIntOrNull()
 }
 
 /** Kodi control over JSON-RPC. */
@@ -84,6 +95,43 @@ class KodiRenderer(private val client: HttpClient) {
     suspend fun playPause(endpoint: String) = rpc(endpoint, KodiJsonRpc.playerPlayPause())
     suspend fun stop(endpoint: String) = rpc(endpoint, KodiJsonRpc.playerStop())
     suspend fun seek(endpoint: String, percent: Double) = rpc(endpoint, KodiJsonRpc.playerSeekPercentage(percent))
+
+    /**
+     * Pause only when currently playing (speed != 0); already-paused is success.
+     * Player.PlayPause is a toggle, so the speed check avoids resuming by accident.
+     */
+    suspend fun pause(endpoint: String): Boolean {
+        val speed = playerSpeed(endpoint) ?: return false
+        if (speed == 0) return true
+        return rpcWithoutError(endpoint, KodiJsonRpc.playerPlayPause())
+    }
+
+    /** Resume only when currently paused (speed == 0); already-playing is success. */
+    suspend fun resume(endpoint: String): Boolean {
+        val speed = playerSpeed(endpoint) ?: return false
+        if (speed != 0) return true
+        return rpcWithoutError(endpoint, KodiJsonRpc.playerPlayPause())
+    }
+
+    suspend fun volumeUp(endpoint: String): Boolean =
+        rpcWithoutError(endpoint, KodiJsonRpc.applicationSetVolume("increment"))
+
+    suspend fun volumeDown(endpoint: String): Boolean =
+        rpcWithoutError(endpoint, KodiJsonRpc.applicationSetVolume("decrement"))
+
+    suspend fun toggleMute(endpoint: String): Boolean =
+        rpcWithoutError(endpoint, KodiJsonRpc.applicationSetMute())
+
+    private suspend fun playerSpeed(endpoint: String): Int? {
+        val resp = rpc(endpoint, KodiJsonRpc.playerGetProperties()) ?: return null
+        if (resp.contains("\"error\"")) return null
+        return KodiJsonRpc.parseSpeed(resp)
+    }
+
+    private suspend fun rpcWithoutError(endpoint: String, body: String): Boolean {
+        val resp = rpc(endpoint, body) ?: return false
+        return !resp.contains("\"error\"")
+    }
 
     /** Returns (positionMs, durationMs) or null when no player/position. */
     suspend fun position(endpoint: String): Pair<Long, Long>? {
