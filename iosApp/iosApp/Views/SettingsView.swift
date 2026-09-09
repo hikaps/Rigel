@@ -279,6 +279,9 @@ struct SettingsView: View {
     }
 
     private func connectOpenSubtitles() {
+        // The keyboard submit path bypasses the Connect button's disabled
+        // state, so re-entry protection lives here rather than on the button.
+        guard !openSubtitlesBusy else { return }
         let apiKey = openSubtitlesAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let username = openSubtitlesUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = openSubtitlesPassword
