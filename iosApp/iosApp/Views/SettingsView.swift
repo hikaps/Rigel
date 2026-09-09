@@ -18,6 +18,10 @@ extension RouteOverride {
 }
 
 struct SettingsView: View {
+    private enum OpenSubtitlesField {
+        case apiKey, username, password
+    }
+
     @State private var routeKey = ""
     @State private var rendererOn = false
     @State private var rendererNotice: String?
@@ -27,6 +31,10 @@ struct SettingsView: View {
     @State private var openSubtitlesConnected = false
     @State private var openSubtitlesBusy = false
     @State private var openSubtitlesNotice: String?
+    @State private var openSubtitlesNoticeIsError = false
+    @FocusState private var openSubtitlesFocusedField: OpenSubtitlesField?
+    @State private var showOpenSubtitlesAPIKey = false
+    @State private var showOpenSubtitlesPassword = false
     private var settings: SettingsStore { RigelCore.shared.settings }
 
     var body: some View {
@@ -87,45 +95,118 @@ struct SettingsView: View {
 
 
     private var openSubtitlesSection: some View {
-        Section("OpenSubtitles") {
+        Section {
             if openSubtitlesConnected {
-                LabeledContent("Connected as", value: openSubtitlesUsername)
-                Button("Disconnect", role: .destructive) {
-                    OpenSubtitlesKeychainStore.shared.clear()
-                    openSubtitlesAPIKey = ""
-                    openSubtitlesPassword = ""
-                    openSubtitlesConnected = false
-                    openSubtitlesNotice = "OpenSubtitles disconnected"
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.rigelStar)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(openSubtitlesUsername.isEmpty ? "Connected" : "Connected as \(openSubtitlesUsername)")
+                            .font(.headline)
+                        Text("Subtitle search is live in the player")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Disconnect", role: .destructive) {
+                        disconnectOpenSubtitles()
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(openSubtitlesBusy)
                 }
-                .disabled(openSubtitlesBusy)
-                Text("Disconnect to connect a different account.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             } else {
-                SecureField("API key", text: $openSubtitlesAPIKey)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("Username", text: $openSubtitlesUsername)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                SecureField("Password", text: $openSubtitlesPassword)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                Button(openSubtitlesBusy ? "Connecting…" : "Connect") {
-                    connectOpenSubtitles()
+                HStack {
+                    if showOpenSubtitlesAPIKey {
+                        TextField("API key", text: $openSubtitlesAPIKey)
+                            .focused($openSubtitlesFocusedField, equals: .apiKey)
+                    } else {
+                        SecureField("API key", text: $openSubtitlesAPIKey)
+                            .focused($openSubtitlesFocusedField, equals: .apiKey)
+                    }
+                    secretVisibilityButton($showOpenSubtitlesAPIKey, title: "API key")
                 }
-                .disabled(openSubtitlesBusy)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.next)
+                .onSubmit { openSubtitlesFocusedField = .username }
+
+                TextField("Username", text: $openSubtitlesUsername)
+                    .focused($openSubtitlesFocusedField, equals: .username)
+                    .textContentType(.username)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.next)
+                    .onSubmit { openSubtitlesFocusedField = .password }
+
+                HStack {
+                    if showOpenSubtitlesPassword {
+                        TextField("Password", text: $openSubtitlesPassword)
+                            .focused($openSubtitlesFocusedField, equals: .password)
+                    } else {
+                        SecureField("Password", text: $openSubtitlesPassword)
+                            .focused($openSubtitlesFocusedField, equals: .password)
+                    }
+                    secretVisibilityButton($showOpenSubtitlesPassword, title: "password")
+                }
+                .textContentType(.password)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.go)
+                .onSubmit { connectOpenSubtitles() }
             }
 
             if let openSubtitlesNotice {
                 Text(openSubtitlesNotice)
                     .font(.footnote)
-                    .foregroundStyle(openSubtitlesConnected ? Color.rigelStar : .secondary)
+                    .foregroundStyle(openSubtitlesNoticeIsError ? Color.red : Color.rigelStar)
             }
+
+            if !openSubtitlesConnected {
+                Button {
+                    connectOpenSubtitles()
+                } label: {
+                    HStack {
+                        Spacer()
+                        if openSubtitlesBusy {
+                            ProgressView()
+                        } else {
+                            Text("Connect").font(.headline)
+                        }
+                        Spacer()
+                    }
+                }
+                .disabled(openSubtitlesBusy || !openSubtitlesFieldsFilled)
+                .buttonStyle(.borderedProminent)
+                .tint(Color.rigelStar)
+                .listRowBackground(Color.clear)
+
+                Link(destination: URL(string: "https://www.opensubtitles.com/en/app-api")!) {
+                    Label("Get an API key at opensubtitles.com", systemImage: "arrow.up.right")
+                        .font(.footnote)
+                }
+            }
+        } header: {
+            Text("OpenSubtitles")
+        } footer: {
             Text("Used by “Get More…” in the player subtitle picker. Credentials stay in the iOS Keychain.")
-                .font(.footnote)
+        }
+    }
+
+    private var openSubtitlesFieldsFilled: Bool {
+        !openSubtitlesAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !openSubtitlesUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !openSubtitlesPassword.isEmpty
+    }
+
+    private func secretVisibilityButton(_ visible: Binding<Bool>, title: String) -> some View {
+        Button {
+            visible.wrappedValue.toggle()
+        } label: {
+            Image(systemName: visible.wrappedValue ? "eye.slash" : "eye")
                 .foregroundStyle(.secondary)
         }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(visible.wrappedValue ? "Hide \(title)" : "Show \(title)")
     }
 
 
@@ -184,21 +265,36 @@ struct SettingsView: View {
         openSubtitlesUsername = store.username ?? ""
         openSubtitlesPassword = ""
         openSubtitlesConnected = store.isConnected
-        openSubtitlesNotice = store.isConnected ? "Connected" : nil
+        openSubtitlesNotice = nil
+        openSubtitlesNoticeIsError = false
+    }
+
+    private func disconnectOpenSubtitles() {
+        OpenSubtitlesKeychainStore.shared.clear()
+        openSubtitlesAPIKey = ""
+        openSubtitlesPassword = ""
+        openSubtitlesConnected = false
+        openSubtitlesNotice = "OpenSubtitles disconnected"
+        openSubtitlesNoticeIsError = false
     }
 
     private func connectOpenSubtitles() {
+        // The keyboard submit path bypasses the Connect button's disabled
+        // state, so re-entry protection lives here rather than on the button.
+        guard !openSubtitlesBusy else { return }
         let apiKey = openSubtitlesAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let username = openSubtitlesUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = openSubtitlesPassword
         guard !apiKey.isEmpty, !username.isEmpty, !password.isEmpty else {
             openSubtitlesNotice = "Enter an API key, username, and password."
+            openSubtitlesNoticeIsError = true
             openSubtitlesConnected = OpenSubtitlesKeychainStore.shared.isConnected
             return
         }
 
         openSubtitlesBusy = true
         openSubtitlesNotice = nil
+        openSubtitlesFocusedField = nil
         Task { @MainActor in
             do {
                 let session = try await OpenSubtitlesClient.shared.login(
@@ -214,12 +310,14 @@ struct SettingsView: View {
                 openSubtitlesPassword = ""
                 openSubtitlesConnected = true
                 openSubtitlesNotice = "Connected"
+                openSubtitlesNoticeIsError = false
             } catch {
                 let stillConnected = OpenSubtitlesKeychainStore.shared.isConnected
                 openSubtitlesConnected = stillConnected
                 openSubtitlesNotice = stillConnected
                     ? "Could not reconnect; the saved connection remains active."
                     : error.localizedDescription
+                openSubtitlesNoticeIsError = true
             }
             openSubtitlesBusy = false
         }
