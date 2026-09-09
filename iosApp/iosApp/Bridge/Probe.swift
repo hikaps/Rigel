@@ -18,6 +18,9 @@ final class RigelProbe {
                     }
                 }
             }
+            // Bound stream analysis: the default 5 s budget is pure startup
+            // latency on network sources.
+            av_dict_set(&opts, "analyzeduration", "2000000", 0)
             var timeoutDict: OpaquePointer? = opts
             let ret = avformat_open_input(&fmt, cstr, nil, &timeoutDict)
             if ret < 0 {
