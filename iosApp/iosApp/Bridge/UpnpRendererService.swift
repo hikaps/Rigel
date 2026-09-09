@@ -155,6 +155,17 @@ final class UpnpRendererService {
 
     private func handle(_ connection: NWConnection) {
         connections.append(connection)
+        // Control points poll over fresh connections; prune dead ones or the
+        // array grows without bound while the service runs.
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .cancelled, .failed:
+                self.queue.async { self.connections.removeAll { $0 === connection } }
+            default:
+                break
+            }
+        }
         connection.start(queue: queue)
         var received = Data()
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, isComplete, error in
