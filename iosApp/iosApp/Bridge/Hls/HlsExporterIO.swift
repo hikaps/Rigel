@@ -62,6 +62,9 @@ extension RigelHlsExporter {
                     }
                 }
             }
+            // Match the probe's analysis cap so session open does not pay the
+            // default 5 s budget again on network sources.
+            av_dict_set(&opts, "analyzeduration", "2000000", 0)
             let ret = avformat_open_input(&fmt, cstr, nil, &opts)
             if ret < 0 { return }
             if avformat_find_stream_info(fmt, nil) < 0 {
