@@ -210,7 +210,10 @@ extension RigelHlsExporter {
         chain.encCtx.pointee.time_base = AVRational(num: 1, den: 90_000)
         chain.encCtx.pointee.bit_rate = transcodedBitrate(width: Int(outW), height: Int(outH))
         let fps = fpsHint(inputStream: inputStream)
-        chain.encCtx.pointee.gop_size = gopFrameCount(forFPS: fps)
+        // A 2 s GOP keeps a keyframe close so the short first segment can
+        // actually cut (segment boundaries are keyframe-aligned); later
+        // segments still fill to the 4 s target.
+        chain.encCtx.pointee.gop_size = gopFrameCount(forFPS: fps, segmentDuration: 2)
         chain.encCtx.pointee.keyint_min = chain.encCtx.pointee.gop_size
         chain.encCtx.pointee.max_b_frames = 0
         chain.encCtx.pointee.pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX

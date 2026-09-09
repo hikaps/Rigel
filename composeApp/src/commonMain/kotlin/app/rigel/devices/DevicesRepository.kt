@@ -8,6 +8,9 @@ import app.rigel.cast.chrome.ChromecastBridgeFactory
 import app.rigel.settings.SettingsStore
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -26,37 +29,50 @@ class DevicesRepository(
 ) {
     private val tag = "DevicesRepository"
 
-    suspend fun scan(timeoutMs: Long = 5000): List<DiscoveredDevice> {
-        val found = mutableListOf<DiscoveredDevice>()
+    suspend fun scan(timeoutMs: Long = 5000): List<DiscoveredDevice> = coroutineScope {
         val ssdpTargets = ReceiverRegistry.adapters.flatMap { it.ssdpTargets }.distinct()
-        val ssdp = runCatching {
-            Bridges.ssdpSearch(ssdpTargets, timeoutMs.toInt())
-        }.getOrDefault(emptyList())
+        // SSDP and mDNS are independent search windows; run them concurrently
+        // instead of paying both timeouts back to back.
+        val ssdpSearch = async {
+            runCatching { Bridges.ssdpSearch(ssdpTargets, timeoutMs.toInt()) }
+                .getOrDefault(emptyList())
+        }
+        val mdnsSearch = async {
+            if (ChromecastBridgeFactory.current != null) {
+                runCatching { discoverChromecast(timeoutMs.toInt()) }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+        }
+        val ssdp = ssdpSearch.await()
         Logger.i(tag) { "SSDP found ${ssdp.size} devices" }
 
         // Per-response: first adapter that enriches wins (Kodi before DLNA).
-        for (device in ssdp) {
-            val target = ReceiverRegistry.adapters
-                .firstNotNullOfOrNull { it.fromSsdp(device, client) } ?: continue
-            found += DiscoveredDevice(target, "ssdp")
-        }
-        if (ChromecastBridgeFactory.current != null) {
-            runCatching { discoverChromecast(timeoutMs.toInt()) }
-                .getOrDefault(emptyList())
-                .forEach { device ->
-                    found += DiscoveredDevice(CastTarget.Chrome(device), "mdns")
-                }
+        // Enrichment is concurrent, but results keep SSDP response order.
+        val ssdpTargetsFound = ssdp.map { device ->
+            async { ReceiverRegistry.adapters.firstNotNullOfOrNull { it.fromSsdp(device, client) } }
+        }.awaitAll().filterNotNull()
+
+        val found = mutableListOf<DiscoveredDevice>()
+        ssdpTargetsFound.forEach { found += DiscoveredDevice(it, "ssdp") }
+        mdnsSearch.await().forEach { device ->
+            found += DiscoveredDevice(CastTarget.Chrome(device), "mdns")
         }
 
-        // Persisted manual rows.
-        for (row in settings.manualDevices()) {
-            val parts = row.split('|')
-            if (parts.size < 4) continue
-            val adapter = ReceiverRegistry.adapters.firstOrNull { it.kind == parts[0] } ?: continue
-            val target = adapter.fromRow(parts, client) ?: continue
+        // Persisted manual rows; fetched concurrently, kept in row order.
+        val manualTargets = settings.manualDevices().map { row ->
+            async {
+                val parts = row.split('|')
+                if (parts.size < 4) return@async null
+                val adapter = ReceiverRegistry.adapters.firstOrNull { it.kind == parts[0] }
+                    ?: return@async null
+                adapter.fromRow(parts, client)
+            }
+        }.awaitAll().filterNotNull()
+        manualTargets.forEach { target ->
             if (found.none { it.target.name == target.name }) found += DiscoveredDevice(target, "manual")
         }
-        return found
+        found
     }
 
     suspend fun addManualByIp(ip: String): CastTarget? {

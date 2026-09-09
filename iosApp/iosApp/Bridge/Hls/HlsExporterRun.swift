@@ -167,6 +167,9 @@ extension RigelHlsExporter {
         }
 
         av_opt_set(out.pointee.priv_data, "hls_time", "4", 0)
+        // A short first segment pairs with the 2 s GOP so readiness needs
+        // ~6 s of media instead of ~8 s; steady-state segments stay 4 s.
+        av_opt_set(out.pointee.priv_data, "hls_init_time", "2", 0)
         av_opt_set(out.pointee.priv_data, "hls_list_size", "0", 0)
         av_opt_set(out.pointee.priv_data, "hls_flags", "independent_segments", 0)
         av_opt_set(
@@ -610,6 +613,7 @@ extension RigelHlsExporter {
 
         var primaryEnded = false
         var endedExternalSources = Set<Int>()
+        var lastReadinessCheck = DispatchTime(uptimeNanoseconds: 0)
         var lastInputUs: Int64 = 0
         let externalSourceCount = externalSubtitleOutputs.count
         while true {
@@ -684,25 +688,32 @@ extension RigelHlsExporter {
                 terminalError = videoError
                 break
             }
-            if !notified, let selectedSubtitle = subtitleOutputs.first(where: { $0.input.sourceID != 0 }) {
-                markSelectedSubtitleName(
-                    in: outDir,
-                    output: selectedSubtitle
-                )
-            }
-            if !notified &&
-                playlistReady(
-                    playlistPath: playlistPath,
-                    outDir: outDir,
-                    variantCount: variantCount,
-                    final: false
-                ) {
-                notified = publishReady(
-                    session: session,
-                    sessionId: sessionId,
-                    path: "\(sessionId)/index.m3u8",
-                    onReady: onReady
-                )
+            // Warmup readiness checks read and rewrite the master playlist;
+            // run them at 10 Hz instead of once per packet.
+            if !notified {
+                let now = DispatchTime.now()
+                if now.uptimeNanoseconds - lastReadinessCheck.uptimeNanoseconds >= 100_000_000 {
+                    lastReadinessCheck = now
+                    if let selectedSubtitle = subtitleOutputs.first(where: { $0.input.sourceID != 0 }) {
+                        markSelectedSubtitleName(
+                            in: outDir,
+                            output: selectedSubtitle
+                        )
+                    }
+                    if playlistReady(
+                        playlistPath: playlistPath,
+                        outDir: outDir,
+                        variantCount: variantCount,
+                        final: false
+                    ) {
+                        notified = publishReady(
+                            session: session,
+                            sessionId: sessionId,
+                            path: "\(sessionId)/index.m3u8",
+                            onReady: onReady
+                        )
+                    }
+                }
             }
         }
 
