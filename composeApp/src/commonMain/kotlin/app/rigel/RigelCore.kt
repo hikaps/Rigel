@@ -7,6 +7,7 @@ import app.rigel.settings.SettingsStore
 import app.rigel.source.jellyfin.JellyfinClient
 import com.russhwolf.settings.Settings
 import io.ktor.client.HttpClient
+import io.ktor.client.plugins.HttpTimeout
 
 /**
  * Shared app singletons — pure Kotlin (no UI deps), so the same objects serve
@@ -17,7 +18,15 @@ object RigelCore {
         setupLogging()
     }
 
-    val client: HttpClient = HttpClient()
+    // Only small control-plane payloads (device descriptions, SOAP, JSON) flow
+    // through this client — media goes straight to AVPlayer — so a bounded
+    // request timeout solely guards against dead peers.
+    val client: HttpClient = HttpClient {
+        install(HttpTimeout) {
+            requestTimeoutMillis = 15_000
+            socketTimeoutMillis = 10_000
+        }
+    }
     val settings: SettingsStore = SettingsStore(Settings())
     val controller: PlayerController = PlayerController(settings)
     val devices: DevicesRepository = DevicesRepository(client, settings)
