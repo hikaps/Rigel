@@ -16,6 +16,9 @@ object DlnaAdapter : ReceiverAdapter {
     override fun capabilities() = CastCapabilities(
         supportsSeek = true,
         supportsPosition = true,
+        supportsPauseResume = true,
+        supportsStop = true,
+        supportsVolume = true,
         note = null,
     )
 
@@ -43,6 +46,30 @@ object DlnaAdapter : ReceiverAdapter {
         client: HttpClient,
     ): Boolean = runCatching {
         DlnaRenderer(client).seek((target as CastTarget.Dlna).device, positionMs)
+    }.getOrDefault(false)
+
+    override suspend fun pause(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        DlnaRenderer(client).pause((target as CastTarget.Dlna).device)
+    }.getOrDefault(false)
+
+    override suspend fun resume(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        DlnaRenderer(client).resume((target as CastTarget.Dlna).device)
+    }.getOrDefault(false)
+
+    override suspend fun stop(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        DlnaRenderer(client).stop((target as CastTarget.Dlna).device)
+    }.getOrDefault(false)
+
+    override suspend fun volumeUp(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        DlnaRenderer(client).volumeUp((target as CastTarget.Dlna).device)
+    }.getOrDefault(false)
+
+    override suspend fun volumeDown(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        DlnaRenderer(client).volumeDown((target as CastTarget.Dlna).device)
+    }.getOrDefault(false)
+
+    override suspend fun toggleMute(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        DlnaRenderer(client).toggleMute((target as CastTarget.Dlna).device)
     }.getOrDefault(false)
 
 

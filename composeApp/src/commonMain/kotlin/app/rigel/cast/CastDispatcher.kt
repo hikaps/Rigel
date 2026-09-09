@@ -57,6 +57,54 @@ object CastDispatcher {
         )
     }
 
+    suspend fun pauseActive(): Boolean = pauseActive(requireClient())
+
+    suspend fun pauseActive(client: HttpClient): Boolean =
+        controlActive(client) { adapter, target -> adapter.pause(target, client) }
+
+    suspend fun resumeActive(): Boolean = resumeActive(requireClient())
+
+    suspend fun resumeActive(client: HttpClient): Boolean =
+        controlActive(client) { adapter, target -> adapter.resume(target, client) }
+
+    suspend fun volumeUpActive(): Boolean = volumeUpActive(requireClient())
+
+    suspend fun volumeUpActive(client: HttpClient): Boolean =
+        controlActive(client) { adapter, target -> adapter.volumeUp(target, client) }
+
+    suspend fun volumeDownActive(): Boolean = volumeDownActive(requireClient())
+
+    suspend fun volumeDownActive(client: HttpClient): Boolean =
+        controlActive(client) { adapter, target -> adapter.volumeDown(target, client) }
+
+    suspend fun toggleMuteActive(): Boolean = toggleMuteActive(requireClient())
+
+    suspend fun toggleMuteActive(client: HttpClient): Boolean =
+        controlActive(client) { adapter, target -> adapter.toggleMute(target, client) }
+
+    /**
+     * Stop the active receiver, then end the cast session locally even when the
+     * device is unreachable — the user's intent is to stop casting.
+     */
+    suspend fun stopActive(): Boolean = stopActive(requireClient())
+
+    suspend fun stopActive(client: HttpClient): Boolean {
+        val target = session.activeTarget() ?: return false
+        val stopped = runCatching {
+            ReceiverRegistry.adapterFor(target).stop(target, client)
+        }.getOrDefault(false)
+        clearActive()
+        return stopped
+    }
+
+    private suspend fun controlActive(
+        client: HttpClient,
+        op: suspend (ReceiverAdapter, CastTarget) -> Boolean,
+    ): Boolean {
+        val target = session.activeTarget() ?: return false
+        return op(ReceiverRegistry.adapterFor(target), target)
+    }
+
 
     fun remoteCastUrl(): String? = playbackPort?.remoteCastUrl()
 

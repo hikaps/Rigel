@@ -14,6 +14,9 @@ object KodiAdapter : ReceiverAdapter {
     override fun capabilities() = CastCapabilities(
         supportsSeek = true,
         supportsPosition = true,
+        supportsPauseResume = true,
+        supportsStop = true,
+        supportsVolume = true,
         note = null,
     )
 
@@ -53,6 +56,31 @@ object KodiAdapter : ReceiverAdapter {
             ?.let { !it.contains("\"error\"") }
             ?: false
     }
+
+    override suspend fun pause(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).pause((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
+
+    override suspend fun resume(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).resume((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
+
+    override suspend fun stop(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        val resp = KodiRenderer(client).stop((target as CastTarget.Kodi).device.endpoint)
+        resp != null && !resp.contains("\"error\"")
+    }.getOrDefault(false)
+
+    override suspend fun volumeUp(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).volumeUp((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
+
+    override suspend fun volumeDown(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).volumeDown((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
+
+    override suspend fun toggleMute(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).toggleMute((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
 
 
     override suspend fun fromRow(parts: List<String>, client: HttpClient): CastTarget? =

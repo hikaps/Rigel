@@ -98,4 +98,64 @@ class KodiRendererTest {
         val engine = MockEngine { throw RuntimeException("unreachable") }
         assertNull(KodiRenderer(HttpClient(engine)).position("http://10.0.0.5:8080"))
     }
+
+    @Test
+    fun pauseTogglesOnlyWhenPlaying() = kotlinx.coroutines.test.runTest {
+        val posted = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            posted += (request.body as? TextContent)?.text ?: ""
+            respond("""{"id":1,"jsonrpc":"2.0","result":{"percentage":50.0,"speed":1}}""", HttpStatusCode.OK)
+        }
+        assertTrue(KodiRenderer(HttpClient(engine)).pause("http://10.0.0.5:8080"))
+        assertEquals(2, posted.size)
+        assertTrue(posted[0].contains("\"method\":\"Player.GetProperties\""))
+        assertTrue(posted[0].contains("\"speed\""))
+        assertTrue(posted[1].contains("\"method\":\"Player.PlayPause\""))
+    }
+
+    @Test
+    fun pauseWhenAlreadyPausedIsSuccessWithoutToggle() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine {
+            respond("""{"id":1,"jsonrpc":"2.0","result":{"speed":0}}""", HttpStatusCode.OK)
+        }
+        assertTrue(KodiRenderer(HttpClient(engine)).pause("http://10.0.0.5:8080"))
+        assertEquals(1, engine.requestHistory.size, "already-paused must not send the toggle")
+    }
+
+    @Test
+    fun resumeTogglesOnlyWhenPaused() = kotlinx.coroutines.test.runTest {
+        val posted = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            posted += (request.body as? TextContent)?.text ?: ""
+            respond("""{"id":1,"jsonrpc":"2.0","result":{"speed":0}}""", HttpStatusCode.OK)
+        }
+        assertTrue(KodiRenderer(HttpClient(engine)).resume("http://10.0.0.5:8080"))
+        assertEquals(2, posted.size)
+        assertTrue(posted[1].contains("\"method\":\"Player.PlayPause\""))
+    }
+
+    @Test
+    fun pauseFalseWhenPlayerGone() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { respond("""{"error":{"code":-32100,"message":"Invalid player id"}}""", HttpStatusCode.OK) }
+        assertFalse(KodiRenderer(HttpClient(engine)).pause("http://10.0.0.5:8080"))
+    }
+
+    @Test
+    fun volumeAndMuteUseApplicationNamespace() = kotlinx.coroutines.test.runTest {
+        val posted = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            posted += (request.body as? TextContent)?.text ?: ""
+            respond("""{"id":1,"jsonrpc":"2.0","result":"OK"}""", HttpStatusCode.OK)
+        }
+        val renderer = KodiRenderer(HttpClient(engine))
+        assertTrue(renderer.volumeUp("http://10.0.0.5:8080"))
+        assertTrue(renderer.volumeDown("http://10.0.0.5:8080"))
+        assertTrue(renderer.toggleMute("http://10.0.0.5:8080"))
+        assertEquals(3, posted.size)
+        assertTrue(posted[0].contains("\"method\":\"Application.SetVolume\""))
+        assertTrue(posted[0].contains("\"volume\":\"increment\""))
+        assertTrue(posted[1].contains("\"volume\":\"decrement\""))
+        assertTrue(posted[2].contains("\"method\":\"Application.SetMute\""))
+        assertTrue(posted[2].contains("\"mute\":\"toggle\""))
+    }
 }

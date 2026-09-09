@@ -7,6 +7,7 @@ struct DevicesView: View {
     @State private var scanning = false
     @State private var notice: String?
     @State private var busyTarget: String?
+    @State private var activeTarget: CastTarget?
 
     var body: some View {
         NavigationStack {
@@ -23,6 +24,22 @@ struct DevicesView: View {
                     Text("AirPlay")
                 } footer: {
                     Text("Sends playback to Apple TVs, HomePods, and AirPlay speakers.")
+                }
+
+                if let activeTarget {
+                    Section {
+                        CastSessionControls(
+                            target: activeTarget,
+                            onNotice: { notice = $0 },
+                            onEnded: { refreshActiveTarget() }
+                        )
+                    } header: {
+                        Text("Casting")
+                    } footer: {
+                        if let note = CastDispatcher.shared.capabilities(target: activeTarget).note {
+                            Text(note)
+                        }
+                    }
                 }
 
                 Section {
@@ -90,8 +107,15 @@ struct DevicesView: View {
                     .accessibilityLabel("Scan for devices")
                 }
             }
-            .task { scan() }
+            .task {
+                refreshActiveTarget()
+                scan()
+            }
         }
+    }
+
+    private func refreshActiveTarget() {
+        activeTarget = CastDispatcher.shared.activeTarget()
     }
 
     private func scan() {
@@ -122,6 +146,7 @@ struct DevicesView: View {
             Task { @MainActor in
                 self.busyTarget = nil
                 self.notice = result?.message ?? "Cast failed"
+                self.refreshActiveTarget()
             }
         }
     }
@@ -200,6 +225,119 @@ private struct DeviceRow: View {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Remote-control row for the active cast receiver. Pause/stop/volume are
+/// blind commands — receivers expose no session state back to Rigel — so the
+/// pause button tracks only what this row last sent.
+private struct CastSessionControls: View {
+    let target: CastTarget
+    let onNotice: (String) -> Void
+    let onEnded: () -> Void
+
+    @State private var paused = false
+
+    private var capabilities: CastCapabilities {
+        CastDispatcher.shared.capabilities(target: target)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "tv")
+                    .foregroundStyle(Color.rigelStar)
+
+                Text(target.name)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(1)
+
+                Text(target.kindLabel)
+                    .font(.caption2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.rigelStarDim, in: Capsule())
+                    .foregroundStyle(Color.rigelStar)
+            }
+
+            HStack(spacing: 26) {
+                if capabilities.supportsPauseResume {
+                    remoteButton(
+                        paused ? "play.fill" : "pause.fill",
+                        label: paused ? "Resume" : "Pause"
+                    ) { perform(paused ? .resume : .pause) }
+                }
+
+                if capabilities.supportsStop {
+                    remoteButton("stop.fill", label: "Stop") { perform(.stop) }
+                }
+
+                if capabilities.supportsVolume {
+                    remoteButton("speaker.minus.fill", label: "Volume down") { perform(.volumeDown) }
+                    remoteButton("speaker.plus.fill", label: "Volume up") { perform(.volumeUp) }
+                    remoteButton("speaker.slash.fill", label: "Mute") { perform(.mute) }
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func remoteButton(
+        _ systemImage: String,
+        label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 18, weight: .semibold))
+                .frame(width: 32, height: 36)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel("\(label) on \(target.name)")
+    }
+
+    private enum RemoteOp {
+        case pause, resume, stop, volumeUp, volumeDown, mute
+
+        var label: String {
+            switch self {
+            case .pause: "Pause"
+            case .resume: "Resume"
+            case .stop: "Stop"
+            case .volumeUp: "Volume up"
+            case .volumeDown: "Volume down"
+            case .mute: "Mute"
+            }
+        }
+    }
+
+    private func perform(_ op: RemoteOp) {
+        let completion: @Sendable (KotlinBoolean?, Error?) -> Void = { ok, _ in
+            let succeeded = ok?.boolValue ?? false
+            Task { @MainActor in self.finish(op, succeeded) }
+        }
+        switch op {
+        case .pause: CastDispatcher.shared.pauseActive(completionHandler: completion)
+        case .resume: CastDispatcher.shared.resumeActive(completionHandler: completion)
+        case .stop: CastDispatcher.shared.stopActive(completionHandler: completion)
+        case .volumeUp: CastDispatcher.shared.volumeUpActive(completionHandler: completion)
+        case .volumeDown: CastDispatcher.shared.volumeDownActive(completionHandler: completion)
+        case .mute: CastDispatcher.shared.toggleMuteActive(completionHandler: completion)
+        }
+    }
+
+    @MainActor
+    private func finish(_ op: RemoteOp, _ ok: Bool) {
+        guard ok else {
+            onNotice("\(op.label) failed")
+            return
+        }
+        switch op {
+        case .pause: paused = true
+        case .resume: paused = false
+        case .stop: onEnded()
+        default: break
         }
     }
 }

@@ -11,6 +11,7 @@ import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -33,6 +34,7 @@ class DlnaRendererTest {
         location = "http://10.0.0.5:1234/desc.xml",
         friendlyName = "Living Room TV",
         controlUrl = "http://10.0.0.5:1234/upnp/control/AVTransport1",
+        renderingControlUrl = "http://10.0.0.5:1234/upnp/control/RenderingControl1",
     )
 
     private val positionXml = """
@@ -50,6 +52,32 @@ class DlnaRendererTest {
         assertNotNull(parsed)
         assertEquals("Living Room TV", parsed.friendlyName)
         assertEquals("http://10.0.0.5:1234/upnp/control/AVTransport1", parsed.controlUrl)
+        assertNull(parsed.renderingControlUrl, "device description without RenderingControl must leave the URL null")
+    }
+
+    @Test
+    fun fetchDeviceDescriptionParsesRenderingControlUrl() = kotlinx.coroutines.test.runTest {
+        val xml = """
+            <?xml version="1.0"?>
+            <root><device>
+              <friendlyName>Living Room TV</friendlyName>
+              <serviceList>
+              <service>
+                <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+                <controlURL>/upnp/control/RenderingControl1</controlURL>
+              </service>
+              <service>
+                <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+                <controlURL>/upnp/control/AVTransport1</controlURL>
+              </service>
+              </serviceList>
+            </device></root>
+        """.trimIndent()
+        val engine = MockEngine { respond(xml, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/xml")) }
+        val parsed = DlnaRenderer(HttpClient(engine)).fetchDeviceDescription("u1", "http://10.0.0.5:1234/desc.xml")
+        assertNotNull(parsed)
+        assertEquals("http://10.0.0.5:1234/upnp/control/AVTransport1", parsed.controlUrl)
+        assertEquals("http://10.0.0.5:1234/upnp/control/RenderingControl1", parsed.renderingControlUrl)
     }
 
     @Test
@@ -121,5 +149,70 @@ class DlnaRendererTest {
             )
         }
         assertEquals("PLAYING", DlnaRenderer(HttpClient(engine)).transportState(device))
+    }
+
+    @Test
+    fun resumeReusesPlayAction() = kotlinx.coroutines.test.runTest {
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests += (request.body as? TextContent)?.text ?: ""
+            respond("<ok/>", HttpStatusCode.OK)
+        }
+        assertTrue(DlnaRenderer(HttpClient(engine)).resume(device))
+        assertTrue(requests[0].contains("<u:Play xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">"))
+    }
+
+    @Test
+    fun volumeUpReadsThenStepsVolume() = kotlinx.coroutines.test.runTest {
+        val requests = mutableListOf<Pair<String, Pair<String, String>>>() // url to (action header, body)
+        val engine = MockEngine { request ->
+            val body = (request.body as? TextContent)?.text ?: ""
+            requests += request.url.toString() to ((request.headers["SOAPACTION"] ?: "") to body)
+            respond("<CurrentVolume>35</CurrentVolume>", HttpStatusCode.OK)
+        }
+        assertTrue(DlnaRenderer(HttpClient(engine)).volumeUp(device))
+        assertEquals(2, requests.size)
+        assertEquals("http://10.0.0.5:1234/upnp/control/RenderingControl1", requests[0].first)
+        assertEquals("http://10.0.0.5:1234/upnp/control/RenderingControl1", requests[1].first)
+        assertTrue(requests[0].second.first.contains("RenderingControl:1#GetVolume"))
+        assertTrue(requests[1].second.first.contains("RenderingControl:1#SetVolume"))
+        assertTrue(requests[1].second.second.contains("<DesiredVolume>45</DesiredVolume>"))
+        assertTrue(requests[1].second.second.contains("xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\""))
+    }
+
+    @Test
+    fun volumeDownClampsAtZero() = kotlinx.coroutines.test.runTest {
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests += (request.body as? TextContent)?.text ?: ""
+            respond("<CurrentVolume>3</CurrentVolume>", HttpStatusCode.OK)
+        }
+        assertTrue(DlnaRenderer(HttpClient(engine)).volumeDown(device))
+        assertTrue(requests[1].contains("<DesiredVolume>0</DesiredVolume>"))
+    }
+
+    @Test
+    fun volumeRequiresRenderingControlUrl() = kotlinx.coroutines.test.runTest {
+        val withoutControl = device.copy(renderingControlUrl = null)
+        val engine = MockEngine { respond("<unused/>", HttpStatusCode.OK) }
+        val renderer = DlnaRenderer(HttpClient(engine))
+        assertFalse(renderer.volumeUp(withoutControl))
+        assertFalse(renderer.volumeDown(withoutControl))
+        assertFalse(renderer.toggleMute(withoutControl))
+        assertEquals(0, engine.requestHistory.size)
+    }
+
+    @Test
+    fun toggleMuteFlipsCurrentMute() = kotlinx.coroutines.test.runTest {
+        val requests = mutableListOf<Pair<String, String>>() // action header to body
+        val engine = MockEngine { request ->
+            requests += (request.headers["SOAPACTION"] ?: "") to ((request.body as? TextContent)?.text ?: "")
+            respond("<CurrentMute>0</CurrentMute>", HttpStatusCode.OK)
+        }
+        assertTrue(DlnaRenderer(HttpClient(engine)).toggleMute(device))
+        assertEquals(2, requests.size)
+        assertTrue(requests[0].first.contains("RenderingControl:1#GetMute"))
+        assertTrue(requests[1].first.contains("RenderingControl:1#SetMute"))
+        assertTrue(requests[1].second.contains("<DesiredMute>1</DesiredMute>"))
     }
 }

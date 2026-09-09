@@ -19,6 +19,9 @@ object JellyfinSessionAdapter : ReceiverAdapter {
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
         supportsPosition = false,
+        supportsPauseResume = false,
+        supportsStop = false,
+        supportsVolume = false,
         note = "Jellyfin session remote control plays library items; no seek/position",
     )
 

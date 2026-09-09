@@ -108,9 +108,9 @@ class RokuRendererTest {
         }
         val renderer = RokuRenderer(HttpClient(engine))
         val device = RokuDevice("r1", "http://10.0.0.7:8060/", "Roku")
-        renderer.play(device)
-        renderer.pause(device)
-        renderer.stop(device)
+        assertTrue(renderer.play(device))
+        assertTrue(renderer.pause(device))
+        assertTrue(renderer.stop(device))
         assertEquals(
             listOf(
                 "http://10.0.0.7:8060/keypress/Play",
@@ -119,5 +119,36 @@ class RokuRendererTest {
             ),
             posted,
         )
+    }
+
+    @Test
+    fun volumeControlsPostVolumeKeypress() = kotlinx.coroutines.test.runTest {
+        val posted = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            if (request.method == HttpMethod.Post) posted += request.url.toString()
+            respond("", HttpStatusCode.OK)
+        }
+        val renderer = RokuRenderer(HttpClient(engine))
+        val device = RokuDevice("r1", "http://10.0.0.7:8060/", "Roku")
+        assertTrue(renderer.volumeUp(device))
+        assertTrue(renderer.volumeDown(device))
+        assertTrue(renderer.toggleMute(device))
+        assertEquals(
+            listOf(
+                "http://10.0.0.7:8060/keypress/VolumeUp",
+                "http://10.0.0.7:8060/keypress/VolumeDown",
+                "http://10.0.0.7:8060/keypress/VolumeMute",
+            ),
+            posted,
+        )
+    }
+
+    @Test
+    fun keypressFalseOnNon2xxOrNetworkError() = kotlinx.coroutines.test.runTest {
+        val device = RokuDevice("r1", "http://10.0.0.7:8060/", "Roku")
+        val failing = MockEngine { respond("", HttpStatusCode.NotFound) }
+        assertFalse(RokuRenderer(HttpClient(failing)).pause(device))
+        val unreachable = MockEngine { throw RuntimeException("unreachable") }
+        assertFalse(RokuRenderer(HttpClient(unreachable)).pause(device))
     }
 }
