@@ -165,4 +165,31 @@ final class SubtitleParserTests: XCTestCase {
         )
     }
 
+    func testCueLookupFindsActiveCue() {
+        let cues = [
+            SubtitleParser.Cue(start: 0, end: 2, text: "a"),
+            SubtitleParser.Cue(start: 5, end: 8, text: "b"),
+            SubtitleParser.Cue(start: 10, end: 12, text: "c"),
+        ]
+        XCTAssertEqual(SubtitleParser.cue(at: 1, in: cues)?.text, "a")
+        XCTAssertEqual(SubtitleParser.cue(at: 6.5, in: cues)?.text, "b")
+        XCTAssertEqual(SubtitleParser.cue(at: 11.999, in: cues)?.text, "c")
+        XCTAssertNil(SubtitleParser.cue(at: -1, in: cues))
+        XCTAssertNil(SubtitleParser.cue(at: 3, in: cues), "gap between cues")
+        XCTAssertNil(SubtitleParser.cue(at: 12, in: cues), "cue end is exclusive")
+        XCTAssertNil(SubtitleParser.cue(at: 100, in: cues))
+    }
+
+    func testCueLookupHandlesEmptyList() {
+        XCTAssertNil(SubtitleParser.cue(at: 0, in: []))
+    }
+
+    func testCueLookupPrefersLatestOverlappingCue() {
+        let cues = [
+            SubtitleParser.Cue(start: 0, end: 10, text: "long"),
+            SubtitleParser.Cue(start: 2, end: 4, text: "short"),
+        ]
+        XCTAssertEqual(SubtitleParser.cue(at: 3, in: cues)?.text, "short")
+        XCTAssertEqual(SubtitleParser.cue(at: 5, in: cues)?.text, "long")
+    }
 }

@@ -53,6 +53,11 @@ final class RigelPlayerViewController: UIViewController {
     /// rebuild the session for the renderer instead of seeking the local item.
     var isCastPlayback = false
     private var lastPlayheadReport = DispatchTime(uptimeNanoseconds: 0)
+    /// Preferences cache: the poll tick reads these instead of UserDefaults,
+    /// which only change through the customization sheet.
+    private var subtitleAppearance = SubtitlePreferences.appearance
+    private var subtitleDelay = SubtitlePreferences.delay
+    private var lastRenderedPlaying = false
 
     /// Configure AVAudioSession for the current media so only eligible
     /// long-form video selects the shared video AirPlay route.
@@ -631,8 +636,10 @@ final class RigelPlayerViewController: UIViewController {
             return
         }
         let model = SubtitleCustomizationModel(
-            onChange: { [weak self] appearance, _ in
+            onChange: { [weak self] appearance, delay in
                 guard let self else { return }
+                self.subtitleAppearance = appearance
+                self.subtitleDelay = delay
                 self.applySubtitleAppearance(appearance)
                 self.subtitleBottomConstraint?.constant = -appearance.bottomInset
                 self.updateSidecarSubtitle()
@@ -1036,20 +1043,18 @@ final class RigelPlayerViewController: UIViewController {
             subtitleLabel.isHidden = true
             return
         }
-        let appearance = SubtitlePreferences.appearance
+        let appearance = subtitleAppearance
         if appliedSubtitleAppearance != appearance {
             applySubtitleAppearance(appearance)
+            subtitleBottomConstraint?.constant = -appearance.bottomInset
         }
-        subtitleBottomConstraint?.constant = -appearance.bottomInset
-        let seconds = mediaSeconds - SubtitlePreferences.delay
+        let seconds = mediaSeconds - subtitleDelay
         guard seconds.isFinite else {
             renderSubtitleText(nil)
             subtitleLabel.isHidden = true
             return
         }
-        let cue = sidecarSubtitles[index].cues.first {
-            $0.start <= seconds && seconds < $0.end
-        }
+        let cue = SubtitleParser.cue(at: seconds, in: sidecarSubtitles[index].cues)
         renderSubtitleText(cue?.text)
         subtitleLabel.isHidden = cue == nil
     }
@@ -1336,28 +1341,47 @@ final class RigelPlayerViewController: UIViewController {
         performSeek(absoluteTarget: target)
         showControls()
     }
+    /// Poll-tick control updates skip writes whose value did not change: the
+    /// tick also runs while paused with controls hidden, where every write
+    /// would otherwise dirty the view hierarchy for nothing.
     private func updatePlaybackControls() {
         guard customPlaybackControls, let player, let item = player.currentItem else { return }
         let elapsed = mediaSeconds
         let elapsedText = Self.formatTime(elapsed)
-        elapsedLabel.text = elapsedText
+        if elapsedLabel.text != elapsedText {
+            elapsedLabel.text = elapsedText
+        }
         let duration = effectiveDuration(item)
         if duration.isFinite, duration > 0 {
             progressSlider.isHidden = false
             if let pendingScrubValue {
                 progressSlider.value = pendingScrubValue
             } else if !isScrubbing {
-                progressSlider.value = Float(min(max(elapsed / duration, 0), 1))
+                let value = Float(min(max(elapsed / duration, 0), 1))
+                if progressSlider.value != value {
+                    progressSlider.value = value
+                }
             }
             let durationText = Self.formatTime(duration)
-            durationLabel.text = durationText
-            progressSlider.accessibilityValue = "\(elapsedText) of \(durationText)"
+            if durationLabel.text != durationText {
+                durationLabel.text = durationText
+            }
+            let accessibilityValue = "\(elapsedText) of \(durationText)"
+            if progressSlider.accessibilityValue != accessibilityValue {
+                progressSlider.accessibilityValue = accessibilityValue
+            }
         } else {
             progressSlider.isHidden = true
-            durationLabel.text = "—"
-            progressSlider.accessibilityValue = elapsedText
+            if durationLabel.text != "—" {
+                durationLabel.text = "—"
+            }
+            if progressSlider.accessibilityValue != elapsedText {
+                progressSlider.accessibilityValue = elapsedText
+            }
         }
         let isPlaying = player.timeControlStatus == .playing
+        guard isPlaying != lastRenderedPlaying else { return }
+        lastRenderedPlaying = isPlaying
         var configuration = playPauseButton.configuration
         configuration?.image = UIImage(
             systemName: isPlaying ? "pause.fill" : "play.fill",
@@ -1419,6 +1443,7 @@ final class RigelPlayerViewController: UIViewController {
         isProxyPlayback = false
         phaseBufferingRequested = false
         lastReportedNativeBuffering = false
+        lastRenderedPlaying = false
         selectedExternalSubtitleUrl = nil
         selectedExternalSubtitleOption = nil
         proxyExternalSubtitleUrl = nil
@@ -1477,15 +1502,19 @@ final class RigelPlayerViewController: UIViewController {
         reportPlayheadToExporter()
         updatePlaybackControls()
         updateSidecarSubtitle()
+        // Only buffering forces the controls up; a paused player may keep
+        // them hidden, and a pending hide timer still fires while paused.
         if player.timeControlStatus == .playing {
             if controlsVisible, controlsHideTimer == nil {
                 scheduleControlsHide()
             }
-        } else if !controlsVisible {
-            showControls()
-        } else {
-            controlsHideTimer?.invalidate()
-            controlsHideTimer = nil
+        } else if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+            if controlsVisible {
+                controlsHideTimer?.invalidate()
+                controlsHideTimer = nil
+            } else {
+                showControls()
+            }
         }
         switch item.status {
         case .failed:

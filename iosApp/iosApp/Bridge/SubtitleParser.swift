@@ -7,6 +7,31 @@ enum SubtitleParser {
         let text: String
     }
 
+    /// Cue active at `seconds` in the start-sorted list, or nil. Binary-searches
+    /// the first cue starting after `seconds` and walks back, so overlaps
+    /// resolve to the latest-starting covering cue (one step when none overlap).
+    static func cue(at seconds: TimeInterval, in cues: [Cue]) -> Cue? {
+        var low = 0
+        var high = cues.count
+        while low < high {
+            let mid = (low + high) / 2
+            if cues[mid].start <= seconds {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        var index = low - 1
+        while index >= 0 {
+            let cue = cues[index]
+            if cue.start <= seconds, seconds < cue.end {
+                return cue
+            }
+            index -= 1
+        }
+        return nil
+    }
+
     /// Decode subtitle bytes without forcing every source through UTF-8.
     /// UTF-8 remains the first legacy-free fallback; Windows-1252 and Latin-1
     /// cover the common non-Unicode subtitle files while preserving Unicode.
