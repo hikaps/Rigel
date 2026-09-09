@@ -16,6 +16,9 @@ final class RigelHlsExporter {
         var finished = false
         var readinessClaimed = false
         var readinessDelivered = false
+        /// Local playhead feed (absolute media ms) driving export pacing.
+        var playheadMs: Int64 = -1
+        var playheadUpdatedAt: DispatchTime?
 
         init(
             queue: DispatchQueue,
@@ -73,6 +76,14 @@ final class RigelHlsExporter {
         sessions[sessionId]?.cancel = true
         lock.unlock()
         deleteSessionDir(sessionId: sessionId, writerQueue: queue)
+    }
+
+    /// Local playhead feed from the host player; see paceExport.
+    static func updatePlayhead(sessionId: String, positionMs: Int64) {
+        lock.lock()
+        sessions[sessionId]?.playheadMs = positionMs
+        sessions[sessionId]?.playheadUpdatedAt = .now()
+        lock.unlock()
     }
 
     /// The directory must outlive the writer: deleting mid-write races

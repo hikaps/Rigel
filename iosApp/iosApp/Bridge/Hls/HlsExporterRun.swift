@@ -610,9 +610,11 @@ extension RigelHlsExporter {
 
         var primaryEnded = false
         var endedExternalSources = Set<Int>()
+        var lastInputUs: Int64 = 0
         let externalSourceCount = externalSubtitleOutputs.count
         while true {
             if isCancelled(session) { break }
+            paceExport(session: session, exportedUs: lastInputUs)
             var didRead = false
             if !primaryEnded {
                 var primaryPacket = AVPacket()
@@ -623,6 +625,10 @@ extension RigelHlsExporter {
                 } else {
                     didRead = true
                     let inIdx = primaryPacket.stream_index
+                    lastInputUs = max(
+                        lastInputUs,
+                        inputPacketUs(&primaryPacket, stream: ctx.pointee.streams[Int(inIdx)])
+                    )
                     if let outIdx = streamMap[inIdx],
                        let inStream = ctx.pointee.streams[Int(inIdx)],
                        let outStream = out.pointee.streams[Int(outIdx)] {
@@ -742,6 +748,51 @@ extension RigelHlsExporter {
                 path: "\(sessionId)/index.m3u8",
                 onReady: onReady
             )
+        }
+    }
+
+    static let pacingRunAheadLimitUs: Int64 = 20_000_000
+    static let pacingPlayheadFreshnessSeconds: Double = 15
+
+    /// Absolute media time of a packet (AV_TIME_BASE µs); 0 when unknown.
+    static func inputPacketUs(
+        _ packet: UnsafeMutablePointer<AVPacket>,
+        stream: UnsafeMutablePointer<AVStream>?
+    ) -> Int64 {
+        guard let stream, stream.pointee.time_base.num != 0, stream.pointee.time_base.den != 0 else { return 0 }
+        let ts = packet.pointee.pts != Int64.min ? packet.pointee.pts : packet.pointee.dts
+        guard ts != Int64.min else { return 0 }
+        return av_rescale_q(ts, stream.pointee.time_base, AVRational(num: 1, den: AV_TIME_BASE))
+    }
+
+    /// True when the export should idle: it is far ahead of a fresh playhead.
+    /// An unknown or stale playhead (never reported, or cast playback where
+    /// the local position is wrong) keeps the historical free-run behavior.
+    static func shouldPace(exportedUs: Int64, playheadMs: Int64, playheadAgeSeconds: Double?) -> Bool {
+        guard playheadMs >= 0,
+              let age = playheadAgeSeconds,
+              age <= pacingPlayheadFreshnessSeconds else { return false }
+        return exportedUs - playheadMs * 1000 > pacingRunAheadLimitUs
+    }
+
+    /// Blocks the session queue in short sleeps until pacing disengages or
+    /// the session is cancelled; playhead jumps (native seeks) re-engage or
+    /// release pacing through the same check.
+    static func paceExport(session: Session, exportedUs: Int64) {
+        while true {
+            lock.lock()
+            let playheadMs = session.playheadMs
+            let updated = session.playheadUpdatedAt
+            let cancelled = session.cancel
+            lock.unlock()
+            if cancelled { return }
+            let age = updated.map {
+                Double(DispatchTime.now().uptimeNanoseconds - $0.uptimeNanoseconds) / 1_000_000_000
+            }
+            guard shouldPace(exportedUs: exportedUs, playheadMs: playheadMs, playheadAgeSeconds: age) else {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.2)
         }
     }
 }

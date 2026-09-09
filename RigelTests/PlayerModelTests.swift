@@ -427,6 +427,48 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertNil(controller.loadedURL)
     }
 
+    func testNativeProxySeekTargetRequiresCoveredRange() {
+        XCTAssertNil(
+            RigelPlayerViewController.nativeProxySeekTarget(
+                absoluteTarget: 30, startOffsetSeconds: 120, seekableEndSeconds: nil
+            ),
+            "no published range must rebuild"
+        )
+        XCTAssertNil(
+            RigelPlayerViewController.nativeProxySeekTarget(
+                absoluteTarget: 30, startOffsetSeconds: 10, seekableEndSeconds: 1.5
+            ),
+            "a range under 2 s must rebuild"
+        )
+        XCTAssertNil(
+            RigelPlayerViewController.nativeProxySeekTarget(
+                absoluteTarget: 50, startOffsetSeconds: 120, seekableEndSeconds: 60
+            ),
+            "targets before the session start must rebuild"
+        )
+        XCTAssertNil(
+            RigelPlayerViewController.nativeProxySeekTarget(
+                absoluteTarget: 180, startOffsetSeconds: 120, seekableEndSeconds: 60
+            ),
+            "targets past the published edge must rebuild"
+        )
+        XCTAssertEqual(
+            RigelPlayerViewController.nativeProxySeekTarget(
+                absoluteTarget: 150, startOffsetSeconds: 120, seekableEndSeconds: 60
+            )!,
+            30
+        )
+    }
+
+    func testProxySessionIdExtraction() {
+        XCTAssertEqual(
+            RigelPlayerViewController.proxySessionId(from: "http://10.0.0.2:49152/session-abc123/index.m3u8"),
+            "session-abc123"
+        )
+        XCTAssertNil(RigelPlayerViewController.proxySessionId(from: nil))
+        XCTAssertNil(RigelPlayerViewController.proxySessionId(from: "http://10.0.0.2/video.mp4"))
+    }
+
     private func probe(
         container: String = "mp4",
         videoCodec: String? = "h264",

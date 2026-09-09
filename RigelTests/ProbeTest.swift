@@ -607,6 +607,29 @@ final class ProbeTest: XCTestCase {
         XCTAssertFalse(watchdog.shouldAbort(), "touch must refresh the read budget")
     }
 
+    func testExportPacingDecision() {
+        XCTAssertFalse(
+            RigelHlsExporter.shouldPace(exportedUs: 90_000_000, playheadMs: -1, playheadAgeSeconds: 1),
+            "unknown playhead keeps free-run"
+        )
+        XCTAssertFalse(
+            RigelHlsExporter.shouldPace(exportedUs: 90_000_000, playheadMs: 10_000, playheadAgeSeconds: nil),
+            "missing freshness keeps free-run"
+        )
+        XCTAssertFalse(
+            RigelHlsExporter.shouldPace(exportedUs: 90_000_000, playheadMs: 10_000, playheadAgeSeconds: 16),
+            "stale playhead keeps free-run"
+        )
+        XCTAssertFalse(
+            RigelHlsExporter.shouldPace(exportedUs: 25_000_000, playheadMs: 10_000, playheadAgeSeconds: 1),
+            "within the run-ahead limit keeps exporting"
+        )
+        XCTAssertTrue(
+            RigelHlsExporter.shouldPace(exportedUs: 90_000_000, playheadMs: 10_000, playheadAgeSeconds: 1),
+            "far ahead of a fresh playhead must idle"
+        )
+    }
+
     /// Sidecar URLs arrive percent-encoded (absoluteString); FFmpeg cannot
     /// open them that way, so the exporter must resolve file URLs to paths.
     func testSidecarFileURLPercentEscapesAreDecoded() throws {
