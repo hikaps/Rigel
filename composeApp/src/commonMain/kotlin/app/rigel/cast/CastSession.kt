@@ -41,6 +41,9 @@ sealed interface CastTarget {
 data class CastCapabilities(
     val supportsSeek: Boolean,
     val supportsPosition: Boolean,
+    val supportsPauseResume: Boolean,
+    val supportsStop: Boolean,
+    val supportsVolume: Boolean,
     val note: String?,
 )
 

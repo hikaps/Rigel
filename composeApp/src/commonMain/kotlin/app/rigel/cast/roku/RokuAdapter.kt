@@ -15,7 +15,10 @@ object RokuAdapter : ReceiverAdapter {
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
         supportsPosition = false,
-        note = "Roku ECP media playback has no seek or position tracking",
+        supportsPauseResume = true,
+        supportsStop = true,
+        supportsVolume = true,
+        note = "Roku ECP playback: remote control with relative volume, no seek or position",
     )
 
     override suspend fun cast(
@@ -38,6 +41,24 @@ object RokuAdapter : ReceiverAdapter {
         return RokuRenderer(client).fetchDeviceInfo(device.usn, device.location)
             ?.let { CastTarget.Roku(it) }
     }
+
+    override suspend fun pause(target: CastTarget, client: HttpClient): Boolean =
+        RokuRenderer(client).pause((target as CastTarget.Roku).device)
+
+    override suspend fun resume(target: CastTarget, client: HttpClient): Boolean =
+        RokuRenderer(client).play((target as CastTarget.Roku).device)
+
+    override suspend fun stop(target: CastTarget, client: HttpClient): Boolean =
+        RokuRenderer(client).stop((target as CastTarget.Roku).device)
+
+    override suspend fun volumeUp(target: CastTarget, client: HttpClient): Boolean =
+        RokuRenderer(client).volumeUp((target as CastTarget.Roku).device)
+
+    override suspend fun volumeDown(target: CastTarget, client: HttpClient): Boolean =
+        RokuRenderer(client).volumeDown((target as CastTarget.Roku).device)
+
+    override suspend fun toggleMute(target: CastTarget, client: HttpClient): Boolean =
+        RokuRenderer(client).toggleMute((target as CastTarget.Roku).device)
 
     override suspend fun fromRow(parts: List<String>, client: HttpClient): CastTarget? {
         return RokuRenderer(client).fetchDeviceInfo(parts[1], parts[2])

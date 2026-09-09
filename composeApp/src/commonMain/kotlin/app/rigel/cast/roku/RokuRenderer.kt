@@ -48,13 +48,18 @@ class RokuRenderer(private val client: HttpClient) {
         return RokuEcp.PLAY_ON_ROKU_CHANNEL_ID
     }
 
-    suspend fun keypress(device: RokuDevice, key: String) {
-        runCatching {
-            client.post(device.location + "keypress/$key") { userAgent("Rigel/1.0") }
-        }
+    /** True when the device acknowledged the key (2xx); ECP keys act on the focused channel. */
+    suspend fun keypress(device: RokuDevice, key: String): Boolean {
+        val resp = runCatching {
+            client.post(device.location + "keypress/$key") { userAgent("Rigel/1.0") }.status.value
+        }.getOrNull()
+        return resp != null && resp in 200..299
     }
 
     suspend fun play(device: RokuDevice) = keypress(device, "Play")
     suspend fun pause(device: RokuDevice) = keypress(device, "Pause")
     suspend fun stop(device: RokuDevice) = keypress(device, "Home")
+    suspend fun volumeUp(device: RokuDevice) = keypress(device, "VolumeUp")
+    suspend fun volumeDown(device: RokuDevice) = keypress(device, "VolumeDown")
+    suspend fun toggleMute(device: RokuDevice) = keypress(device, "VolumeMute")
 }

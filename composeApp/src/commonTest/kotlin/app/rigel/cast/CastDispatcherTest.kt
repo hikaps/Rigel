@@ -7,7 +7,9 @@ import app.rigel.bridge.ProbeResult
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.SsdpDevice
 import app.rigel.bridge.TranscodeBridge
+import app.rigel.cast.chrome.ChromeAdapter
 import app.rigel.cast.dlna.DlnaRenderer
+import app.rigel.cast.ChromeDevice
 import app.rigel.cast.DlnaDevice
 import app.rigel.cast.KodiDevice
 import app.rigel.cast.RokuDevice
@@ -153,11 +155,19 @@ class CastDispatcherTest {
     @Test
     fun dlnaAndKodiCapabilitiesFullControl() {
         val dlna = CastTarget.Dlna(DlnaDevice("u", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
-        assertTrue(dlna.let { CastDispatcher.capabilities(it) }.supportsSeek)
-        assertTrue(dlna.let { CastDispatcher.capabilities(it) }.supportsPosition)
+        val dlnaCaps = CastDispatcher.capabilities(dlna)
+        assertTrue(dlnaCaps.supportsSeek)
+        assertTrue(dlnaCaps.supportsPosition)
+        assertTrue(dlnaCaps.supportsPauseResume)
+        assertTrue(dlnaCaps.supportsStop)
+        assertTrue(dlnaCaps.supportsVolume)
         val kodi = CastTarget.Kodi(KodiDevice("u", "http://10.0.0.9:8080", "Kodi"))
-        assertTrue(CastDispatcher.capabilities(kodi).supportsSeek)
-        assertTrue(CastDispatcher.capabilities(kodi).supportsPosition)
+        val kodiCaps = CastDispatcher.capabilities(kodi)
+        assertTrue(kodiCaps.supportsSeek)
+        assertTrue(kodiCaps.supportsPosition)
+        assertTrue(kodiCaps.supportsPauseResume)
+        assertTrue(kodiCaps.supportsStop)
+        assertTrue(kodiCaps.supportsVolume)
     }
 
     @Test
@@ -274,6 +284,127 @@ class CastDispatcherTest {
         val body = (engine.requestHistory[1].body as? TextContent)?.text ?: ""
         assertTrue(body.contains("\"Player.Seek\""))
         assertTrue(body.contains("\"percentage\":50.0"))
+    }
+
+    // --- Remote-control dispatch (pause/resume/stop/volume) ---
+
+    @Test
+    fun remoteControlOpsWithoutActiveSessionReturnFalse() {
+        val engine = MockEngine { respond("", HttpStatusCode.OK) }
+        val client = HttpClient(engine)
+        runBlocking {
+            assertFalse(CastDispatcher.pauseActive(client))
+            assertFalse(CastDispatcher.resumeActive(client))
+            assertFalse(CastDispatcher.stopActive(client))
+            assertFalse(CastDispatcher.volumeUpActive(client))
+            assertFalse(CastDispatcher.volumeDownActive(client))
+            assertFalse(CastDispatcher.toggleMuteActive(client))
+        }
+        assertEquals(0, engine.requestHistory.size)
+    }
+
+    @Test
+    fun activeDlnaPauseAndVolumeDispatchSoap() {
+        val engine = MockEngine {
+            respond(
+                content = "<CurrentVolume>20</CurrentVolume>",
+                status = HttpStatusCode.OK,
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(
+            DlnaDevice(
+                "rc1",
+                "http://10.0.0.9/rootDesc.xml",
+                "TV",
+                "http://10.0.0.9/ctl",
+                renderingControlUrl = "http://10.0.0.9/rc",
+            ),
+        )
+
+        runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
+        assertTrue(runBlocking { CastDispatcher.pauseActive(client) })
+        assertTrue(runBlocking { CastDispatcher.volumeUpActive(client) })
+
+        // cast = SetURI + Play; pause = AVTransport Pause; volume = GetVolume + SetVolume on RenderingControl.
+        assertEquals(5, engine.requestHistory.size)
+        val pause = engine.requestHistory[2]
+        assertEquals("http://10.0.0.9/ctl", pause.url.toString())
+        assertTrue(pause.headers["SOAPACTION"]!!.contains("AVTransport:1#Pause"))
+        assertEquals("http://10.0.0.9/rc", engine.requestHistory[3].url.toString())
+        assertTrue(engine.requestHistory[3].headers["SOAPACTION"]!!.contains("RenderingControl:1#GetVolume"))
+        assertEquals("http://10.0.0.9/rc", engine.requestHistory[4].url.toString())
+        val setVolumeBody = (engine.requestHistory[4].body as? TextContent)?.text ?: ""
+        assertTrue(setVolumeBody.contains("<DesiredVolume>30</DesiredVolume>"))
+        assertEquals(target, CastDispatcher.activeTarget(), "pause/volume must not end the session")
+        assertTrue(port.active)
+    }
+
+    @Test
+    fun activeRokuPausePostsEcpKeypress() {
+        val engine = MockEngine { request ->
+            if (request.method == HttpMethod.Get) {
+                respond("""<apps><app id="15985">Play on Roku</app></apps>""", HttpStatusCode.OK)
+            } else {
+                respond("", HttpStatusCode.OK)
+            }
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Roku(RokuDevice("r9", "http://10.0.0.9:8060/", "Roku Ultra"))
+
+        val result = runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
+        assertTrue(result.message.contains("Sent"))
+        assertTrue(runBlocking { CastDispatcher.pauseActive(client) })
+        assertTrue(runBlocking { CastDispatcher.stopActive(client) })
+
+        // cast = GET query/apps + POST input/15985; pause/stop = keypress posts.
+        val urls = engine.requestHistory.map { it.url.toString() }
+        assertEquals(
+            listOf(
+                "http://10.0.0.9:8060/query/apps",
+                "http://10.0.0.9:8060/input/15985",
+                "http://10.0.0.9:8060/keypress/Pause",
+                "http://10.0.0.9:8060/keypress/Home",
+            ),
+            urls,
+        )
+        assertNull(CastDispatcher.activeTarget(), "stopActive must end the session")
+        assertFalse(port.active)
+    }
+
+    @Test
+    fun stopActiveClearsSessionEvenWhenDeviceUnreachable() {
+        var requestCount = 0
+        val engine = MockEngine {
+            requestCount++
+            if (requestCount <= 2) {
+                respond("<ok/>", HttpStatusCode.OK)
+            } else {
+                respond("gone", HttpStatusCode.ServiceUnavailable)
+            }
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(DlnaDevice("rc2", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
+
+        runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) }
+        assertTrue(port.active)
+        assertFalse(runBlocking { CastDispatcher.stopActive(client) }, "device refused the Stop action")
+        assertNull(CastDispatcher.activeTarget(), "session must end locally even when the stop fails")
+        assertFalse(port.active)
+    }
+
+    @Test
+    fun chromeFamilyDefaultsCannotRemoteControl() {
+        val client = HttpClient(MockEngine { respond("", HttpStatusCode.OK) })
+        val target = CastTarget.Chrome(ChromeDevice("c1", "10.0.0.9", 8009, "Chromecast"))
+        runBlocking {
+            assertFalse(ChromeAdapter.pause(target, client))
+            assertFalse(ChromeAdapter.resume(target, client))
+            assertFalse(ChromeAdapter.stop(target, client))
+            assertFalse(ChromeAdapter.volumeUp(target, client))
+            assertFalse(ChromeAdapter.volumeDown(target, client))
+            assertFalse(ChromeAdapter.toggleMute(target, client))
+        }
     }
 
     @Test

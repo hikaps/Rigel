@@ -14,36 +14,48 @@ class CastSessionTest {
     private val session = CastSession()
 
     @Test
-    fun dlnaSupportsSeekAndPosition() {
+    fun dlnaSupportsFullRemoteControl() {
         val caps = session.capabilities(
             CastTarget.Dlna(DlnaDevice("u1", "http://h/desc.xml", "TV", "/ctl")),
         )
         assertTrue(caps.supportsSeek)
         assertTrue(caps.supportsPosition)
+        assertTrue(caps.supportsPauseResume)
+        assertTrue(caps.supportsStop)
+        assertTrue(caps.supportsVolume)
         assertEquals(null, caps.note)
     }
 
     @Test
-    fun rokuHasNoSeekOrPositionAndExplains() {
+    fun rokuHasRemoteControlButNoSeekOrPositionAndExplains() {
         val caps = session.capabilities(CastTarget.Roku(RokuDevice("r1", "http://h:8060/", "Roku")))
         assertFalse(caps.supportsSeek)
         assertFalse(caps.supportsPosition)
-        assertEquals("Roku ECP media playback has no seek or position tracking", caps.note)
+        assertTrue(caps.supportsPauseResume)
+        assertTrue(caps.supportsStop)
+        assertTrue(caps.supportsVolume)
+        assertEquals("Roku ECP playback: remote control with relative volume, no seek or position", caps.note)
     }
 
     @Test
-    fun kodiSupportsSeekAndPosition() {
+    fun kodiSupportsFullRemoteControl() {
         val caps = session.capabilities(CastTarget.Kodi(KodiDevice("k1", "http://h:8080", "Kodi")))
         assertTrue(caps.supportsSeek)
         assertTrue(caps.supportsPosition)
+        assertTrue(caps.supportsPauseResume)
+        assertTrue(caps.supportsStop)
+        assertTrue(caps.supportsVolume)
         assertEquals(null, caps.note)
     }
 
     @Test
-    fun jellyfinSessionHasNoSeekOrPositionAndExplains() {
+    fun jellyfinSessionHasNoRemoteControlAndExplains() {
         val caps = session.capabilities(CastTarget.JellyfinSessionTarget(JellyfinSession("j1", "iPhone", "Jellyfin")))
         assertFalse(caps.supportsSeek)
         assertFalse(caps.supportsPosition)
+        assertFalse(caps.supportsPauseResume)
+        assertFalse(caps.supportsStop)
+        assertFalse(caps.supportsVolume)
         assertEquals("Jellyfin session remote control plays library items; no seek/position", caps.note)
     }
 
