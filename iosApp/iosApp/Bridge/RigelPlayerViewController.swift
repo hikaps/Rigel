@@ -49,6 +49,10 @@ final class RigelPlayerViewController: UIViewController {
     /// instead of playing a stale item whose session is being torn down.
     private var phaseBufferingRequested = false
     private var lastReportedNativeBuffering = false
+    /// True while a remote cast session owns playback: proxy seeks must then
+    /// rebuild the session for the renderer instead of seeking the local item.
+    var isCastPlayback = false
+    private var lastPlayheadReport = DispatchTime(uptimeNanoseconds: 0)
 
     /// Configure AVAudioSession for the current media so only eligible
     /// long-form video selects the shared video AirPlay route.
@@ -1212,6 +1216,27 @@ final class RigelPlayerViewController: UIViewController {
         return max(0, startOffsetSeconds + current)
     }
 
+    /// Feed the live export session the local playhead (≈1 Hz) so it can pace
+    /// its run-ahead. Cast sessions skip this: the remote renderer consumes
+    /// the proxy and the local position would mislead the pacing.
+    private func reportPlayheadToExporter() {
+        guard isProxyPlayback, !isCastPlayback,
+              let sessionId = Self.proxySessionId(from: loadedURL) else { return }
+        let now = DispatchTime.now()
+        guard now.uptimeNanoseconds - lastPlayheadReport.uptimeNanoseconds >= 1_000_000_000 else { return }
+        lastPlayheadReport = now
+        RigelHlsExporter.updatePlayhead(sessionId: sessionId, positionMs: Int64(mediaSeconds * 1000))
+    }
+
+    /// Session id from a proxy URL (`.../<sessionId>/index.m3u8`).
+    static func proxySessionId(from url: String?) -> String? {
+        guard let url, let lastSlash = url.lastIndex(of: "/") else { return nil }
+        let beforeLast = url[..<lastSlash]
+        guard let previousSlash = beforeLast.lastIndex(of: "/") else { return nil }
+        let id = String(beforeLast[beforeLast.index(after: previousSlash)...])
+        return id.hasPrefix("session-") ? id : nil
+    }
+
     private func performSeek(absoluteTarget: Double) {
         showControls()
         pendingScrubValue = nil
@@ -1221,11 +1246,43 @@ final class RigelPlayerViewController: UIViewController {
         guard duration.isFinite, duration > 0 else { return }
         let target = min(max(absoluteTarget, 0), duration)
         if isProxyPlayback {
+            // The live playlist retains every exported segment, so a target
+            // the player can already reach seeks natively — no rebuild. A
+            // cast renderer fetches the proxy independently, so while casting
+            // every seek still goes through the rebuild path.
+            if !isCastPlayback,
+               let local = Self.nativeProxySeekTarget(
+                   absoluteTarget: target,
+                   startOffsetSeconds: startOffsetSeconds,
+                   seekableEndSeconds: item.seekableTimeRanges.last?.timeRangeValue.end.seconds
+               ) {
+                seekLocally(to: local)
+                return
+            }
             onSeekRequested?(target)
             return
         }
+        seekLocally(to: target)
+        onSeekRequested?(target)
+    }
+
+    /// Item-local seek target for a native proxy seek, or nil when the
+    /// published playlist does not cover the target yet (rebuild instead).
+    static func nativeProxySeekTarget(
+        absoluteTarget: Double,
+        startOffsetSeconds: Double,
+        seekableEndSeconds: Double?
+    ) -> Double? {
+        guard let seekableEnd = seekableEndSeconds, seekableEnd.isFinite, seekableEnd >= 2 else { return nil }
+        let localTarget = absoluteTarget - startOffsetSeconds
+        guard localTarget >= 0, localTarget <= seekableEnd - 1 else { return nil }
+        return localTarget
+    }
+
+    private func seekLocally(to seconds: Double) {
+        guard let player else { return }
         let generation = scrubGeneration
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self, weak player] finished in
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) { [weak self, weak player] finished in
             DispatchQueue.main.async {
                 guard let self, let player, self.player === player, self.scrubGeneration == generation else { return }
                 if finished {
@@ -1236,7 +1293,6 @@ final class RigelPlayerViewController: UIViewController {
                 }
             }
         }
-        onSeekRequested?(target)
     }
 
     @objc private func skipBackwardTapped() {
@@ -1418,6 +1474,7 @@ final class RigelPlayerViewController: UIViewController {
             player.pause()
         }
         reportNativeBuffering(player.timeControlStatus == .waitingToPlayAtSpecifiedRate)
+        reportPlayheadToExporter()
         updatePlaybackControls()
         updateSidecarSubtitle()
         if player.timeControlStatus == .playing {

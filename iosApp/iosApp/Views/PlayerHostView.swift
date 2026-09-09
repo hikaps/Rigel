@@ -130,6 +130,7 @@ struct PlayerHostView: View {
                         probeDurationMs: player.probeDurationMs,
                         startPositionMs: player.startPositionMs,
                         isPhaseBuffering: player.phase == .buffering,
+                        isCastActive: player.castActive,
                         onNativeBufferingChange: { nativeBuffering = $0 },
                         onReady: {},
                         onError: { player.reportError($0) },
@@ -236,6 +237,8 @@ struct PlayerView: UIViewControllerRepresentable {
     let startPositionMs: Int64
     /// True during Kotlin's BUFFERING phase: freeze the stale item.
     let isPhaseBuffering: Bool
+    /// True while a cast session owns playback; proxy seeks then rebuild.
+    let isCastActive: Bool
     let onNativeBufferingChange: (Bool) -> Void
     let onReady: () -> Void
     let onError: (String) -> Void
@@ -327,6 +330,7 @@ struct PlayerView: UIViewControllerRepresentable {
             player.onDevicesRequested = onDevices
             player.onSeekRequested = onSeek
             player.onNativeBufferingChange = onNativeBufferingChange
+            player.isCastPlayback = isCastActive
             player.setPhaseBuffering(isPhaseBuffering)
         }
         origin.controller = created as? RigelPlayerViewController
@@ -342,6 +346,7 @@ struct PlayerView: UIViewControllerRepresentable {
         if let player = uiViewController as? RigelPlayerViewController {
             player.onExternalSubtitleSelected = onExternalSubtitleSelected
             player.onNativeBufferingChange = onNativeBufferingChange
+            player.isCastPlayback = isCastActive
             // Clear the freeze before a changed URL reloads and plays.
             player.setPhaseBuffering(isPhaseBuffering)
         }
