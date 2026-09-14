@@ -127,7 +127,7 @@ extension RigelHlsExporter {
             chain?.release()
             return nil
         }
-        return SubtitleRendition(
+        let rendition = SubtitleRendition(
             input: input,
             ordinal: ordinal,
             playlistName: "subtitle_\(ordinal)_vtt.m3u8",
@@ -137,6 +137,8 @@ extension RigelHlsExporter {
             title: input.title,
             isSelectedExternal: isSelectedExternal
         )
+        writeSubtitlePlaylist(rendition, final: false)
+        return rendition
     }
 
     static func writeSubtitlePacket(
@@ -179,14 +181,16 @@ extension RigelHlsExporter {
         } else {
             cue = rawSubtitleCue(packet: shiftedPacket, inputStream: inputStream)
         }
-        guard let cue else { return }
+        guard let cue else {
+            rendition.decodeFailed = true
+            return
+        }
         appendSubtitleCue(cue, to: rendition)
     }
 
     static func finishSubtitleRendition(_ rendition: SubtitleRendition) {
         guard !rendition.finished else { return }
         rendition.finished = true
-        guard rendition.wrotePacket else { return }
         writeSubtitlePlaylist(rendition, final: true)
     }
 
@@ -270,36 +274,61 @@ extension RigelHlsExporter {
         return text.isEmpty ? nil : text
     }
 
+    private static let subtitleSegmentTargetMs: Int64 = 4_000
+
     private static func appendSubtitleCue(_ cue: SubtitleCue, to rendition: SubtitleRendition) {
         guard cue.endMs > cue.startMs, !cue.text.isEmpty else { return }
-        let fileName = "subtitle_\(rendition.ordinal)_\(String(format: "%05d", rendition.nextSegmentIndex)).vtt"
-        let vtt = """
-        WEBVTT
-
-        \(vttTimestamp(cue.startMs)) --> \(vttTimestamp(cue.endMs))
-        \(cue.text)
-
-        """
-        let fileURL = rendition.outDir.appendingPathComponent(fileName)
-        do {
-            try vtt.write(to: fileURL, atomically: true, encoding: .utf8)
-        } catch {
-            return
+        var cursor = max(0, rendition.timelineEndMs)
+        let cueStart = max(0, cue.startMs)
+        if cueStart > cursor {
+            emitSubtitleSegments(
+                from: cursor,
+                to: cueStart,
+                text: nil,
+                in: rendition
+            )
+            cursor = cueStart
         }
-        rendition.nextSegmentIndex += 1
-        rendition.segments.append(
-            (name: fileName, duration: Double(cue.endMs - cue.startMs) / 1_000)
-        )
+        let end = max(cursor + 1, cue.endMs)
+        emitSubtitleSegments(from: cursor, to: end, text: cue.text, in: rendition)
+        rendition.timelineEndMs = max(rendition.timelineEndMs, end)
         rendition.wrotePacket = true
         writeSubtitlePlaylist(rendition, final: false)
     }
 
+    private static func emitSubtitleSegments(
+        from startMs: Int64,
+        to endMs: Int64,
+        text: String?,
+        in rendition: SubtitleRendition
+    ) {
+        var segmentStart = startMs
+        while segmentStart < endMs {
+            let segmentEnd = min(endMs, segmentStart + subtitleSegmentTargetMs)
+            let fileName = "subtitle_\(rendition.ordinal)_\(String(format: "%05d", rendition.nextSegmentIndex)).vtt"
+            let cueText = text.map {
+                "\(vttTimestamp(0)) --> \(vttTimestamp(segmentEnd - segmentStart))\n\($0)\n"
+            } ?? ""
+            let vtt = cueText.isEmpty ? "WEBVTT\n\n" : "WEBVTT\n\n\(cueText)\n"
+            let fileURL = rendition.outDir.appendingPathComponent(fileName)
+            do {
+                try vtt.write(to: fileURL, atomically: true, encoding: .utf8)
+            } catch {
+                return
+            }
+            rendition.nextSegmentIndex += 1
+            rendition.segments.append(
+                (name: fileName, duration: Double(segmentEnd - segmentStart) / 1_000)
+            )
+            segmentStart = segmentEnd
+        }
+    }
+
     private static func writeSubtitlePlaylist(_ rendition: SubtitleRendition, final: Bool) {
-        guard !rendition.segments.isEmpty else { return }
         var lines = [
             "#EXTM3U",
             "#EXT-X-VERSION:3",
-            "#EXT-X-TARGETDURATION:4",
+            "#EXT-X-TARGETDURATION:\(max(1, Int(ceil(rendition.segments.map { $0.duration }.max() ?? 1.0))))",
             "#EXT-X-MEDIA-SEQUENCE:0",
             "#EXT-X-PLAYLIST-TYPE:EVENT",
         ]

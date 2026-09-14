@@ -619,11 +619,8 @@ extension RigelHlsExporter {
         if let videoError = videoChain?.error {
             terminalError = terminalError ?? videoError
         }
-        subtitleRenditions.removeAll {
-            !$0.isSelectedExternal && !$0.wrotePacket
-        }
         if terminalError == nil,
-           subtitleRenditions.contains(where: { $0.isSelectedExternal && !$0.wrotePacket }) {
+           subtitleRenditions.contains(where: { $0.isSelectedExternal && $0.decodeFailed }) {
             terminalError = "Could not prepare the selected subtitle"
         }
         if let terminalError {

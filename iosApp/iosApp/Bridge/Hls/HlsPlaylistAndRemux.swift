@@ -33,7 +33,9 @@ extension RigelHlsExporter {
                 insertedMedia = true
             }
             var line = rawLine
-            if line.hasPrefix("#EXT-X-STREAM-INF:"), !line.contains(",SUBTITLES=") {
+            if !subtitles.isEmpty,
+               line.hasPrefix("#EXT-X-STREAM-INF:"),
+               !line.contains(",SUBTITLES=") {
                 line += ",SUBTITLES=\"subs\""
             }
             output.append(line)
@@ -71,14 +73,13 @@ extension RigelHlsExporter {
             }
         }
         for rendition in subtitles {
-            guard rendition.wrotePacket,
-                  let playlistURL = safeChildURL(named: rendition.playlistName, in: outDir),
-                  let playlist = try? String(contentsOf: playlistURL, encoding: .utf8) else {
+            guard let playlistURL = safeChildURL(named: rendition.playlistName, in: outDir),
+                  let playlist = try? String(contentsOf: playlistURL, encoding: .utf8),
+                  playlist.contains("#EXTM3U"),
+                  playlist.contains("#EXT-X-PLAYLIST-TYPE:EVENT") else {
                 return false
             }
-            let media = playlistReferences(in: playlist)
-            guard !media.isEmpty else { return false }
-            for mediaName in media {
+            for mediaName in playlistReferences(in: playlist) {
                 guard let mediaURL = safeChildURL(named: mediaName, in: outDir),
                       FileManager.default.fileExists(atPath: mediaURL.path) else {
                     return false

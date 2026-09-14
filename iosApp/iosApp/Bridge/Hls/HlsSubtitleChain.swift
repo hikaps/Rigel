@@ -29,8 +29,10 @@ final class SubtitleRendition {
     let title: String?
     let isSelectedExternal: Bool
     var wrotePacket = false
+    var decodeFailed = false
     var finished = false
     var nextSegmentIndex = 0
+    var timelineEndMs: Int64 = 0
     var segments: [(name: String, duration: Double)] = []
 
     init(
