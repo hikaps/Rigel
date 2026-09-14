@@ -388,6 +388,33 @@ final class ProbeTest: XCTestCase {
             .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
             .joined(separator: "\n")
         XCTAssertTrue(vttText.contains("Sidecar subtitle"), vttText)
+        let files = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+        let videoSegments = files.filter {
+            $0.hasPrefix("seg0_") && $0.hasSuffix(".ts")
+        }
+        XCTAssertFalse(videoSegments.isEmpty, "video must be emitted once")
+        let subtitlePlaylists = files.filter {
+            $0.hasPrefix("subtitle_") && $0.hasSuffix("_vtt.m3u8")
+        }
+        XCTAssertEqual(subtitlePlaylists.count, 3)
+        for playlistName in subtitlePlaylists {
+            let playlist = try String(
+                contentsOf: outputDir.appendingPathComponent(playlistName),
+                encoding: .utf8
+            )
+            let mediaFiles = playlist.components(separatedBy: .newlines).filter {
+                !$0.isEmpty && !$0.hasPrefix("#")
+            }
+            XCTAssertFalse(mediaFiles.isEmpty, playlistName)
+            for mediaFile in mediaFiles {
+                XCTAssertTrue(
+                    FileManager.default.fileExists(
+                        atPath: outputDir.appendingPathComponent(mediaFile).path
+                    ),
+                    "\(playlistName) references missing \(mediaFile)"
+                )
+            }
+        }
     }
 
     func testInvalidSelectedSidecarFailsSession() throws {

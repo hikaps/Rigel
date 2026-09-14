@@ -116,13 +116,85 @@ extension RigelHlsExporter {
         return text.isEmpty ? nil : text
     }
 
-    static func writeTranscodedSubtitle(
+    static func makeSubtitleRendition(
+        input: SubtitleInput,
+        ordinal: Int,
+        outDir: URL,
+        chain: SubtitleChain?,
+        isSelectedExternal: Bool
+    ) -> SubtitleRendition? {
+        guard input.context.pointee.streams[Int(input.streamIndex)] != nil else {
+            chain?.release()
+            return nil
+        }
+        return SubtitleRendition(
+            input: input,
+            ordinal: ordinal,
+            playlistName: "subtitle_\(ordinal)_vtt.m3u8",
+            outDir: outDir,
+            chain: chain,
+            language: input.language,
+            title: input.title,
+            isSelectedExternal: isSelectedExternal
+        )
+    }
+
+    static func writeSubtitlePacket(
+        _ rendition: SubtitleRendition,
+        packet: UnsafeMutablePointer<AVPacket>,
+        sidecarOffsetUs: Int64
+    ) {
+        guard let inputStream = rendition.input.context.pointee.streams[Int(rendition.input.streamIndex)] else {
+            return
+        }
+        let shiftedPacket = packet
+        if rendition.input.sourceID != 0, sidecarOffsetUs > 0,
+           packet.pointee.pts != Int64.min {
+            let inputTimeBase = subtitleTimeBase(inputStream)
+            let offsetInInput = av_rescale_q(
+                sidecarOffsetUs,
+                AVRational(num: 1, den: AV_TIME_BASE),
+                inputTimeBase
+            )
+            let end = packet.pointee.duration > 0
+                ? packet.pointee.pts + packet.pointee.duration
+                : packet.pointee.pts
+            guard end > offsetInInput else { return }
+            shiftedPacket.pointee.pts = max(0, packet.pointee.pts - offsetInInput)
+            if shiftedPacket.pointee.dts != Int64.min {
+                shiftedPacket.pointee.dts = shiftedPacket.pointee.pts
+            }
+            if packet.pointee.duration > 0 {
+                shiftedPacket.pointee.duration = end - max(offsetInInput, packet.pointee.pts)
+            }
+        }
+
+        let cue: SubtitleCue?
+        if let chain = rendition.chain {
+            cue = decodeSubtitleCue(
+                chain: chain,
+                packet: shiftedPacket,
+                inputStream: inputStream
+            )
+        } else {
+            cue = rawSubtitleCue(packet: shiftedPacket, inputStream: inputStream)
+        }
+        guard let cue else { return }
+        appendSubtitleCue(cue, to: rendition)
+    }
+
+    static func finishSubtitleRendition(_ rendition: SubtitleRendition) {
+        guard !rendition.finished else { return }
+        rendition.finished = true
+        guard rendition.wrotePacket else { return }
+        writeSubtitlePlaylist(rendition, final: true)
+    }
+
+    private static func decodeSubtitleCue(
         chain: SubtitleChain,
         packet: UnsafeMutablePointer<AVPacket>,
-        inputStream: UnsafeMutablePointer<AVStream>,
-        out: UnsafeMutablePointer<AVFormatContext>,
-        outStream: UnsafeMutablePointer<AVStream>
-    ) {
+        inputStream: UnsafeMutablePointer<AVStream>
+    ) -> SubtitleCue? {
         var subtitle = AVSubtitle()
         var gotSubtitle: Int32 = 0
         let decodeResult = avcodec_decode_subtitle2(
@@ -133,46 +205,132 @@ extension RigelHlsExporter {
         )
         guard decodeResult >= 0, gotSubtitle != 0, let text = subtitleText(subtitle) else {
             avsubtitle_free(&subtitle)
-            return
+            return nil
         }
         defer { avsubtitle_free(&subtitle) }
-
-        let textData = Data(text.utf8)
-        guard textData.count <= Int(Int32.max) else { return }
-        var encoded = AVPacket()
-        av_init_packet(&encoded)
-        guard av_new_packet(&encoded, Int32(textData.count)) >= 0,
-              let destination = encoded.data else {
-            return
-        }
-        textData.withUnsafeBytes { rawBuffer in
-            if let baseAddress = rawBuffer.baseAddress {
-                memcpy(destination, baseAddress, textData.count)
-            }
-        }
-        let inputTimeBase = inputStream.pointee.time_base.num != 0 &&
-            inputStream.pointee.time_base.den != 0
-            ? inputStream.pointee.time_base
-            : AVRational(num: 1, den: 1_000)
-        let outputTimeBase = outStream.pointee.time_base.num != 0 &&
-            outStream.pointee.time_base.den != 0
-            ? outStream.pointee.time_base
-            : AVRational(num: 1, den: 1_000)
+        let inputTimeBase = subtitleTimeBase(inputStream)
         let inputPTS = packet.pointee.pts != Int64.min
             ? packet.pointee.pts
             : av_rescale_q(subtitle.pts, AVRational(num: 1, den: AV_TIME_BASE), inputTimeBase)
-        encoded.pts = av_rescale_q(inputPTS, inputTimeBase, outputTimeBase)
-        encoded.dts = encoded.pts
+        let startMs = max(
+            0,
+            av_rescale_q(inputPTS, inputTimeBase, AVRational(num: 1, den: 1_000))
+        )
+        let durationMs: Int64
         if packet.pointee.duration > 0 {
-            encoded.duration = av_rescale_q(packet.pointee.duration, inputTimeBase, outputTimeBase)
+            durationMs = max(
+                1,
+                av_rescale_q(packet.pointee.duration, inputTimeBase, AVRational(num: 1, den: 1_000))
+            )
         } else {
-            let displayDuration = Int64(subtitle.end_display_time) -
-                Int64(subtitle.start_display_time)
-            encoded.duration = max(1, displayDuration)
+            durationMs = max(
+                1_000,
+                Int64(subtitle.end_display_time) - Int64(subtitle.start_display_time)
+            )
         }
-        encoded.stream_index = outStream.pointee.index
-        encoded.pos = -1
-        av_interleaved_write_frame(out, &encoded)
-        av_packet_unref(&encoded)
+        return SubtitleCue(startMs: startMs, endMs: startMs + durationMs, text: text)
+    }
+
+    private static func rawSubtitleCue(
+        packet: UnsafeMutablePointer<AVPacket>,
+        inputStream: UnsafeMutablePointer<AVStream>
+    ) -> SubtitleCue? {
+        guard let data = packet.pointee.data, packet.pointee.size > 0 else { return nil }
+        let payload = Data(bytes: data, count: Int(packet.pointee.size))
+        guard let raw = String(data: payload, encoding: .utf8),
+              let text = webVTTText(raw) else {
+            return nil
+        }
+        let inputTimeBase = subtitleTimeBase(inputStream)
+        let startMs = packet.pointee.pts == Int64.min
+            ? 0
+            : max(0, av_rescale_q(packet.pointee.pts, inputTimeBase, AVRational(num: 1, den: 1_000)))
+        let durationMs = packet.pointee.duration > 0
+            ? max(1, av_rescale_q(packet.pointee.duration, inputTimeBase, AVRational(num: 1, den: 1_000)))
+            : 1_000
+        return SubtitleCue(startMs: startMs, endMs: startMs + durationMs, text: text)
+    }
+
+    private static func subtitleTimeBase(_ stream: UnsafeMutablePointer<AVStream>) -> AVRational {
+        stream.pointee.time_base.num != 0 && stream.pointee.time_base.den != 0
+            ? stream.pointee.time_base
+            : AVRational(num: 1, den: 1_000)
+    }
+
+    private static func webVTTText(_ raw: String) -> String? {
+        let lines = raw.components(separatedBy: .newlines)
+        let body: [String]
+        if let timing = lines.firstIndex(where: { $0.contains("-->") }) {
+            body = Array(lines.dropFirst(timing + 1))
+        } else {
+            body = lines.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("WEBVTT") }
+        }
+        let text = body.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private static func appendSubtitleCue(_ cue: SubtitleCue, to rendition: SubtitleRendition) {
+        guard cue.endMs > cue.startMs, !cue.text.isEmpty else { return }
+        let fileName = "subtitle_\(rendition.ordinal)_\(String(format: "%05d", rendition.nextSegmentIndex)).vtt"
+        let vtt = """
+        WEBVTT
+
+        \(vttTimestamp(cue.startMs)) --> \(vttTimestamp(cue.endMs))
+        \(cue.text)
+
+        """
+        let fileURL = rendition.outDir.appendingPathComponent(fileName)
+        do {
+            try vtt.write(to: fileURL, atomically: true, encoding: .utf8)
+        } catch {
+            return
+        }
+        rendition.nextSegmentIndex += 1
+        rendition.segments.append(
+            (name: fileName, duration: Double(cue.endMs - cue.startMs) / 1_000)
+        )
+        rendition.wrotePacket = true
+        writeSubtitlePlaylist(rendition, final: false)
+    }
+
+    private static func writeSubtitlePlaylist(_ rendition: SubtitleRendition, final: Bool) {
+        guard !rendition.segments.isEmpty else { return }
+        var lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:3",
+            "#EXT-X-TARGETDURATION:4",
+            "#EXT-X-MEDIA-SEQUENCE:0",
+            "#EXT-X-PLAYLIST-TYPE:EVENT",
+        ]
+        for segment in rendition.segments {
+            lines.append("#EXTINF:\(String(format: "%.3f", segment.duration)),")
+            lines.append(segment.name)
+        }
+        if final {
+            lines.append("#EXT-X-ENDLIST")
+        }
+        let url = rendition.outDir.appendingPathComponent(rendition.playlistName)
+        let temporary = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        do {
+            try (lines.joined(separator: "\n") + "\n").write(to: temporary, atomically: true, encoding: .utf8)
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+            } else {
+                try FileManager.default.moveItem(at: temporary, to: url)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+        }
+    }
+
+    private static func vttTimestamp(_ milliseconds: Int64) -> String {
+        let total = max(0, milliseconds)
+        let hours = total / 3_600_000
+        let minutes = (total / 60_000) % 60
+        let seconds = (total / 1_000) % 60
+        let millis = total % 1_000
+        return String(format: "%02d:%02d:%02d.%03d", Int(hours), Int(minutes), Int(seconds), Int(millis))
     }
 }

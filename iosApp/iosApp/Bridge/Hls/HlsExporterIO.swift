@@ -139,7 +139,7 @@ extension RigelHlsExporter {
         audio: [AudioChain],
         video: VideoChain?,
         subtitleInputs: [SubtitleInput],
-        subtitles: [SubtitleChain]
+        subtitleRenditions: [SubtitleRendition]
     ) {
         var ifmtPtr: UnsafeMutablePointer<AVFormatContext>? = ifmt
         avformat_close_input(&ifmtPtr)
@@ -149,6 +149,9 @@ extension RigelHlsExporter {
             avformat_close_input(&inputPtr)
         }
         if let ofmt { avformat_free_context(ofmt) }
+        for rendition in subtitleRenditions {
+            rendition.chain?.release()
+        }
         for audioChain in audio {
             av_audio_fifo_free(audioChain.fifo)
             var swr: OpaquePointer? = audioChain.swr
@@ -157,9 +160,6 @@ extension RigelHlsExporter {
             avcodec_free_context(&dec)
             var enc: UnsafeMutablePointer<AVCodecContext>? = audioChain.encCtx
             avcodec_free_context(&enc)
-        }
-        for subtitleChain in subtitles {
-            subtitleChain.release()
         }
         video?.release()
     }

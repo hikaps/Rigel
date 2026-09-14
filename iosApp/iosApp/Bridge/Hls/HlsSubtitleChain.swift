@@ -13,28 +13,46 @@ struct SubtitleInput {
     let ioWatchdog: InputWatchdog?
 }
 
-final class SubtitleOutput {
+struct SubtitleCue {
+    let startMs: Int64
+    let endMs: Int64
+    let text: String
+}
+
+final class SubtitleRendition {
     let input: SubtitleInput
     let ordinal: Int
-    let outputStream: UnsafeMutablePointer<AVStream>
+    let playlistName: String
+    let outDir: URL
     let chain: SubtitleChain?
-    let videoOrdinal: Int
+    let language: String?
+    let title: String?
+    let isSelectedExternal: Bool
+    var wrotePacket = false
+    var finished = false
+    var nextSegmentIndex = 0
+    var segments: [(name: String, duration: Double)] = []
 
     init(
         input: SubtitleInput,
         ordinal: Int,
-        outputStream: UnsafeMutablePointer<AVStream>,
+        playlistName: String,
+        outDir: URL,
         chain: SubtitleChain?,
-        videoOrdinal: Int
+        language: String?,
+        title: String?,
+        isSelectedExternal: Bool
     ) {
         self.input = input
         self.ordinal = ordinal
-        self.outputStream = outputStream
+        self.playlistName = playlistName
+        self.outDir = outDir
         self.chain = chain
-        self.videoOrdinal = videoOrdinal
+        self.language = language
+        self.title = title
+        self.isSelectedExternal = isSelectedExternal
     }
 }
-
 final class SubtitleChain {
     let decCtx: UnsafeMutablePointer<AVCodecContext>
 

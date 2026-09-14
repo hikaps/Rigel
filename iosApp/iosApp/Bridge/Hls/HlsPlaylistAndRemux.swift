@@ -1,27 +1,93 @@
 import Foundation
 
 extension RigelHlsExporter {
-    static func markSelectedSubtitleName(in outDir: URL, output: SubtitleOutput) {
-        let masterURL = outDir.appendingPathComponent("index.m3u8")
-        guard var master = try? String(contentsOf: masterURL, encoding: .utf8),
-              let mediaStart = master.range(of: "#EXT-X-MEDIA:TYPE=SUBTITLES"),
-              let nameStart = master.range(
-                  of: "NAME=\"",
-                  range: mediaStart.upperBound..<master.endIndex
-              ),
-              let nameEnd = master[nameStart.upperBound...].firstIndex(of: "\"") else {
-            return
+    static func publishMasterPlaylist(
+        baseMasterURL: URL,
+        publicMasterURL: URL,
+        subtitles: [SubtitleRendition]
+    ) -> Bool {
+        guard let base = try? String(contentsOf: baseMasterURL, encoding: .utf8) else {
+            return false
         }
-        let baseName = streamMapName(
-            output.input.title,
-            fallback: "Subtitle-\(output.ordinal + 1)"
-        )
-        master.replaceSubrange(
-            nameStart.upperBound..<nameEnd,
-            with: "RigelSelected__\(baseName)"
-        )
-        try? master.write(to: masterURL, atomically: true, encoding: .utf8)
+        let selected = subtitles.first(where: { $0.isSelectedExternal }) ?? subtitles.first
+        let mediaLines = subtitles.map { rendition -> String in
+            let fallback = "Subtitle-\(rendition.ordinal + 1)"
+            var name = streamMapName(rendition.title, fallback: fallback)
+            let isSelected = rendition === selected
+            if rendition.isSelectedExternal && isSelected {
+                name = "RigelSelected__\(name)"
+            }
+            var line = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"\(name)\""
+            line += ",DEFAULT:\(isSelected ? "YES" : "NO"),AUTOSELECT:\(isSelected ? "YES" : "NO"),FORCED=NO"
+            if let language = hlsLanguageValue(rendition.language) {
+                line += ",LANGUAGE=\"\(language)\""
+            }
+            line += ",URI=\"\(rendition.playlistName)\""
+            return line
+        }
+        var output: [String] = []
+        var insertedMedia = false
+        for rawLine in base.components(separatedBy: .newlines) {
+            if !insertedMedia, rawLine.hasPrefix("#EXT-X-STREAM-INF:") {
+                output.append(contentsOf: mediaLines)
+                insertedMedia = true
+            }
+            var line = rawLine
+            if line.hasPrefix("#EXT-X-STREAM-INF:"), !line.contains(",SUBTITLES=") {
+                line += ",SUBTITLES=\"subs\""
+            }
+            output.append(line)
+        }
+        guard insertedMedia else { return false }
+        let contents = output.joined(separator: "\n")
+        return atomicallyWrite(contents + "\n", to: publicMasterURL)
     }
+
+    static func presentationReady(
+        baseMasterURL: URL,
+        outDir: URL,
+        subtitles: [SubtitleRendition],
+        final: Bool
+    ) -> Bool {
+        guard let base = try? String(contentsOf: baseMasterURL, encoding: .utf8) else {
+            return false
+        }
+        let mediaPlaylists = playlistReferences(in: base)
+        guard !mediaPlaylists.isEmpty else { return false }
+        for playlistName in mediaPlaylists {
+            guard let playlistURL = safeChildURL(named: playlistName, in: outDir),
+                  let playlist = try? String(contentsOf: playlistURL, encoding: .utf8) else {
+                return false
+            }
+            let media = playlistReferences(in: playlist)
+            guard !media.isEmpty else { return false }
+            let requiredCount = !final && playlistName.contains("variant_0") ? 2 : 1
+            guard media.count >= requiredCount else { return false }
+            for mediaName in media {
+                guard let mediaURL = safeChildURL(named: mediaName, in: outDir),
+                      FileManager.default.fileExists(atPath: mediaURL.path) else {
+                    return false
+                }
+            }
+        }
+        for rendition in subtitles {
+            guard rendition.wrotePacket,
+                  let playlistURL = safeChildURL(named: rendition.playlistName, in: outDir),
+                  let playlist = try? String(contentsOf: playlistURL, encoding: .utf8) else {
+                return false
+            }
+            let media = playlistReferences(in: playlist)
+            guard !media.isEmpty else { return false }
+            for mediaName in media {
+                guard let mediaURL = safeChildURL(named: mediaName, in: outDir),
+                      FileManager.default.fileExists(atPath: mediaURL.path) else {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
     static func playlistReady(
         playlistPath: String,
         outDir: URL,
@@ -57,6 +123,42 @@ extension RigelHlsExporter {
         return FileManager.default.fileExists(atPath: outDir.appendingPathComponent("seg00001.ts").path)
     }
 
+    private static func playlistReferences(in playlist: String) -> [String] {
+        playlist.components(separatedBy: .newlines).compactMap { rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { return nil }
+            return line.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init)
+        }
+    }
+
+    private static func safeChildURL(named name: String, in directory: URL) -> URL? {
+        guard !name.isEmpty, !name.hasPrefix("/"), !name.contains("..") else { return nil }
+        let url = directory.appendingPathComponent(name)
+        let directoryPath = directory.standardizedFileURL.path
+        let childPath = url.standardizedFileURL.path
+        guard childPath.hasPrefix(directoryPath + "/") else { return nil }
+        return url
+    }
+
+    private static func atomicallyWrite(_ contents: String, to url: URL) -> Bool {
+        let temporary = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        do {
+            try contents.write(to: temporary, atomically: true, encoding: .utf8)
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+            } else {
+                try FileManager.default.moveItem(at: temporary, to: url)
+            }
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            return false
+        }
+    }
+
     static func writeRemuxPacket(
         _ pkt: UnsafeMutablePointer<AVPacket>,
         inStream: UnsafeMutablePointer<AVStream>,
@@ -67,20 +169,5 @@ extension RigelHlsExporter {
         av_packet_rescale_ts(pkt, inStream.pointee.time_base, outStream.pointee.time_base)
         pkt.pointee.pos = -1
         av_interleaved_write_frame(out, pkt)
-    }
-
-    static func writeRemuxPacketCopies(
-        _ packet: UnsafeMutablePointer<AVPacket>,
-        inStream: UnsafeMutablePointer<AVStream>,
-        outStreams: [UnsafeMutablePointer<AVStream>],
-        out: UnsafeMutablePointer<AVFormatContext>
-    ) {
-        for outStream in outStreams {
-            var copy = AVPacket()
-            av_init_packet(&copy)
-            guard av_packet_ref(&copy, packet) >= 0 else { continue }
-            writeRemuxPacket(&copy, inStream: inStream, outStream: outStream, out: out)
-            av_packet_unref(&copy)
-        }
     }
 }
