@@ -25,15 +25,16 @@ final class SubtitleRendition {
     let playlistName: String
     let outDir: URL
     let chain: SubtitleChain?
+    let timestampMapMpegTS: Int64
     let language: String?
     let title: String?
     let isSelectedExternal: Bool
     var wrotePacket = false
     var decodeFailed = false
     var finished = false
-    var nextSegmentIndex = 0
-    var timelineEndMs: Int64 = 0
     var segments: [(name: String, duration: Double)] = []
+    var cues: [SubtitleCue] = []
+    var timelineEndMs: Int64 = 0
 
     init(
         input: SubtitleInput,
@@ -41,6 +42,7 @@ final class SubtitleRendition {
         playlistName: String,
         outDir: URL,
         chain: SubtitleChain?,
+        timestampMapMpegTS: Int64,
         language: String?,
         title: String?,
         isSelectedExternal: Bool
@@ -50,6 +52,7 @@ final class SubtitleRendition {
         self.playlistName = playlistName
         self.outDir = outDir
         self.chain = chain
+        self.timestampMapMpegTS = timestampMapMpegTS
         self.language = language
         self.title = title
         self.isSelectedExternal = isSelectedExternal

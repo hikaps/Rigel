@@ -401,15 +401,16 @@ final class ProbeTest: XCTestCase {
             guard line.hasPrefix("#EXTINF:") else { return nil }
             return Double(line.dropFirst(8).split(separator: ",").first ?? "")
         }
-        XCTAssertEqual(durations.count, 10)
+        XCTAssertEqual(durations.count, 8)
         XCTAssertEqual(Int(durations.reduce(0, +).rounded()), 32)
         XCTAssertLessThanOrEqual(durations.max() ?? .infinity, 4)
         let vttText = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
             .filter { $0.hasSuffix(".vtt") }
             .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
             .joined(separator: "\n")
-        XCTAssertTrue(vttText.contains("First late cue"), vttText)
-        XCTAssertTrue(vttText.contains("Second late cue"), vttText)
+        XCTAssertTrue(vttText.contains("X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0"), vttText)
+        XCTAssertTrue(vttText.contains("00:00:10.000 --> 00:00:12.000"), vttText)
+        XCTAssertTrue(vttText.contains("00:00:30.000 --> 00:00:32.000"), vttText)
     }
 
     func testSelectedSidecarPrecedesEmbeddedRenditions() throws {

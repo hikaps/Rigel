@@ -280,6 +280,7 @@ extension RigelHlsExporter {
                     ordinal: subtitleRenditions.count,
                     outDir: outDir,
                     chain: chain,
+                    timestampMapMpegTS: timestampOrigin90k,
                     isSelectedExternal: isSelectedExternal
                 ) else {
                     if isSelectedExternal {
