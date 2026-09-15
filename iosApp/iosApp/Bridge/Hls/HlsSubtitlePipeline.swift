@@ -377,7 +377,13 @@ extension RigelHlsExporter {
         rendition.wrotePacket = true
         finalizePeriods(before: cue.startMs, in: rendition)
     }
-
+    static func advanceSubtitleProgress(_ rendition: SubtitleRendition, mediaPositionMs: Int64) {
+        let safePosition = max(0, mediaPositionMs)
+        finalizePeriods(
+            before: max(0, safePosition - subtitleSegmentTargetMs),
+            in: rendition
+        )
+    }
     private static func finalizePeriods(before timestampMs: Int64, in rendition: SubtitleRendition) {
         while rendition.nextPeriodStartMs + subtitleSegmentTargetMs <= timestampMs {
             let periodEnd = rendition.nextPeriodStartMs + subtitleSegmentTargetMs

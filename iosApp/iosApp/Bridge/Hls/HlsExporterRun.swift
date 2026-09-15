@@ -193,6 +193,7 @@ extension RigelHlsExporter {
             videoIndex: selectedVideoIndex,
             audioIndices: outputAudioIndices
         )
+        var mediaTimestampOrigin90k = timestampOrigin90k
 
         var streamMap: [Int32: Int32] = [:]
         var mainVideoOutput: UnsafeMutablePointer<AVStream>?
@@ -437,6 +438,7 @@ extension RigelHlsExporter {
                     // Rebase every chain onto the retained tail so replayed
                     // audio and the first decoded video share one timeline.
                     chain.timestampOrigin90k = ringHeadPTS
+                    mediaTimestampOrigin90k = ringHeadPTS
                     for audioChain in audioChains.values {
                         audioChain.timestampOrigin90k = ringHeadPTS
                     }
@@ -504,6 +506,18 @@ extension RigelHlsExporter {
                         lastInputUs,
                         inputPacketUs(&primaryPacket, stream: ctx.pointee.streams[Int(inIdx)])
                     )
+                    let originUs = av_rescale_q(
+                        mediaTimestampOrigin90k,
+                        AVRational(num: 1, den: 90_000),
+                        AVRational(num: 1, den: AV_TIME_BASE)
+                    )
+                    let mediaPositionMs = max(
+                        0,
+                        (lastInputUs - originUs) / 1_000 - session.startOffsetMs
+                    )
+                    for rendition in subtitleRenditions {
+                        advanceSubtitleProgress(rendition, mediaPositionMs: mediaPositionMs)
+                    }
                     if let outIdx = streamMap[inIdx],
                        let inStream = ctx.pointee.streams[Int(inIdx)],
                        let outStream = out.pointee.streams[Int(outIdx)] {
