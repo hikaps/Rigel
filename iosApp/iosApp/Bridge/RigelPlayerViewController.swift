@@ -501,7 +501,7 @@ final class RigelPlayerViewController: UIViewController {
         guard isProxyPlayback, selectedExternalSubtitleUrl != nil, let group else { return nil }
         return group.options.first {
             $0.displayName.hasPrefix(Self.selectedSubtitleMarker)
-        } ?? group.options.first
+        }
     }
 
     @objc private func audioTapped() {
@@ -777,6 +777,9 @@ final class RigelPlayerViewController: UIViewController {
         guard selectedExternalSubtitleUrl != nil,
               let subtitleGroup,
               let selectedExternalSubtitleOption else {
+            if externalPlaybackActive, isProxyPlayback, selectedExternalSubtitleUrl != nil {
+                NSLog("[RigelPlayer] selected subtitle rendition is unavailable for external playback")
+            }
             if externalPlaybackActive {
                 renderSubtitleText(nil)
                 subtitleLabel.isHidden = true

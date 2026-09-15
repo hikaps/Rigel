@@ -204,6 +204,7 @@ final class ProbeTest: XCTestCase {
         XCTAssertTrue(master.contains("LANGUAGE=\"eng\""))
         XCTAssertTrue(master.contains("LANGUAGE=\"fre\""))
         XCTAssertTrue(master.contains("DEFAULT=YES"))
+        XCTAssertFalse(master.contains("SUBTITLES=\"subs\""), master)
         for variant in 0...2 {
             XCTAssertTrue(
                 FileManager.default.fileExists(
@@ -335,6 +336,84 @@ final class ProbeTest: XCTestCase {
         XCTAssertTrue(master.contains("TYPE=SUBTITLES"))
         XCTAssertTrue(master.contains("LANGUAGE=\"eng\""))
     }
+    func testSidecarPlaylistPreservesLateCueTimeline() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let sidecar = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rigel-late-subtitle-\(UUID().uuidString).vtt")
+        try """
+        WEBVTT
+
+        00:00:10.000 --> 00:00:12.000 position:20% align:start
+        First late cue
+
+        00:00:30.000 --> 00:00:32.000
+        Second late cue
+        """.write(to: sidecar, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: sidecar) }
+
+        let sessionId = "test-late-sidecar-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "late sidecar session becomes ready")
+        var readyPath: String?
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [SubtitleTrack(url: sidecar.absoluteString, language: "eng", title: "Late")],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "late sidecar session failed")
+        XCTAssertNil(error)
+
+        let finalized = expectation(description: "late sidecar playlist finalizes")
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
+            guard let playlist = try? String(
+                contentsOf: outputDir.appendingPathComponent("subtitle_0_vtt.m3u8"),
+                encoding: .utf8
+            ) else { return }
+            guard playlist.contains("#EXT-X-ENDLIST") else { return }
+            timer.invalidate()
+            finalized.fulfill()
+        }
+        wait(for: [finalized], timeout: 20)
+
+        let playlist = try String(
+            contentsOf: outputDir.appendingPathComponent("subtitle_0_vtt.m3u8"),
+            encoding: .utf8
+        )
+        let durations = playlist.components(separatedBy: .newlines).compactMap { line -> Double? in
+            guard line.hasPrefix("#EXTINF:") else { return nil }
+            return Double(line.dropFirst(8).split(separator: ",").first ?? "")
+        }
+        XCTAssertEqual(durations.count, 8)
+        XCTAssertEqual(Int(durations.reduce(0, +).rounded()), 32)
+        XCTAssertLessThanOrEqual(durations.max() ?? .infinity, 4)
+        XCTAssertTrue(playlist.contains("#EXT-X-TARGETDURATION:4"))
+        let vttText = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+            .filter { $0.hasSuffix(".vtt") }
+            .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
+        XCTAssertTrue(vttText.contains("X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0"), vttText)
+        XCTAssertTrue(vttText.contains("00:00:10.000 --> 00:00:12.000"), vttText)
+        XCTAssertTrue(vttText.contains("position:20% align:start"), vttText)
+        XCTAssertTrue(vttText.contains("00:00:30.000 --> 00:00:32.000"), vttText)
+    }
 
     func testSelectedSidecarPrecedesEmbeddedRenditions() throws {
         let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_subtitles", withExtension: "mkv"))
@@ -388,6 +467,33 @@ final class ProbeTest: XCTestCase {
             .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
             .joined(separator: "\n")
         XCTAssertTrue(vttText.contains("Sidecar subtitle"), vttText)
+        let files = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+        let videoSegments = files.filter {
+            $0.hasPrefix("seg0_") && $0.hasSuffix(".ts")
+        }
+        XCTAssertFalse(videoSegments.isEmpty, "video must be emitted once")
+        let subtitlePlaylists = files.filter {
+            $0.hasPrefix("subtitle_") && $0.hasSuffix("_vtt.m3u8")
+        }
+        XCTAssertEqual(subtitlePlaylists.count, 3)
+        for playlistName in subtitlePlaylists {
+            let playlist = try String(
+                contentsOf: outputDir.appendingPathComponent(playlistName),
+                encoding: .utf8
+            )
+            let mediaFiles = playlist.components(separatedBy: .newlines).filter {
+                !$0.isEmpty && !$0.hasPrefix("#")
+            }
+            XCTAssertFalse(mediaFiles.isEmpty, playlistName)
+            for mediaFile in mediaFiles {
+                XCTAssertTrue(
+                    FileManager.default.fileExists(
+                        atPath: outputDir.appendingPathComponent(mediaFile).path
+                    ),
+                    "\(playlistName) references missing \(mediaFile)"
+                )
+            }
+        }
     }
 
     func testInvalidSelectedSidecarFailsSession() throws {

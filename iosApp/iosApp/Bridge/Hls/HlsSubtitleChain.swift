@@ -11,30 +11,60 @@ struct SubtitleInput {
     /// the reference must outlive the context because the C interrupt
     /// callback holds an unretained pointer.
     let ioWatchdog: InputWatchdog?
+    let sourceURL: String?
 }
 
-final class SubtitleOutput {
+struct SubtitleCue {
+    let startMs: Int64
+    let endMs: Int64
+    let text: String
+    let settings: String?
+}
+
+final class SubtitleRendition {
     let input: SubtitleInput
     let ordinal: Int
-    let outputStream: UnsafeMutablePointer<AVStream>
+    let playlistName: String
+    let outDir: URL
     let chain: SubtitleChain?
-    let videoOrdinal: Int
+    var timestampMapMpegTS: Int64
+    let language: String?
+    let title: String?
+    let isSelectedExternal: Bool
+    let settingsByStartMs: [Int64: [String]]
+    var settingsUseCount: [Int64: Int] = [:]
+    var wrotePacket = false
+    var decodeFailed = false
+    var finished = false
+    var segments: [(name: String, duration: Double)] = []
+    var pendingCues: [SubtitleCue] = []
+    var nextPeriodStartMs: Int64 = 0
+    var timelineEndMs: Int64 = 0
 
     init(
         input: SubtitleInput,
         ordinal: Int,
-        outputStream: UnsafeMutablePointer<AVStream>,
+        playlistName: String,
+        outDir: URL,
         chain: SubtitleChain?,
-        videoOrdinal: Int
+        timestampMapMpegTS: Int64,
+        language: String?,
+        title: String?,
+        isSelectedExternal: Bool,
+        settingsByStartMs: [Int64: [String]]
     ) {
         self.input = input
         self.ordinal = ordinal
-        self.outputStream = outputStream
+        self.playlistName = playlistName
+        self.outDir = outDir
         self.chain = chain
-        self.videoOrdinal = videoOrdinal
+        self.timestampMapMpegTS = timestampMapMpegTS
+        self.language = language
+        self.title = title
+        self.isSelectedExternal = isSelectedExternal
+        self.settingsByStartMs = settingsByStartMs
     }
 }
-
 final class SubtitleChain {
     let decCtx: UnsafeMutablePointer<AVCodecContext>
 

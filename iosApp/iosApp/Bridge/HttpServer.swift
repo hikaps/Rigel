@@ -188,6 +188,24 @@ final class RigelHttpServer {
             sendSimple(connection, status: "404 Not Found", extraHeaders: "", body: Data("Not found".utf8), keepAlive: keepAlive)
             return
         }
+        if fileURL.pathExtension.lowercased() == "m3u8",
+           request.rangeStart == nil,
+           let playlist = RigelHlsExporter.readSubtitlePlaylist(fileURL) {
+            let headers = "Content-Type: \(Self.contentType(for: fileURL))\r\n"
+            if request.isHead {
+                let head = "HTTP/1.1 200 OK\r\nContent-Length: \(playlist.count)\r\n\(headers)Connection: \(keepAlive ? "keep-alive" : "close")\r\n\r\n"
+                sendHead(connection, head: head, body: nil, keepAlive: keepAlive)
+            } else {
+                sendSimple(
+                    connection,
+                    status: "200 OK",
+                    extraHeaders: headers,
+                    body: playlist,
+                    keepAlive: keepAlive
+                )
+            }
+            return
+        }
         var status = "200 OK"
         var extraHeaders = "Accept-Ranges: bytes\r\n"
         var start: Int64 = 0
