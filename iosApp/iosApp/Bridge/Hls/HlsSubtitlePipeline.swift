@@ -192,7 +192,9 @@ extension RigelHlsExporter {
         switch result {
         case .cue(let cue):
             let originalStartMs = cue.startMs + max(0, sidecarOffsetUs / 1_000)
-            let settings = cue.settings ?? rendition.settingsByStartMs[originalStartMs]
+            let settings = cue.settings
+                ?? packetWebVTTSettings(shiftedPacket)
+                ?? consumeSourceSettings(at: originalStartMs, from: rendition)
             appendSubtitleCue(
                 SubtitleCue(
                     startMs: cue.startMs,
@@ -289,14 +291,14 @@ extension RigelHlsExporter {
             )
         )
     }
-    private static func sourceWebVTTSettings(_ sourceURL: String?) -> [Int64: String] {
+    private static func sourceWebVTTSettings(_ sourceURL: String?) -> [Int64: [String]] {
         guard let sourceURL,
               let url = URL(string: sourceURL),
               url.isFileURL,
               let raw = try? String(contentsOf: url, encoding: .utf8) else {
             return [:]
         }
-        var result: [Int64: String] = [:]
+        var result: [Int64: [String]] = [:]
         for line in raw.components(separatedBy: .newlines) where line.contains("-->") {
             let parts = line.components(separatedBy: "-->")
             guard parts.count == 2 else { continue }
@@ -304,9 +306,30 @@ extension RigelHlsExporter {
             let rhs = parts[1].trimmingCharacters(in: .whitespaces)
             let fields = rhs.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
             guard fields.count > 1, let startMs = parseVTTTimestamp(start) else { continue }
-            result[startMs] = String(fields[1])
+            result[startMs, default: []].append(String(fields[1]))
         }
         return result
+    }
+
+    private static func packetWebVTTSettings(_ packet: UnsafeMutablePointer<AVPacket>) -> String? {
+        var size = 0
+        guard let data = av_packet_get_side_data(packet, AV_PKT_DATA_WEBVTT_SETTINGS, &size),
+              size > 0 else { return nil }
+        let bytes = UnsafeBufferPointer(start: data, count: size)
+        let value = String(decoding: bytes, as: UTF8.self)
+        let trimmed = value.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\0")))
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func consumeSourceSettings(
+        at startMs: Int64,
+        from rendition: SubtitleRendition
+    ) -> String? {
+        guard let values = rendition.settingsByStartMs[startMs], !values.isEmpty else { return nil }
+        let index = rendition.settingsUseCount[startMs] ?? 0
+        guard index < values.count else { return nil }
+        rendition.settingsUseCount[startMs] = index + 1
+        return values[index]
     }
 
     private static func parseVTTTimestamp(_ value: String) -> Int64? {

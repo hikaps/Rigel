@@ -31,7 +31,8 @@ final class SubtitleRendition {
     let language: String?
     let title: String?
     let isSelectedExternal: Bool
-    let settingsByStartMs: [Int64: String]
+    let settingsByStartMs: [Int64: [String]]
+    var settingsUseCount: [Int64: Int] = [:]
     var wrotePacket = false
     var decodeFailed = false
     var finished = false
@@ -50,7 +51,7 @@ final class SubtitleRendition {
         language: String?,
         title: String?,
         isSelectedExternal: Bool,
-        settingsByStartMs: [Int64: String]
+        settingsByStartMs: [Int64: [String]]
     ) {
         self.input = input
         self.ordinal = ordinal
