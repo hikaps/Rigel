@@ -25,7 +25,7 @@ final class SubtitleRendition {
     let playlistName: String
     let outDir: URL
     let chain: SubtitleChain?
-    let timestampMapMpegTS: Int64
+    var timestampMapMpegTS: Int64
     let language: String?
     let title: String?
     let isSelectedExternal: Bool
@@ -33,7 +33,8 @@ final class SubtitleRendition {
     var decodeFailed = false
     var finished = false
     var segments: [(name: String, duration: Double)] = []
-    var cues: [SubtitleCue] = []
+    var pendingCues: [SubtitleCue] = []
+    var nextPeriodStartMs: Int64 = 0
     var timelineEndMs: Int64 = 0
 
     init(

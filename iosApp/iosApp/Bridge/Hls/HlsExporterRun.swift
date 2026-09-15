@@ -438,6 +438,9 @@ extension RigelHlsExporter {
                     for audioChain in audioChains.values {
                         audioChain.timestampOrigin90k = ringHeadPTS
                     }
+                    for rendition in subtitleRenditions {
+                        rendition.timestampMapMpegTS = ringHeadPTS
+                    }
                 }
             }
         }

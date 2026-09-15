@@ -139,7 +139,7 @@ extension RigelHlsExporter {
             title: input.title,
             isSelectedExternal: isSelectedExternal
         )
-        writeSubtitlePlaylist(rendition, final: false)
+        initializeSubtitlePlaylist(rendition)
         return rendition
     }
 
@@ -193,7 +193,8 @@ extension RigelHlsExporter {
     static func finishSubtitleRendition(_ rendition: SubtitleRendition) {
         guard !rendition.finished else { return }
         rendition.finished = true
-        writeSubtitlePlaylist(rendition, final: true)
+        finalizeRemainingPeriods(rendition)
+        appendSubtitleEndList(rendition)
     }
 
     private static func decodeSubtitleCue(
@@ -280,76 +281,112 @@ extension RigelHlsExporter {
 
     private static func appendSubtitleCue(_ cue: SubtitleCue, to rendition: SubtitleRendition) {
         guard cue.endMs > cue.startMs, !cue.text.isEmpty else { return }
-        rendition.cues.append(cue)
+        rendition.pendingCues.append(cue)
         rendition.timelineEndMs = max(rendition.timelineEndMs, cue.endMs)
         rendition.wrotePacket = true
-        rebuildSubtitleSegments(rendition)
+        finalizePeriods(before: cue.startMs, in: rendition)
     }
 
-    private static func rebuildSubtitleSegments(_ rendition: SubtitleRendition) {
-        let periodCount = max(
-            1,
-            Int((rendition.timelineEndMs + subtitleSegmentTargetMs - 1) / subtitleSegmentTargetMs)
-        )
-        rendition.segments.removeAll(keepingCapacity: true)
-        for periodIndex in 0..<periodCount {
-            let periodStart = Int64(periodIndex) * subtitleSegmentTargetMs
-            let periodEnd = min(rendition.timelineEndMs, periodStart + subtitleSegmentTargetMs)
-            let activeCues = rendition.cues.filter {
-                $0.startMs < periodEnd && $0.endMs > periodStart
-            }
-            let map = "X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:\(max(0, rendition.timestampMapMpegTS))"
-            var vttLines = ["WEBVTT", map, ""]
-            for cue in activeCues {
-                vttLines.append("\(vttTimestamp(cue.startMs)) --> \(vttTimestamp(cue.endMs))")
-                vttLines.append(cue.text)
-                vttLines.append("")
-            }
-            let fileName = "subtitle_\(rendition.ordinal)_\(String(format: "%05d", periodIndex)).vtt"
-            let fileURL = rendition.outDir.appendingPathComponent(fileName)
-            do {
-                try (vttLines.joined(separator: "\n") + "\n")
-                    .write(to: fileURL, atomically: true, encoding: .utf8)
-            } catch {
+    private static func finalizePeriods(before timestampMs: Int64, in rendition: SubtitleRendition) {
+        while rendition.nextPeriodStartMs + subtitleSegmentTargetMs <= timestampMs {
+            let periodEnd = rendition.nextPeriodStartMs + subtitleSegmentTargetMs
+            guard finalizePeriod(from: rendition.nextPeriodStartMs, to: periodEnd, in: rendition) else {
                 return
             }
-            rendition.segments.append(
-                (name: fileName, duration: Double(periodEnd - periodStart) / 1_000)
-            )
+            rendition.nextPeriodStartMs = periodEnd
+            rendition.pendingCues.removeAll { $0.endMs <= periodEnd }
         }
-        writeSubtitlePlaylist(rendition, final: false)
     }
 
-    private static func writeSubtitlePlaylist(_ rendition: SubtitleRendition, final: Bool) {
-        var lines = [
-            "#EXTM3U",
-            "#EXT-X-VERSION:3",
-            "#EXT-X-TARGETDURATION:4",
-            "#EXT-X-MEDIA-SEQUENCE:0",
-            "#EXT-X-PLAYLIST-TYPE:EVENT",
-        ]
-        for segment in rendition.segments {
-            lines.append("#EXTINF:\(String(format: "%.3f", segment.duration)),")
-            lines.append(segment.name)
+    private static func finalizeRemainingPeriods(_ rendition: SubtitleRendition) {
+        while rendition.nextPeriodStartMs < rendition.timelineEndMs {
+            let periodEnd = min(
+                rendition.timelineEndMs,
+                rendition.nextPeriodStartMs + subtitleSegmentTargetMs
+            )
+            guard finalizePeriod(from: rendition.nextPeriodStartMs, to: periodEnd, in: rendition) else {
+                return
+            }
+            rendition.nextPeriodStartMs = periodEnd
+            rendition.pendingCues.removeAll { $0.endMs <= periodEnd }
         }
-        if final {
-            lines.append("#EXT-X-ENDLIST")
+    }
+
+    private static func finalizePeriod(
+        from periodStart: Int64,
+        to periodEnd: Int64,
+        in rendition: SubtitleRendition
+    ) -> Bool {
+        let activeCues = rendition.pendingCues.filter {
+            $0.startMs < periodEnd && $0.endMs > periodStart
         }
+        let map = "X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:\(max(0, rendition.timestampMapMpegTS))"
+        var vttLines = ["WEBVTT", map, ""]
+        for cue in activeCues {
+            vttLines.append("\(vttTimestamp(cue.startMs)) --> \(vttTimestamp(cue.endMs))")
+            vttLines.append(cue.text)
+            vttLines.append("")
+        }
+        let fileName = "subtitle_\(rendition.ordinal)_\(String(format: "%05d", rendition.segments.count)).vtt"
+        let fileURL = rendition.outDir.appendingPathComponent(fileName)
+        do {
+            try (vttLines.joined(separator: "\n") + "\n")
+                .write(to: fileURL, atomically: true, encoding: .utf8)
+        } catch {
+            return false
+        }
+        let duration = Double(periodEnd - periodStart) / 1_000
+        guard appendSubtitlePlaylistSegment(
+            name: fileName,
+            duration: duration,
+            to: rendition
+        ) else {
+            return false
+        }
+        rendition.segments.append((name: fileName, duration: duration))
+        return true
+    }
+
+    private static func initializeSubtitlePlaylist(_ rendition: SubtitleRendition) {
+        let contents = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n"
         let url = rendition.outDir.appendingPathComponent(rendition.playlistName)
+        _ = atomicallyWrite(contents, to: url)
+    }
+
+    private static func appendSubtitlePlaylistSegment(
+        name: String,
+        duration: Double,
+        to rendition: SubtitleRendition
+    ) -> Bool {
+        let url = rendition.outDir.appendingPathComponent(rendition.playlistName)
+        guard let current = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        let addition = "#EXTINF:\(String(format: "%.3f", duration)),\n\(name)\n"
+        return atomicallyWrite(current + addition, to: url)
+    }
+
+    private static func appendSubtitleEndList(_ rendition: SubtitleRendition) {
+        let url = rendition.outDir.appendingPathComponent(rendition.playlistName)
+        guard let current = try? String(contentsOf: url, encoding: .utf8),
+              !current.contains("#EXT-X-ENDLIST") else { return }
+        _ = atomicallyWrite(current + "#EXT-X-ENDLIST\n", to: url)
+    }
+
+    private static func atomicallyWrite(_ contents: String, to url: URL) -> Bool {
         let temporary = url.deletingLastPathComponent()
             .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
         do {
-            try (lines.joined(separator: "\n") + "\n").write(to: temporary, atomically: true, encoding: .utf8)
+            try contents.write(to: temporary, atomically: true, encoding: .utf8)
             if FileManager.default.fileExists(atPath: url.path) {
                 _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
             } else {
                 try FileManager.default.moveItem(at: temporary, to: url)
             }
+            return true
         } catch {
             try? FileManager.default.removeItem(at: temporary)
+            return false
         }
     }
-
 
     private static func vttTimestamp(_ milliseconds: Int64) -> String {
         let total = max(0, milliseconds)

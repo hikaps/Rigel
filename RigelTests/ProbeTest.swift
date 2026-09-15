@@ -404,6 +404,7 @@ final class ProbeTest: XCTestCase {
         XCTAssertEqual(durations.count, 8)
         XCTAssertEqual(Int(durations.reduce(0, +).rounded()), 32)
         XCTAssertLessThanOrEqual(durations.max() ?? .infinity, 4)
+        XCTAssertTrue(playlist.contains("#EXT-X-TARGETDURATION:4"))
         let vttText = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
             .filter { $0.hasSuffix(".vtt") }
             .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
