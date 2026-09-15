@@ -33,6 +33,13 @@ final class RigelHlsExporter {
 
     static var sessions: [String: Session] = [:]
     static let lock = NSLock()
+    static let subtitlePlaylistLock = NSLock()
+
+    static func readSubtitlePlaylist(_ url: URL) -> Data? {
+        subtitlePlaylistLock.lock()
+        defer { subtitlePlaylistLock.unlock() }
+        return try? Data(contentsOf: url)
+    }
 
     static let passthroughAudio = Set(["aac", "mp3", "flac", "alac"])
 

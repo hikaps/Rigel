@@ -107,7 +107,8 @@ extension RigelHlsExporter {
                     title: title?.isEmpty == false
                         ? title
                         : streamMetadataValue(subtitleStream.pointee.metadata, key: "title"),
-                    ioWatchdog: watchdog
+                    ioWatchdog: watchdog,
+                    sourceURL: track.url
                 )
             )
         }
@@ -141,7 +142,8 @@ extension RigelHlsExporter {
                             timeBase: stream.pointee.time_base,
                             language: hlsLanguage(for: stream.pointee.metadata),
                             title: streamMetadataValue(stream.pointee.metadata, key: "title"),
-                            ioWatchdog: nil
+                            ioWatchdog: nil,
+                            sourceURL: nil
                         )
                     )
                 }

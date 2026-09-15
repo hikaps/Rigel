@@ -11,12 +11,14 @@ struct SubtitleInput {
     /// the reference must outlive the context because the C interrupt
     /// callback holds an unretained pointer.
     let ioWatchdog: InputWatchdog?
+    let sourceURL: String?
 }
 
 struct SubtitleCue {
     let startMs: Int64
     let endMs: Int64
     let text: String
+    let settings: String?
 }
 
 final class SubtitleRendition {
@@ -29,6 +31,7 @@ final class SubtitleRendition {
     let language: String?
     let title: String?
     let isSelectedExternal: Bool
+    let settingsByStartMs: [Int64: String]
     var wrotePacket = false
     var decodeFailed = false
     var finished = false
@@ -46,7 +49,8 @@ final class SubtitleRendition {
         timestampMapMpegTS: Int64,
         language: String?,
         title: String?,
-        isSelectedExternal: Bool
+        isSelectedExternal: Bool,
+        settingsByStartMs: [Int64: String]
     ) {
         self.input = input
         self.ordinal = ordinal
@@ -57,6 +61,7 @@ final class SubtitleRendition {
         self.language = language
         self.title = title
         self.isSelectedExternal = isSelectedExternal
+        self.settingsByStartMs = settingsByStartMs
     }
 }
 final class SubtitleChain {

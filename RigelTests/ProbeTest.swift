@@ -343,7 +343,7 @@ final class ProbeTest: XCTestCase {
         try """
         WEBVTT
 
-        00:00:10.000 --> 00:00:12.000
+        00:00:10.000 --> 00:00:12.000 position:20% align:start
         First late cue
 
         00:00:30.000 --> 00:00:32.000
@@ -411,6 +411,7 @@ final class ProbeTest: XCTestCase {
             .joined(separator: "\n")
         XCTAssertTrue(vttText.contains("X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0"), vttText)
         XCTAssertTrue(vttText.contains("00:00:10.000 --> 00:00:12.000"), vttText)
+        XCTAssertTrue(vttText.contains("position:20% align:start"), vttText)
         XCTAssertTrue(vttText.contains("00:00:30.000 --> 00:00:32.000"), vttText)
     }
 
