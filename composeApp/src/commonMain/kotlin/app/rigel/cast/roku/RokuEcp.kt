@@ -1,5 +1,7 @@
 package app.rigel.cast.roku
 
+import app.rigel.cast.CastMediaKind
+import app.rigel.cast.PreparedCastMedia
 /**
  * Pure builders/parsers for Roku ECP (External Control Protocol).
  * Reference: Home Assistant components/roku + Roku ECP docs.
@@ -15,6 +17,20 @@ object RokuEcp {
 
     fun launchBody(mediaUrl: String): String = "t=${formEncode(mediaUrl)}"
 
+    fun launchQuery(media: PreparedCastMedia): String {
+        val url = "u=${formEncode(media.url)}&k=%28null%29"
+        return if (media.kind == CastMediaKind.AUDIO) {
+            "t=a&$url&songname=${formEncode(media.title)}&songformat=${audioFormat(media.container)}"
+        } else {
+            "t=v&$url&videoName=${formEncode(media.title)}&videoFormat=${videoFormat(media.container)}"
+        }
+    }
+
+    private fun audioFormat(container: String): String =
+        if (container.lowercase() == "aac") "aac" else "mp3"
+
+    private fun videoFormat(container: String): String =
+        if (container.lowercase() in setOf("m3u8", "hls")) "hls" else "mp4"
     fun parseDeviceInfo(xml: String): DeviceInfo? {
         if (!xml.contains("<device-info")) return null
         val hasPlayOnRoku = Regex("""<has-play-on-roku>\s*([^<]+?)\s*</has-play-on-roku>""")

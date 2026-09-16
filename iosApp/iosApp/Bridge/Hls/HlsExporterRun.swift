@@ -7,6 +7,7 @@ extension RigelHlsExporter {
         sourceUrl: String,
         headers: [String: String],
         mode: String,
+        passthroughAudioCodecs: [String],
         onReady: @escaping (String?, String?) -> Void,
         onError: @escaping (String) -> Void
     ) {
@@ -228,7 +229,7 @@ extension RigelHlsExporter {
                     }
                 }
                 if mode == "remux", let name = codecName(codecpar.pointee.codec_id),
-                   passthroughAudio.contains(name) {
+                   passthroughAudioCodecs.contains(name) {
                     passthroughAudioIndices.insert(inputIndex)
                     if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
                         outStream.pointee.codecpar.pointee.codec_tag = 0

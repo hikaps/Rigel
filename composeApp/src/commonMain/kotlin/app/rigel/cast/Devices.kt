@@ -10,6 +10,10 @@ data class DlnaDevice(
     val controlUrl: String,
     val renderingControlUrl: String? = null,
     val eventSubUrl: String? = null,
+    val manufacturer: String? = null,
+    val modelName: String? = null,
+    val modelNumber: String? = null,
+    val connectionManagerUrl: String? = null,
 )
 
 /** Kodi with "Allow remote control via HTTP" enabled. */

@@ -37,7 +37,6 @@ class ChromeRendererTest {
     @Test
     fun launchSendsCastV2SequenceAndConfirmsPlayback() = runTest {
         val result = ChromeRenderer(bridge).launch(device, "http://host/movie.mp4", "Movie")
-
         assertTrue(result is CastResult.Sent)
         assertEquals("Sent to Living Room TV", result.message)
         assertEquals(

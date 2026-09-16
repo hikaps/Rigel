@@ -67,6 +67,7 @@ class PlayerControllerTest {
                     sourceUrl: String,
                     headers: Map<String, String>,
                     mode: String,
+                    passthroughAudioCodecs: List<String>,
                     startOffsetMs: Long,
                     subtitleTracks: List<SubtitleTrack>,
                     onReady: (String?, String?) -> Unit,
@@ -162,7 +163,7 @@ class PlayerControllerTest {
         val c = controller(settings)
         assertTrue(c.loadRaw("http://h/v.mp4"))
         assertEquals(
-            listOf(LinkHistoryEntry("http://h/v.mp4", null)),
+            listOf(LinkHistoryEntry("http://h/v.mp4", "v.mp4")),
             settings.linkHistory(),
         )
     }

@@ -43,6 +43,7 @@ private class FakeBridges(private val lan: String?) :
         sourceUrl: String,
         headers: Map<String, String>,
         mode: String,
+        passthroughAudioCodecs: List<String>,
         startOffsetMs: Long,
         subtitleTracks: List<app.rigel.bridge.SubtitleTrack>,
         onReady: (String?, String?) -> Unit,
@@ -362,7 +363,7 @@ class CastDispatcherTest {
         assertEquals(
             listOf(
                 "http://10.0.0.9:8060/query/apps",
-                "http://10.0.0.9:8060/input/15985",
+                "http://10.0.0.9:8060/input/15985?t=v&u=http%3A%2F%2Forigin%2Fv.mp4&k=%28null%29&videoName=Movie&videoFormat=mp4",
                 "http://10.0.0.9:8060/keypress/Pause",
                 "http://10.0.0.9:8060/keypress/Home",
             ),

@@ -4,6 +4,55 @@ import ComposeApp
 import AVFoundation
 @testable import Rigel
 
+private extension PlayerUiState {
+    convenience init(
+        phase: PlayerPhase,
+        sourceUrl: String?,
+        filename: String?,
+        subtitleTracks: [SubtitleTrack],
+        selectedExternalSubtitleUrl: String?,
+        route: PlaybackRoute?,
+        proxyUrl: String?,
+        probe: ProbeResult?,
+        error: String?,
+        castActive: Bool,
+        startPositionMs: Int64,
+        sender: String?
+    ) {
+        self.init(
+            phase: phase, sourceUrl: sourceUrl, filename: filename, title: nil,
+            subtitleTracks: subtitleTracks,
+            selectedExternalSubtitleUrl: selectedExternalSubtitleUrl,
+            route: route, proxyUrl: proxyUrl, probe: probe, error: error,
+            castActive: castActive, startPositionMs: startPositionMs, sender: sender,
+            destinationKind: .local, destinationName: "This iPhone", destinationId: "local:iphone",
+            remotePlayback: false, planDetail: nil
+        )
+    }
+}
+
+private extension ProbeResult {
+    convenience init(
+        container: String,
+        videoCodec: String?,
+        audioCodecs: [String],
+        subtitleCodecs: [String],
+        durationMs: KotlinLong?,
+        isLive: Bool,
+        pixFmt: String?,
+        width: Int32,
+        height: Int32
+    ) {
+        self.init(
+            container: container, videoCodec: videoCodec, audioCodecs: audioCodecs,
+            subtitleCodecs: subtitleCodecs, durationMs: durationMs, isLive: isLive,
+            pixFmt: pixFmt, width: width, height: height,
+            videoProfile: nil, videoLevel: nil, frameRate: nil, bitRate: nil,
+            maxAudioChannels: 0
+        )
+    }
+}
+
 /// Guards the Kotlin→SwiftUI state mapping: PlayerModel must mirror
 /// PlayerUiState exactly, and showPlayer must track phase != idle.
 final class PlayerModelTests: XCTestCase {
@@ -594,5 +643,32 @@ final class PlayerModelTests: XCTestCase {
             startPositionMs: 0,
             sender: nil
         )
+    }
+    @MainActor
+    func testRemoteDestinationHidesNativePlayerSurface() {
+        let model = PlayerModel()
+        model.apply(PlayerUiState(
+            phase: .playing,
+            sourceUrl: "http://origin/movie.mp4",
+            filename: "movie.mp4",
+            title: "Movie",
+            subtitleTracks: [],
+            selectedExternalSubtitleUrl: nil,
+            route: .direct,
+            proxyUrl: nil,
+            probe: nil,
+            error: nil,
+            castActive: true,
+            startPositionMs: 0,
+            sender: nil,
+            destinationKind: .roku,
+            destinationName: "Living Room",
+            destinationId: "roku:r1",
+            remotePlayback: true,
+            planDetail: "Direct play on Living Room"
+        ))
+        XCTAssertTrue(model.remotePlayback)
+        XCTAssertFalse(model.rendersNativePlayer)
+        XCTAssertEqual(model.destinationName, "Living Room")
     }
 }

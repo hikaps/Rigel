@@ -4,10 +4,16 @@ import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
 import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.PreparedCastMedia
 import app.rigel.cast.ReceiverAdapter
+import app.rigel.output.CapabilitySource
+import app.rigel.output.OutputMediaProfile
+import app.rigel.output.OutputMediaProfiles
+import app.rigel.output.ReceiverCompatibilityMode
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
+
 object DlnaAdapter : ReceiverAdapter {
     override val kind = "dlna"
 
@@ -22,21 +28,73 @@ object DlnaAdapter : ReceiverAdapter {
         note = null,
     )
 
+    override suspend fun mediaProfile(target: CastTarget, client: HttpClient): OutputMediaProfile {
+        val device = (target as CastTarget.Dlna).device
+        val sink = runCatching { DlnaRenderer(client).sinkProtocolInfo(device) }.getOrNull()
+        return parseSinkProfile(target.name, sink)
+    }
+
+    private fun parseSinkProfile(name: String, sink: String?): OutputMediaProfile {
+        if (sink.isNullOrBlank()) return OutputMediaProfiles.conservativeReceiver(name, "DLNA compatibility profile")
+        val schemes = mutableSetOf<String>()
+        val containers = mutableSetOf<String>()
+        val videos = mutableSetOf<String>()
+        val audios = mutableSetOf<String>()
+        val hlsVideos = mutableSetOf<String>()
+        val hlsAudios = mutableSetOf<String>()
+        sink.split(',').forEach { raw ->
+            val fields = raw.trim().split(':')
+            if (fields.size < 4) return@forEach
+            val scheme = fields[0].lowercase()
+            val mime = fields[2].lowercase()
+            val profile = fields.drop(3).joinToString(":").lowercase()
+            schemes += scheme
+            val isHls = mime.contains("mpegurl") || mime.contains("m3u8")
+            val isVideo = mime.startsWith("video/")
+            val isAudio = mime.startsWith("audio/")
+            val h264 = profile.contains("avc") || profile.contains("h264")
+            val aac = profile.contains("aac") || mime.contains("mp4") || mime.contains("aac")
+            if (mime.contains("mp4") || profile.contains("avc_mp4")) containers += "mp4"
+            if (mime.contains("quicktime")) containers += "mov"
+            if (isHls) containers += "m3u8"
+            if (isVideo && h264) {
+                videos += "h264"
+                if (isHls) hlsVideos += "h264"
+            }
+            if (isAudio && aac) {
+                audios += "aac"
+                if (isHls) hlsAudios += "aac"
+            }
+        }
+        if (containers.isEmpty() && videos.isEmpty() && audios.isEmpty()) {
+            return OutputMediaProfiles.conservativeReceiver(name, "DLNA compatibility profile")
+        }
+        return OutputMediaProfile(
+            mode = ReceiverCompatibilityMode.DECLARED,
+            source = CapabilitySource.ADVERTISED,
+            directSchemes = schemes.ifEmpty { setOf("http") },
+            directContainers = containers,
+            directVideoCodecs = videos,
+            directAudioCodecs = audios,
+            directPixelFormats = setOf("yuv420p", "nv12"),
+            hlsVideoCodecs = hlsVideos,
+            hlsAudioCodecs = hlsAudios,
+            supportsHlsWebVtt = hlsVideos.isNotEmpty(),
+            detail = name,
+        )
+    }
+
     override suspend fun cast(
         target: CastTarget,
-        url: String,
-        title: String,
+        media: PreparedCastMedia,
         client: HttpClient,
     ): CastResult {
         val device = (target as CastTarget.Dlna).device
         val renderer = DlnaRenderer(client)
-        val uriAccepted = renderer.setAvTransportUri(device, url, title)
+        val uriAccepted = renderer.setAvTransportUri(device, media)
         val playbackStarted = uriAccepted && renderer.play(device)
-        return if (playbackStarted) {
-            CastResult.Sent("Sent to ${target.name}")
-        } else {
-            CastResult.Rejected("DLNA rejected the URL")
-        }
+        return if (playbackStarted) CastResult.Sent("Sent to ${target.name}")
+        else CastResult.Rejected("DLNA rejected the URL")
     }
 
     override suspend fun seek(

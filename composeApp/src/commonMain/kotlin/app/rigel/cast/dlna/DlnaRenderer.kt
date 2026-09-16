@@ -1,6 +1,7 @@
 package app.rigel.cast.dlna
 
 import app.rigel.cast.DlnaDevice
+import app.rigel.cast.PreparedCastMedia
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -34,7 +35,7 @@ object DlnaDeviceDescription {
         var avControlUrl: String? = null
         var eventSubUrl: String? = null
         var renderingControlUrl: String? = null
-
+        var connectionManagerUrl: String? = null
         fun controlUrlOf(serviceXml: String): String? =
             Regex("""<controlURL>\s*([^<]+?)\s*</controlURL>""")
                 .find(serviceXml)?.groupValues?.get(1)?.trim()
@@ -51,10 +52,15 @@ object DlnaDeviceDescription {
                 serviceType.contains("RenderingControl") && renderingControlUrl == null -> {
                     renderingControlUrl = controlUrlOf(service.value)
                 }
+                serviceType.contains("ConnectionManager") && connectionManagerUrl == null -> {
+                    connectionManagerUrl = controlUrlOf(service.value)
+                }
             }
         }
 
         val control = avControlUrl ?: return null
+        fun text(tag: String): String? = Regex("""<$tag>\s*([^<]+?)\s*</$tag>""")
+            .find(deviceXml)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
         return DlnaDevice(
             usn = usn,
             location = location,
@@ -62,6 +68,10 @@ object DlnaDeviceDescription {
             controlUrl = resolveUrl(location, control),
             renderingControlUrl = renderingControlUrl?.let { resolveUrl(location, it) },
             eventSubUrl = eventSubUrl,
+            manufacturer = text("manufacturer"),
+            modelName = text("modelName"),
+            modelNumber = text("modelNumber"),
+            connectionManagerUrl = connectionManagerUrl?.let { resolveUrl(location, it) },
         )
     }
 
@@ -86,7 +96,28 @@ class DlnaRenderer(private val client: HttpClient) {
         return DlnaDeviceDescription.parse(usn, location, xml)
     }
 
-    /** True when the renderer accepted the URI (SOAP round-trip succeeded). */
+    suspend fun sinkProtocolInfo(device: DlnaDevice): String? {
+        val url = device.connectionManagerUrl ?: return null
+        val xml = postForBody(
+            url,
+            DlnaSoap.CONNECTION_MANAGER_TYPE,
+            "GetProtocolInfo",
+            DlnaSoap.getProtocolInfoBody(),
+            device.friendlyName,
+        ) ?: return null
+        return DlnaSoap.parseSinkProtocolInfo(xml)
+    }
+
+    suspend fun setAvTransportUri(device: DlnaDevice, media: PreparedCastMedia): Boolean = runCatching {
+        val response = client.post(device.controlUrl) {
+            contentType(ContentType.Text.Xml)
+            userAgent("Rigel/1.0")
+            header("SOAPACTION", "\"${DlnaSoap.SERVICE_TYPE}#SetAVTransportURI\"")
+            setBody(DlnaSoap.setAvTransportUriBody(media))
+        }
+        response.status.value in 200..299
+    }.getOrDefault(false)
+
     suspend fun setAvTransportUri(device: DlnaDevice, uri: String, title: String?): Boolean {
         val body = DlnaSoap.setAvTransportUriBody(uri, title)
         return runCatching {

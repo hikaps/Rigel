@@ -4,6 +4,7 @@ import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
 import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.PreparedCastMedia
 import app.rigel.cast.ReceiverAdapter
 import app.rigel.source.jellyfin.JellyfinSession
 import io.ktor.client.HttpClient
@@ -27,8 +28,7 @@ object JellyfinSessionAdapter : ReceiverAdapter {
 
     override suspend fun cast(
         target: CastTarget,
-        url: String,
-        title: String,
+        media: PreparedCastMedia,
         client: HttpClient,
     ): CastResult = CastResult.Rejected("Jellyfin clients accept library items only — cast from the Sources tab")
 

@@ -16,6 +16,13 @@ import kotlinx.coroutines.launch
  *          &sub=<enc,repeatable>&x-source=<enc>&x-success=<enc>
  * Pure function on the input string — unit-tested.
  */
+data class JellyfinPlaybackContext(
+    val baseUrl: String,
+    val token: String,
+    val userId: String,
+    val itemId: String,
+)
+
 data class IntakeRequest(
     val sourceUrl: String,
     val filename: String?,
@@ -23,6 +30,7 @@ data class IntakeRequest(
     val successCallbackUrl: String?,
     val xSource: String? = null,
     val title: String? = null,
+    val jellyfinContext: JellyfinPlaybackContext? = null,
 )
 
 object UrlIntake {

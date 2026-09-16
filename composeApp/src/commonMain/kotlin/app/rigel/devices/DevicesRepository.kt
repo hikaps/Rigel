@@ -6,6 +6,7 @@ import app.rigel.cast.ReceiverRegistry
 import app.rigel.cast.ChromeDevice
 import app.rigel.cast.chrome.ChromecastBridgeFactory
 import app.rigel.settings.SettingsStore
+import app.rigel.source.jellyfin.JellyfinClient
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
 import kotlinx.coroutines.async
@@ -26,6 +27,7 @@ data class DiscoveredDevice(
 class DevicesRepository(
     private val client: HttpClient,
     private val settings: SettingsStore,
+    private val jellyfin: JellyfinClient? = null,
 ) {
     private val tag = "DevicesRepository"
 
@@ -71,6 +73,15 @@ class DevicesRepository(
         }.awaitAll().filterNotNull()
         manualTargets.forEach { target ->
             if (found.none { it.target.name == target.name }) found += DiscoveredDevice(target, "manual")
+        }
+        if (jellyfin != null) {
+            val base = settings.jellyfinServer().trim().trimEnd('/')
+            val token = settings.jellyfinToken()
+            if (base.isNotEmpty() && token.isNotEmpty()) {
+                runCatching { jellyfin.sessions(base, token) }
+                    .getOrDefault(emptyList())
+                    .forEach { found += DiscoveredDevice(CastTarget.JellyfinSessionTarget(it), "jellyfin") }
+            }
         }
         found
     }

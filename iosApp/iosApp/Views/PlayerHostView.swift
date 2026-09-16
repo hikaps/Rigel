@@ -37,7 +37,10 @@ struct PlayerHostView: View {
             }
         }
         .sheet(isPresented: $showDevicesPicker) {
-            DevicesView()
+            DevicesView { target in
+                player.selectDestinationReceiver(target)
+                showDevicesPicker = false
+            }
         }
     }
 
@@ -115,7 +118,26 @@ struct PlayerHostView: View {
         } else if phase == .playing || phase == .buffering {
             let buffering = phase == .buffering || nativeBuffering
             ZStack {
-                if let url = player.playableURL {
+                if player.remotePlayback {
+                    stateContent {
+                        Image(systemName: "tv.fill")
+                            .font(.system(size: 42, weight: .medium))
+                            .foregroundStyle(Color.rigelStar)
+                        Text("Playing on \(player.destinationName)")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.white)
+                        if let detail = player.planDetail {
+                            Text(detail)
+                                .font(.subheadline)
+                                .foregroundStyle(.white.opacity(0.7))
+                                .multilineTextAlignment(.center)
+                        }
+                        Button("Playback destinations") { showDevicesPicker = true }
+                            .buttonStyle(.bordered)
+                        Button("Stop", role: .destructive) { player.stop() }
+                            .buttonStyle(.plain)
+                    }
+                } else if let url = player.playableURL {
                     PlayerView(
                         url: url,
                         title: player.displayTitle,
@@ -154,7 +176,7 @@ struct PlayerHostView: View {
                             .foregroundStyle(.white)
                     }
                 }
-                if buffering {
+                if buffering && !player.remotePlayback {
                     ProgressView()
                         .tint(.white)
                         .controlSize(.large)

@@ -1,5 +1,6 @@
 package app.rigel.cast.roku
 
+import app.rigel.cast.PreparedCastMedia
 import app.rigel.cast.RokuDevice
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
@@ -24,19 +25,24 @@ class RokuRenderer(private val client: HttpClient) {
         return RokuDevice(usn, base, info.modelName)
     }
 
-    suspend fun launchPlayOnRoku(device: RokuDevice, mediaUrl: String): Boolean {
+    suspend fun launchPlayOnRoku(device: RokuDevice, media: PreparedCastMedia): Boolean {
         val channelId = resolvePlayChannelId(device)
+        val endpoint = device.location + "input/$channelId?" + RokuEcp.launchQuery(media)
         val resp = runCatching {
-            client.post(device.location + "input/$channelId") {
+            client.post(endpoint) {
                 userAgent("Rigel/1.0")
                 contentType(ContentType.Text.Plain)
-                setBody(RokuEcp.launchBody(mediaUrl))
+                setBody("")
             }.status.value
         }.getOrNull()
         Logger.i(tag) { "launch $channelId -> $resp" }
         return resp != null && resp in 200..299
     }
-
+    suspend fun launchPlayOnRoku(device: RokuDevice, mediaUrl: String): Boolean =
+        launchPlayOnRoku(
+            device,
+            PreparedCastMedia(mediaUrl, "Stream", "video/mp4", "mp4", app.rigel.cast.CastMediaKind.VIDEO, false, app.rigel.cast.CastMediaOrigin.SOURCE),
+        )
     private suspend fun resolvePlayChannelId(device: RokuDevice): String {
         val xml = runCatching { client.get(device.location + "query/apps").bodyAsText() }.getOrNull()
         if (xml != null) {

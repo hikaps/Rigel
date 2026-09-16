@@ -52,6 +52,7 @@ final class RigelHlsExporter {
         sourceUrl: String,
         headers: [String: String],
         mode: String,
+        passthroughAudioCodecs: [String] = [],
         startOffsetMs: Int64,
         subtitleTracks: [SubtitleTrack],
         onReady: @escaping (String?, String?) -> Void,
@@ -71,6 +72,7 @@ final class RigelHlsExporter {
                 sourceUrl: sourceUrl,
                 headers: headers,
                 mode: mode,
+                passthroughAudioCodecs: passthroughAudioCodecs,
                 onReady: onReady,
                 onError: onError
             )

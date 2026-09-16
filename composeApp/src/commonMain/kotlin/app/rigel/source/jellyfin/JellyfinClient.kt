@@ -24,6 +24,7 @@ data class JellyfinSession(
     val id: String,
     val deviceName: String,
     val client: String,
+    val serverBase: String = "",
 )
 
 data class JellyfinAuth(
@@ -212,12 +213,13 @@ class JellyfinClient(private val http: HttpClient) {
     }
 
     suspend fun sessions(base: String, token: String): List<JellyfinSession> {
+        val normalizedBase = base.trim().trimEnd('/')
         val resp = runCatching {
-            http.get(base.trimEnd('/') + "/Sessions") { header("X-Emby-Token", token) }.bodyAsText()
+            http.get(normalizedBase + "/Sessions") { header("X-Emby-Token", token) }.bodyAsText()
         }.getOrNull() ?: return emptyList()
         val out = mutableListOf<JellyfinSession>()
         for (m in Regex("""\{[^{}]*?"Id":"([^"]+)"[^{}]*?"DeviceName":"([^"]+)"[^{}]*?"Client":"([^"]+)"[^{}]*?}""").findAll(resp)) {
-            out += JellyfinSession(m.groupValues[1], m.groupValues[2], m.groupValues[3])
+            out += JellyfinSession(m.groupValues[1], m.groupValues[2], m.groupValues[3], normalizedBase)
         }
         return out
     }

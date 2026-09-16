@@ -2,6 +2,8 @@ package app.rigel
 
 import app.rigel.cast.CastDispatcher
 import app.rigel.devices.DevicesRepository
+import app.rigel.output.OutputSelection
+import app.rigel.output.ReceiverCapabilityRepository
 import app.rigel.player.PlayerController
 import app.rigel.settings.SettingsStore
 import app.rigel.source.jellyfin.JellyfinClient
@@ -28,10 +30,11 @@ object RigelCore {
         }
     }
     val settings: SettingsStore = SettingsStore(Settings())
-    val controller: PlayerController = PlayerController(settings)
-    val devices: DevicesRepository = DevicesRepository(client, settings)
+    val outputSelection: OutputSelection = OutputSelection()
+    val capabilityRepository: ReceiverCapabilityRepository = ReceiverCapabilityRepository(client)
     val jellyfin: JellyfinClient = JellyfinClient(client)
-
+    val controller: PlayerController = PlayerController(settings, outputSelection, capabilityRepository, jellyfin)
+    val devices: DevicesRepository = DevicesRepository(client, settings, jellyfin)
     init {
         // Cast learns about playback here; it never imports the player layer.
         CastDispatcher.install(playbackPort = controller, client = client)

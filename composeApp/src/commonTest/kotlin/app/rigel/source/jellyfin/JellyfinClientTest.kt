@@ -208,8 +208,8 @@ class JellyfinClientTest {
         val engine = MockEngine { respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
         val sessions = JellyfinClient(HttpClient(engine)).sessions(base, "tok")
         assertEquals(2, sessions.size)
-        assertEquals(JellyfinSession("s1", "iPhone", "Jellyfin Mobile"), sessions[0])
-        assertEquals(JellyfinSession("s2", "Living Room", "Jellyfin for Roku"), sessions[1])
+        assertEquals(JellyfinSession("s1", "iPhone", "Jellyfin Mobile", base), sessions[0])
+        assertEquals(JellyfinSession("s2", "Living Room", "Jellyfin for Roku", base), sessions[1])
     }
 
     @Test

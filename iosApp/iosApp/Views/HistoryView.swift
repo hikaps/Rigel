@@ -57,6 +57,7 @@ struct HistoryView: View {
                         }
                     }
                 }
+                .disabled(!player.futureDestinationAcceptsUrls)
             }
         }
     }

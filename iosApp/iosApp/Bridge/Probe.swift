@@ -45,6 +45,11 @@ final class RigelProbe {
             var videoPixFmt: String? = nil
             var videoWidth: Int32 = 0
             var videoHeight: Int32 = 0
+            var videoProfile: String? = nil
+            var videoLevel: Int32? = nil
+            var videoFrameRate: Double? = nil
+            var videoBitRate: Int64? = nil
+            var maxAudioChannels: Int32 = 0
             let streamCount = Int(ctx.pointee.nb_streams)
             var selectedVideoIndex: Int?
             var selectedVideoIsDefault = false
@@ -77,8 +82,13 @@ final class RigelProbe {
                         }
                         videoWidth = codecpar.pointee.width
                         videoHeight = codecpar.pointee.height
+                        videoProfile = codecpar.pointee.profile > 0 ? String(codecpar.pointee.profile) : nil
+                        videoLevel = codecpar.pointee.level > 0 ? codecpar.pointee.level : nil
+                        videoFrameRate = frameRate(for: stream)
+                        videoBitRate = codecpar.pointee.bit_rate > 0 ? codecpar.pointee.bit_rate : nil
                     case AVMEDIA_TYPE_AUDIO:
                         audioCodecs.append(codecName)
+                        maxAudioChannels = max(maxAudioChannels, codecpar.pointee.ch_layout.nb_channels)
                     case AVMEDIA_TYPE_SUBTITLE:
                         subtitleCodecs.append(codecName)
                     default:
@@ -100,7 +110,12 @@ final class RigelProbe {
                 isLive: isLive,
                 pixFmt: videoPixFmt.flatMap { normalizePixelFormat($0) },
                 width: videoWidth,
-                height: videoHeight
+                height: videoHeight,
+                videoProfile: videoProfile,
+                videoLevel: videoLevel.map { KotlinInt(int: $0) },
+                frameRate: videoFrameRate.map { KotlinDouble(double: $0) },
+                bitRate: videoBitRate.map { KotlinLong(longLong: $0) },
+                maxAudioChannels: maxAudioChannels
             )
             avformat_close_input(&fmt)
         }
@@ -110,6 +125,12 @@ final class RigelProbe {
     private static func codecNameString(_ id: AVCodecID) -> String {
         guard let name = avcodec_get_name(id) else { return "unknown" }
         return String(cString: name)
+    }
+
+    private static func frameRate(for stream: UnsafeMutablePointer<AVStream>) -> Double? {
+        let rate = stream.pointee.avg_frame_rate
+        guard rate.num > 0, rate.den > 0 else { return nil }
+        return Double(rate.num) / Double(rate.den)
     }
 
     private static func avErrorString(_ code: Int32) -> String {

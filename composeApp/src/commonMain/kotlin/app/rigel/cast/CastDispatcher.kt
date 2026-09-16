@@ -1,35 +1,32 @@
 package app.rigel.cast
 
 import app.rigel.bridge.Bridges
+import app.rigel.output.OutputMediaProfiles
+import app.rigel.output.RemoteUrlPolicy
 import io.ktor.client.HttpClient
 import io.ktor.http.Url
-
-/**
- * Read/write access the cast layer needs into playback orchestration.
- * [app.rigel.player.PlayerController] implements it; RigelCore wires the pair
- * at startup so the cast package never depends on the player layer.
- */
 interface CastPlaybackPort {
     fun setCastActive(active: Boolean)
-
     fun remoteCastUrl(): String?
-
     fun remoteCastTitle(): String
 }
 
-/**
- * Send-flow entry point shared by every host UI. Resolves the URL a remote
- * renderer must fetch (a live local HLS proxy is only reachable over LAN,
- * never 127.0.0.1) and dispatches to the right adapter.
- */
-object CastDispatcher {
+interface CastDispatching {
+    fun activeTarget(): CastTarget?
+    suspend fun cast(target: CastTarget, media: PreparedCastMedia): CastResult
+    suspend fun recastIfActive(target: CastTarget, media: PreparedCastMedia): CastResult?
+    suspend fun seekActive(positionMs: Long, durationMs: Long): Boolean
+    fun detachActive(): CastTarget?
+    suspend fun stopDetached(target: CastTarget): Boolean
+}
+
+/** Transport/session owner. Playback planning remains in PlayerController. */
+object CastDispatcher : CastDispatching {
     private val session = CastSession()
 
-    /** Composition-root wiring (RigelCore); tests install fakes and clear in teardown. */
     internal var playbackPort: CastPlaybackPort? = null
     internal var defaultClient: HttpClient? = null
 
-    /** Wire the production (or test) playback port and default HTTP client. */
     fun install(playbackPort: CastPlaybackPort?, client: HttpClient?) {
         this.playbackPort = playbackPort
         this.defaultClient = client
@@ -37,24 +34,24 @@ object CastDispatcher {
 
     fun capabilities(target: CastTarget): CastCapabilities = session.capabilities(target)
 
-    fun activeTarget(): CastTarget? = session.activeTarget()
+    override fun activeTarget(): CastTarget? = session.activeTarget()
 
-    fun clearActive() {
-        session.clearActive()
-        playbackPort?.setCastActive(false)
+    override fun detachActive(): CastTarget? {
+        val previous = session.detachActive()
+        if (previous != null) playbackPort?.setCastActive(false)
+        return previous
     }
 
-    suspend fun seekActive(positionMs: Long, durationMs: Long): Boolean =
+    fun clearActive() {
+        detachActive()
+    }
+
+    override suspend fun seekActive(positionMs: Long, durationMs: Long): Boolean =
         seekActive(positionMs, durationMs, requireClient())
 
     suspend fun seekActive(positionMs: Long, durationMs: Long, client: HttpClient): Boolean {
         val target = session.activeTarget() ?: return false
-        return ReceiverRegistry.adapterFor(target).seek(
-            target = target,
-            positionMs = positionMs,
-            durationMs = durationMs,
-            client = client,
-        )
+        return ReceiverRegistry.adapterFor(target).seek(target, positionMs, durationMs, client)
     }
 
     suspend fun pauseActive(): Boolean = pauseActive(requireClient())
@@ -82,20 +79,22 @@ object CastDispatcher {
     suspend fun toggleMuteActive(client: HttpClient): Boolean =
         controlActive(client) { adapter, target -> adapter.toggleMute(target, client) }
 
-    /**
-     * Stop the active receiver, then end the cast session locally even when the
-     * device is unreachable — the user's intent is to stop casting.
-     */
-    suspend fun stopActive(): Boolean = stopActive(requireClient())
+    suspend fun stopActive(): Boolean {
+        val target = detachActive() ?: return false
+        return stopDetached(target)
+    }
 
     suspend fun stopActive(client: HttpClient): Boolean {
-        val target = session.activeTarget() ?: return false
-        val stopped = runCatching {
-            ReceiverRegistry.adapterFor(target).stop(target, client)
-        }.getOrDefault(false)
-        clearActive()
-        return stopped
+        val target = detachActive() ?: return false
+        return stopDetached(target, client)
     }
+
+    override suspend fun stopDetached(target: CastTarget): Boolean =
+        stopDetached(target, requireClient())
+
+    suspend fun stopDetached(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        ReceiverRegistry.adapterFor(target).stop(target, client)
+    }.getOrDefault(false)
 
     private suspend fun controlActive(
         client: HttpClient,
@@ -105,20 +104,59 @@ object CastDispatcher {
         return op(ReceiverRegistry.adapterFor(target), target)
     }
 
+    override suspend fun cast(target: CastTarget, media: PreparedCastMedia): CastResult =
+        cast(target, media, requireClient())
+
+    suspend fun cast(target: CastTarget, media: PreparedCastMedia, client: HttpClient): CastResult {
+        if (media.origin == CastMediaOrigin.SOURCE &&
+            !RemoteUrlPolicy.isReceiverFetchable(media.url, OutputMediaProfiles.optimisticHttp(target.name))
+        ) {
+            return CastResult.Rejected("Receiver cannot fetch the source URL")
+        }
+        val attempt = session.beginAttempt()
+        val result = ReceiverRegistry.adapterFor(target).cast(target, media, client)
+        if (result is CastResult.Sent && session.commitActive(target, attempt)) {
+            playbackPort?.setCastActive(true)
+        }
+        return result
+    }
+
+    override suspend fun recastIfActive(target: CastTarget, media: PreparedCastMedia): CastResult? =
+        recastIfActive(target, media, requireClient())
+
+    suspend fun recastIfActive(
+        target: CastTarget,
+        media: PreparedCastMedia,
+        client: HttpClient,
+    ): CastResult? {
+        if (media.origin == CastMediaOrigin.SOURCE &&
+            !RemoteUrlPolicy.isReceiverFetchable(media.url, OutputMediaProfiles.optimisticHttp(target.name))
+        ) return CastResult.Rejected("Receiver cannot fetch the source URL")
+        val attempt = session.beginAttemptFor(target) ?: return null
+        val result = ReceiverRegistry.adapterFor(target).cast(target, media, client)
+        if (result is CastResult.Sent && session.commitActive(target, attempt)) {
+            playbackPort?.setCastActive(true)
+        }
+        return result
+    }
+
+    /** Compatibility wrapper until host UI switches to PreparedCastMedia. */
+    suspend fun cast(target: CastTarget, url: String, title: String): CastResult =
+        cast(target, prepared(url, title), requireClient())
+
+    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): CastResult =
+        cast(target, prepared(url, title), client)
+    suspend fun recastIfActive(target: CastTarget, url: String, title: String, client: HttpClient = requireClient()): CastResult? =
+        recastIfActive(target, prepared(url, title), client)
 
     fun remoteCastUrl(): String? = playbackPort?.remoteCastUrl()
 
     fun remoteCastUrl(isPlaying: Boolean, proxyUrl: String?, sourceUrl: String?): String? {
         if (!isPlaying) return null
-        proxyUrl?.let { proxy ->
+        if (proxyUrl != null) {
             val lan = Bridges.lanBaseUrl() ?: return null
-            // Re-host the proxy's relative path at the current LAN base. Parse
-            // the URL properly: the proxy is LAN-formatted since the AirPlay
-            // fix, so a 127.0.0.1 delimiter no longer exists (and would mangle
-            // the path into //host:port/…).
-            val path = Url(proxy).encodedPathAndQuery
-            if (path.isNotEmpty()) return lan.trimEnd('/') + path
-            return null
+            val path = Url(proxyUrl).encodedPathAndQuery
+            return if (path.isNotEmpty()) lan.trimEnd('/') + path else null
         }
         return sourceUrl
     }
@@ -126,45 +164,33 @@ object CastDispatcher {
     fun remoteCastTitle(): String = playbackPort?.remoteCastTitle() ?: "Stream"
 
     fun remoteCastTitle(filename: String?, sourceUrl: String?): String =
-        filename
-            ?: sourceUrl?.substringAfterLast('/')
-            ?: "Stream"
+        filename ?: sourceUrl?.substringAfterLast("/") ?: "Stream"
 
-    /** Dispatch with the installed default client. */
-    suspend fun cast(target: CastTarget, url: String, title: String): CastResult =
-        cast(target, url, title, requireClient())
+    private fun prepared(url: String, title: String): PreparedCastMedia = PreparedCastMedia(
+        url = url,
+        title = title,
+        contentType = contentTypeFor(url),
+        container = url.substringBefore('?').substringAfterLast('.').lowercase(),
+        kind = if (url.substringBefore('?').substringAfterLast('.').lowercase() in setOf("mp3", "m4a", "aac", "flac")) {
+            CastMediaKind.AUDIO
+        } else CastMediaKind.VIDEO,
+        isLive = false,
+        origin = CastMediaOrigin.SOURCE,
+    )
 
-    /**
-     * Re-send media only while [target] remains the active receiver. The
-     * commit token is minted before dispatch, so a clearActive() during the
-     * adapter call voids the commit instead of resurrecting the session.
-     * Returns null immediately when [target] is no longer active.
-     */
-    suspend fun recastIfActive(
-        target: CastTarget,
-        url: String,
-        title: String,
-        client: HttpClient = requireClient(),
-    ): CastResult? {
-        val attempt = session.beginAttemptFor(target) ?: return null
-        val result = ReceiverRegistry.adapterFor(target).cast(target, url, title, client)
-        if (result is CastResult.Sent && session.commitActive(target, attempt)) {
-            playbackPort?.setCastActive(true)
-        }
-        return result
-    }
-
-    /** Same dispatch with an injectable HTTP client (tests use a mock engine). */
-    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): CastResult {
-        val attempt = session.beginAttempt()
-        val result = ReceiverRegistry.adapterFor(target).cast(target, url, title, client)
-        if (result is CastResult.Sent && session.commitActive(target, attempt)) {
-            playbackPort?.setCastActive(true)
-        }
-        return result
+    private fun contentTypeFor(url: String): String = when (
+        url.substringBefore('?').substringAfterLast('.').lowercase()
+    ) {
+        "mp4", "m4v" -> "video/mp4"
+        "mov" -> "video/quicktime"
+        "m3u8" -> "application/vnd.apple.mpegurl"
+        "mp3" -> "audio/mpeg"
+        "m4a" -> "audio/mp4"
+        "aac" -> "audio/aac"
+        "flac" -> "audio/flac"
+        else -> "video/mp4"
     }
 
     private fun requireClient(): HttpClient =
-        defaultClient
-            ?: throw IllegalStateException("CastDispatcher client not installed — call install() at app startup")
+        defaultClient ?: throw IllegalStateException("CastDispatcher client not installed — call install() at app startup")
 }

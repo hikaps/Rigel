@@ -66,8 +66,8 @@ class RokuRendererTest {
         val ok = RokuRenderer(HttpClient(engine)).launchPlayOnRoku(device, "http://h/video.mkv")
         assertTrue(ok)
         assertEquals(1, posted.size)
-        assertEquals("http://10.0.0.7:8060/input/15985", posted[0].first)
-        assertEquals("t=http%3A%2F%2Fh%2Fvideo.mkv", posted[0].second)
+        assertEquals("http://10.0.0.7:8060/input/15985?t=v&u=http%3A%2F%2Fh%2Fvideo.mkv&k=%28null%29&videoName=Stream&videoFormat=mp4", posted[0].first)
+        assertEquals("", posted[0].second)
     }
 
     @Test
@@ -83,7 +83,7 @@ class RokuRendererTest {
         }
         val device = RokuDevice("r1", "http://10.0.0.7:8060/", "Roku")
         assertTrue(RokuRenderer(HttpClient(engine)).launchPlayOnRoku(device, "http://h/v.mkv"))
-        assertEquals("http://10.0.0.7:8060/input/${RokuEcp.PLAY_ON_ROKU_CHANNEL_ID}", posted[0])
+        assertEquals("http://10.0.0.7:8060/input/${RokuEcp.PLAY_ON_ROKU_CHANNEL_ID}?t=v&u=http%3A%2F%2Fh%2Fv.mkv&k=%28null%29&videoName=Stream&videoFormat=mp4", posted[0])
     }
 
     @Test

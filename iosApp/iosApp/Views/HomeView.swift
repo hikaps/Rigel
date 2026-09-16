@@ -149,13 +149,14 @@ struct HomeView: View {
             Button {
                 openStream()
             } label: {
-                Label("Play on this device", systemImage: "play.fill")
+                Label("Play on \(player.futureDestinationName)", systemImage: "play.fill")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.rigelStar)
+            .disabled(!player.futureDestinationAcceptsUrls)
         }
         .padding(18)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
