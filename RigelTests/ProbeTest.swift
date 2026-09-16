@@ -292,6 +292,11 @@ final class ProbeTest: XCTestCase {
         )
     }
 
+    func testHLSPlaylistDurationUsesInvariantDecimalSeparator() {
+        let localized = String(format: "%.3f", locale: Locale(identifier: "fr_FR"), 4.25)
+        XCTAssertEqual(localized, "4,250")
+        XCTAssertEqual(RigelHlsExporter.hlsPlaylistDuration(4.25), "4.250")
+    }
     func testSidecarWebVttPublishesSubtitleRendition() throws {
         let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
         let sidecar = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_sidecar", withExtension: "vtt"))

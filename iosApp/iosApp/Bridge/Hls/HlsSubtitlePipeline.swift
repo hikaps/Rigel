@@ -458,7 +458,7 @@ extension RigelHlsExporter {
         to rendition: SubtitleRendition
     ) -> Bool {
         let url = rendition.outDir.appendingPathComponent(rendition.playlistName)
-        let addition = "#EXTINF:\(String(format: "%.3f", duration)),\n\(name)\n"
+        let addition = "#EXTINF:\(hlsPlaylistDuration(duration)),\n\(name)\n"
         subtitlePlaylistLock.lock()
         defer { subtitlePlaylistLock.unlock() }
         guard let file = try? FileHandle(forWritingTo: url) else { return false }
@@ -484,6 +484,9 @@ extension RigelHlsExporter {
         try? file.synchronize()
     }
 
+    static func hlsPlaylistDuration(_ duration: Double) -> String {
+        String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), duration)
+    }
     private static func atomicallyWrite(_ contents: String, to url: URL) -> Bool {
         let temporary = url.deletingLastPathComponent()
             .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
