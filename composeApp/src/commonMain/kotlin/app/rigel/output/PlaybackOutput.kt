@@ -1,6 +1,7 @@
 package app.rigel.output
 
 import app.rigel.cast.CastTarget
+import app.rigel.source.jellyfin.JellyfinApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -99,7 +100,7 @@ class OutputSelection {
         }
     }
 
-    private fun normalizeServerBase(value: String): String = value.trim().trimEnd('/').lowercase()
+    private fun normalizeServerBase(value: String): String = JellyfinApi.normalizeServerBase(value)
 }
 
 val CastTarget.outputKind: OutputKind

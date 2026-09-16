@@ -33,6 +33,8 @@ class OutputRoutingTest {
         pixFmt = pixFmt,
         width = width,
         height = height,
+        videoLevel = 40,
+        frameRate = 24.0
     )
 
     @Test

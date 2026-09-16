@@ -221,8 +221,8 @@ class PlayerControllerTest {
         c.loadRequest(request.copy(subtitleTracks = listOf(track)))
         advanceUntilIdle()
 
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
-        assertEquals(listOf(track), hlsSubtitleTracks.last())
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertTrue(hlsModes.isEmpty())
     }
 
     @Test

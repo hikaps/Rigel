@@ -27,6 +27,7 @@ import app.rigel.output.PlaybackDestination
 import app.rigel.output.RemoteUrlPolicy
 import app.rigel.settings.RouteOverride
 import app.rigel.settings.SettingsStore
+import app.rigel.source.jellyfin.JellyfinApi
 import app.rigel.source.jellyfin.JellyfinClient
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CoroutineScope
@@ -142,6 +143,7 @@ class PlayerController(
     }
 
     fun loadRequest(request: IntakeRequest, destinationOverride: PlaybackDestination? = null) {
+        stopJellyfinIfActive()
         invalidatePendingWork()
         val detachedTarget = CastDispatcher.detachActive()
         if (detachedTarget != null) scope.launch { CastDispatcher.stopDetached(detachedTarget) }
@@ -213,7 +215,14 @@ class PlayerController(
             startPositionMs = resume,
             error = null,
         )
-        pendingJob = scope.launch { probeAndRoute(request, generation, probe) }
+        val jellyfinTarget = (destination as? PlaybackDestination.Receiver)?.target
+            as? CastTarget.JellyfinSessionTarget
+        if (jellyfinTarget != null) {
+            _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
+            pendingJob = scope.launch { playJellyfin(request, generation, jellyfinTarget) }
+        } else {
+            pendingJob = scope.launch { probeAndRoute(request, generation, probe) }
+        }
     }
 
     override fun setCastActive(active: Boolean) {
@@ -376,7 +385,7 @@ class PlayerController(
             )
             return
         }
-        val requestBase = context.baseUrl.trim().trimEnd('/').lowercase()
+        val requestBase = JellyfinApi.normalizeServerBase(context.baseUrl)
         if (requestBase != target.serverBase) {
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
@@ -601,6 +610,10 @@ class PlayerController(
             proxyUrl = proxyUrl,
         )
         val result = CastDispatcher.cast(remoteTarget, media)
+        if (!isCurrent(generation)) {
+            Bridges.stopHlsSession(sessionId)
+            return
+        }
         if (result is app.rigel.cast.CastResult.Sent) {
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.PLAYING,
@@ -647,6 +660,7 @@ class PlayerController(
             origin = CastMediaOrigin.SOURCE,
         )
         val result = CastDispatcher.cast(target, media)
+        if (!isCurrent(generation)) return
         if (result is app.rigel.cast.CastResult.Sent) {
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.PLAYING,
@@ -711,8 +725,16 @@ class PlayerController(
             prepareProxy(probe, PlaybackRoute.REMUX, generation)
         }
     }
+    private fun stopJellyfinIfActive() {
+        val target = (currentDestination as? PlaybackDestination.Receiver)?.target
+            as? CastTarget.JellyfinSessionTarget ?: return
+        val context = currentRequest?.jellyfinContext ?: return
+        val client = jellyfin ?: return
+        scope.launch { client.stopSession(context.baseUrl, context.token, target.session.id) }
+    }
 
     fun stopPlayback() {
+        stopJellyfinIfActive()
         invalidatePendingWork()
         val detachedTarget = CastDispatcher.detachActive()
         if (detachedTarget != null) scope.launch { CastDispatcher.stopDetached(detachedTarget) }

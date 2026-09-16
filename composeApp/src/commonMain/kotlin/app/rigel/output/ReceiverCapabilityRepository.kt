@@ -47,11 +47,11 @@ class ReceiverCapabilityRepository(
     private fun fingerprint(target: CastTarget): String = when (target) {
         is CastTarget.Dlna -> {
             val d: DlnaDevice = target.device
-            "\${d.location}|\${d.controlUrl}|\${d.friendlyName}"
+            "${d.location}|${d.controlUrl}|${d.friendlyName}"
         }
         is CastTarget.Roku -> {
             val d: RokuDevice = target.device
-            "\${d.location}|\${d.modelName}"
+            "${d.location}|${d.modelName}"
         }
         is CastTarget.Kodi -> {
             val d: KodiDevice = target.device
@@ -59,7 +59,7 @@ class ReceiverCapabilityRepository(
         }
         is CastTarget.Chrome -> {
             val d: ChromeDevice = target.device
-            "\${d.host}:\${d.port}|\${d.name}"
+            "${d.host}:${d.port}|${d.name}"
         }
         is CastTarget.JellyfinSessionTarget -> target.serverBase
     }

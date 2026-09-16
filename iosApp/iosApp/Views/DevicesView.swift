@@ -4,23 +4,29 @@ import ComposeApp
 
 struct DevicesView: View {
     let onSelected: ((CastTarget) -> Void)?
+    let onLocalSelected: (() -> Void)?
     @State private var devices: [DiscoveredDevice] = []
     @State private var scanning = false
     @State private var notice: String?
     @State private var activeTarget: CastTarget?
     @State private var selectedDestinationId = "local:iphone"
 
-    init(onSelected: ((CastTarget) -> Void)? = nil) {
+    init(onSelected: ((CastTarget) -> Void)? = nil, onLocalSelected: (() -> Void)? = nil) {
         self.onSelected = onSelected
+        self.onLocalSelected = onLocalSelected
     }
     var body: some View {
         NavigationStack {
             List {
                 Section {
                     Button {
-                        SwiftOutputSelection.shared.selectLocal()
-                        selectedDestinationId = "local:iphone"
-                        notice = "Selected This iPhone"
+                        if let onLocalSelected {
+                            onLocalSelected()
+                        } else {
+                            SwiftOutputSelection.shared.selectLocal()
+                            selectedDestinationId = "local:iphone"
+                            notice = "Selected This iPhone"
+                        }
                     } label: {
                         HStack {
                             Label("This iPhone", systemImage: "iphone")

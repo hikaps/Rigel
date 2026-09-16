@@ -68,7 +68,7 @@ object FormatRouter {
     ): RouteDecision {
         val route = localRoute(probe, hasSelectedExternalSubtitle)
         val selected = when (preference) {
-            RouteOverride.DIRECT -> route
+            RouteOverride.DIRECT -> PlaybackRoute.DIRECT
             RouteOverride.ALWAYS_PROXY -> if (route == PlaybackRoute.DIRECT) PlaybackRoute.REMUX else route
             RouteOverride.AUTO -> route
         }
@@ -169,7 +169,11 @@ object FormatRouter {
         if (probe.videoCodec == null) return true
         if (profile.maxWidth != null && (probe.width <= 0 || probe.width > profile.maxWidth)) return false
         if (profile.maxHeight != null && (probe.height <= 0 || probe.height > profile.maxHeight)) return false
-        if (profile.maxFrameRate != null && probe.frameRate != null && probe.frameRate > profile.maxFrameRate) return false
+        if (profile.maxH264Level != null && probe.videoCodec.equals("h264", ignoreCase = true)) {
+            val level = probe.videoLevel ?: return false
+            if (level > profile.maxH264Level) return false
+        }
+        if (profile.maxFrameRate != null && (probe.frameRate == null || probe.frameRate > profile.maxFrameRate)) return false
         return true
     }
 

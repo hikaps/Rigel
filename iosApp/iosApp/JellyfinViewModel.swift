@@ -77,6 +77,7 @@ final class JellyfinViewModel: ObservableObject {
                 settings.setJellyfinUsername(v: username)
                 settings.setJellyfinToken(v: auth.token)
                 settings.setJellyfinUserId(v: auth.userId)
+                self.password = ""
                 loadedOnce = false
                 items = []
                 searchResults = []
@@ -94,8 +95,8 @@ final class JellyfinViewModel: ObservableObject {
     func disconnect() {
         invalidateInFlight()
         SwiftOutputSelection.shared.clearJellyfinServer(serverBase: settings.jellyfinServer())
+        password = ""
         settings.setJellyfinToken(v: "")
-        busy = false
         items = []
         parentId = nil
         parentName = nil

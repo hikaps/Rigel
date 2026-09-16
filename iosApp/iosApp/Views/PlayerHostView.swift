@@ -37,13 +37,18 @@ struct PlayerHostView: View {
             }
         }
         .sheet(isPresented: $showDevicesPicker) {
-            DevicesView { target in
-                player.selectDestinationReceiver(target)
-                showDevicesPicker = false
-            }
+            DevicesView(
+                onSelected: { target in
+                    player.selectDestinationReceiver(target)
+                    showDevicesPicker = false
+                },
+                onLocalSelected: {
+                    player.selectDestinationLocal()
+                    showDevicesPicker = false
+                }
+            )
         }
     }
-
     @ViewBuilder
     private var content: some View {
         let phase = player.phase
@@ -114,6 +119,29 @@ struct PlayerHostView: View {
                 .foregroundStyle(.white.opacity(0.8))
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
+            }
+        } else if phase == .connectingOutput {
+            stateContent {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(Color.rigelStar)
+                ProgressView()
+                    .tint(.white)
+                    .controlSize(.large)
+                    .accessibilityLabel("Connecting to destination")
+                Text("Connecting to \(player.destinationName)")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                if let detail = player.planDetail {
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                }
+                Button("Cancel", role: .cancel) { player.stop() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.vertical, 10)
             }
         } else if phase == .playing || phase == .buffering {
             let buffering = phase == .buffering || nativeBuffering
