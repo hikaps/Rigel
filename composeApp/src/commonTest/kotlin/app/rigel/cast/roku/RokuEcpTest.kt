@@ -83,4 +83,22 @@ class RokuEcpTest {
         assertTrue(query.contains("videoFormat=hls"))
         assertFalse(query.contains("songformat="))
     }
+
+    @Test
+    fun directAacMp4UsesAacSongFormat() {
+        val query = RokuEcp.launchQuery(
+            PreparedCastMedia(
+                url = "http://lan.example/audio.mp4",
+                title = "AAC audio",
+                contentType = "audio/mp4",
+                container = "mp4",
+                kind = CastMediaKind.AUDIO,
+                isLive = false,
+                origin = CastMediaOrigin.SOURCE,
+            ),
+        )
+
+        assertTrue(query.startsWith("t=a&"))
+        assertTrue(query.contains("songformat=aac"))
+    }
 }

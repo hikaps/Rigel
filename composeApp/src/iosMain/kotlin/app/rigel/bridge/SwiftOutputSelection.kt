@@ -29,4 +29,6 @@ object SwiftOutputSelection {
 
     fun clearJellyfinServer(serverBase: String) =
         RigelCore.outputSelection.clearJellyfinServer(serverBase)
+    fun replaceIfSameIdentity(target: CastTarget): Boolean =
+        RigelCore.outputSelection.replaceIfSameIdentity(target)
 }

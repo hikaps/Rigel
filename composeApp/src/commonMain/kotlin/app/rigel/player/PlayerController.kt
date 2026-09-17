@@ -702,15 +702,28 @@ class PlayerController(
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = result.message)
     }
 
-    private fun contentTypeForProbe(probe: ProbeResult): String = when (probe.container.lowercase()) {
-        "mp4", "m4v" -> "video/mp4"
-        "mov" -> "video/quicktime"
-        "m3u8", "hls" -> "application/vnd.apple.mpegurl"
-        "mp3" -> "audio/mpeg"
-        "m4a" -> "audio/mp4"
-        "aac" -> "audio/aac"
-        "flac" -> "audio/flac"
-        else -> if (probe.videoCodec == null) "audio/mpeg" else "video/mp4"
+    private fun contentTypeForProbe(probe: ProbeResult): String {
+        val container = probe.container.lowercase()
+        if (probe.videoCodec == null) {
+            return when (container) {
+                "m3u8", "hls" -> "application/vnd.apple.mpegurl"
+                "m4a", "mp4", "m4v" -> "audio/mp4"
+                "mp3" -> "audio/mpeg"
+                "aac" -> "audio/aac"
+                "flac" -> "audio/flac"
+                else -> "audio/mpeg"
+            }
+        }
+        return when (container) {
+            "mp4", "m4v" -> "video/mp4"
+            "mov" -> "video/quicktime"
+            "m3u8", "hls" -> "application/vnd.apple.mpegurl"
+            "mp3" -> "audio/mpeg"
+            "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
+            "flac" -> "audio/flac"
+            else -> "video/mp4"
+        }
     }
 
     private fun failProxySession(sessionId: String, generation: Long, message: String) {
@@ -766,7 +779,7 @@ class PlayerController(
         stops.forEach { it?.join() }
     }
 
-    fun stopPlayback() {
+    override fun stopPlayback() {
         val stopJob = stopJellyfinIfActive()
         if (stopJob != null) jellyfinStopJob = stopJob
         invalidatePendingWork()

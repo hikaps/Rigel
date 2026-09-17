@@ -228,5 +228,6 @@ class DlnaRendererTest {
         assertTrue(profile.directSchemes.contains("http"))
         assertTrue(profile.directSchemes.contains("https"))
         assertFalse(profile.directSchemes.contains("http-get"))
+        assertTrue(profile.directAudioCodecs.contains("aac"))
     }
 }

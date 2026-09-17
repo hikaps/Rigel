@@ -148,7 +148,13 @@ struct DevicesView: View {
         notice = nil
         RigelCore.shared.devices.scan(timeoutMs: 5000) { found, _ in
             Task { @MainActor in
-                devices = found ?? []
+                let refreshed = found ?? []
+                devices = refreshed
+                for device in refreshed {
+                    if SwiftOutputSelection.shared.replaceIfSameIdentity(target: device.target) {
+                        break
+                    }
+                }
                 selectedDestinationId = SwiftOutputSelection.shared.snapshot().identityKey
                 scanning = false
             }

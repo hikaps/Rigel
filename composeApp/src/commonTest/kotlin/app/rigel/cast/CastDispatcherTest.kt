@@ -59,12 +59,17 @@ private class FakeBridges(private val lan: String?) :
 /** Records cast-active mirroring without a PlayerController. */
 private class RecordingPort : CastPlaybackPort {
     var active = false
+    var stopRequested = false
     override fun setCastActive(active: Boolean) {
         this.active = active
     }
 
     override fun remoteCastUrl(): String? = null
     override fun remoteCastTitle(): String = "Stream"
+    override fun stopPlayback() {
+        stopRequested = true
+        active = false
+    }
 }
 
 class CastDispatcherTest {

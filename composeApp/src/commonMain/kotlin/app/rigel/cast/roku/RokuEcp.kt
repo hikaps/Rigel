@@ -24,14 +24,18 @@ object RokuEcp {
             container == "m3u8" || container == "hls" ->
                 "t=v&$url&videoName=${formEncode(media.title)}&videoFormat=hls"
             media.kind == CastMediaKind.AUDIO ->
-                "t=a&$url&songname=${formEncode(media.title)}&songformat=${audioFormat(media.container)}"
+                "t=a&$url&songname=${formEncode(media.title)}&songformat=${audioFormat(media)}"
             else ->
                 "t=v&$url&videoName=${formEncode(media.title)}&videoFormat=${videoFormat(media.container)}"
         }
     }
 
-    private fun audioFormat(container: String): String =
-        if (container.lowercase() == "aac") "aac" else "mp3"
+    private fun audioFormat(media: PreparedCastMedia): String {
+        val contentType = media.contentType.lowercase()
+        return if (media.container.lowercase() == "aac" ||
+            contentType.startsWith("audio/mp4") || contentType.startsWith("audio/aac")
+        ) "aac" else "mp3"
+    }
 
     private fun videoFormat(container: String): String =
         if (container.lowercase() in setOf("m3u8", "hls")) "hls" else "mp4"

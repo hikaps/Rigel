@@ -56,17 +56,18 @@ object DlnaAdapter : ReceiverAdapter {
             val isVideo = mime.startsWith("video/")
             val isAudio = mime.startsWith("audio/")
             val h264 = profile.contains("avc") || profile.contains("h264")
-            val aac = profile.contains("aac") || mime.contains("mp4") || mime.contains("aac")
+            val aac = profile.contains("aac") ||
+                (isAudio && (mime.contains("mp4") || mime.contains("aac")))
             if (mime.contains("mp4") || profile.contains("avc_mp4")) containers += "mp4"
             if (mime.contains("quicktime")) containers += "mov"
             if (isHls) containers += "m3u8"
+            if (aac) {
+                audios += "aac"
+                if (isHls) hlsAudios += "aac"
+            }
             if (isVideo && h264) {
                 videos += "h264"
                 if (isHls) hlsVideos += "h264"
-            }
-            if (isAudio && aac) {
-                audios += "aac"
-                if (isHls) hlsAudios += "aac"
             }
         }
         if (containers.isEmpty() && videos.isEmpty() && audios.isEmpty()) {

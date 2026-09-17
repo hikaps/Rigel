@@ -9,6 +9,7 @@ interface CastPlaybackPort {
     fun setCastActive(active: Boolean)
     fun remoteCastUrl(): String?
     fun remoteCastTitle(): String
+    fun stopPlayback()
 }
 
 interface CastDispatching {
@@ -79,14 +80,16 @@ object CastDispatcher : CastDispatching {
     suspend fun toggleMuteActive(client: HttpClient): Boolean =
         controlActive(client) { adapter, target -> adapter.toggleMute(target, client) }
 
-    suspend fun stopActive(): Boolean {
-        val target = detachActive() ?: return false
-        return stopDetached(target)
-    }
+    suspend fun stopActive(): Boolean = stopActiveThroughPlayback(null)
 
-    suspend fun stopActive(client: HttpClient): Boolean {
+    suspend fun stopActive(client: HttpClient): Boolean = stopActiveThroughPlayback(client)
+
+    private suspend fun stopActiveThroughPlayback(client: HttpClient?): Boolean {
+        if (activeTarget() == null) return false
+        playbackPort?.stopPlayback()
+        if (activeTarget() == null) return true
         val target = detachActive() ?: return false
-        return stopDetached(target, client)
+        return if (client == null) stopDetached(target) else stopDetached(target, client)
     }
 
     override suspend fun stopDetached(target: CastTarget): Boolean =

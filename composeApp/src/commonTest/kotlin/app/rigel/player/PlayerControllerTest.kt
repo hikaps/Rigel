@@ -9,6 +9,7 @@ import app.rigel.bridge.SubtitleTrack
 import app.rigel.cast.CastDispatcher
 import app.rigel.cast.CastTarget
 import app.rigel.cast.DlnaDevice
+import app.rigel.cast.RokuDevice
 
 import app.rigel.gateway.PlaybackRoute
 import app.rigel.output.PlaybackDestination
@@ -820,5 +821,42 @@ class PlayerControllerTest {
         firstStopGate.complete(Unit)
         advanceUntilIdle()
         assertEquals("${jfBase}/Sessions/s2/Playing", requests.last())
+    }
+
+    @Test
+    fun directAudioMp4UsesAudioMimeForRoku() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult("mp4", null, listOf("aac"), emptyList(), 60_000, isLive = false, pixFmt = null)
+        val posted = mutableListOf<String>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    if (url.endsWith("/query/apps")) {
+                        respond("<apps><app id=\"15985\">Play on Roku</app></apps>", HttpStatusCode.OK)
+                    } else {
+                        posted += url
+                        respond("", HttpStatusCode.OK)
+                    }
+                }
+            }
+        }
+        val c = controller()
+        val target = CastTarget.Roku(RokuDevice("r-aac", "http://192.168.1.9:8060/", "Roku"))
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(
+                request.copy(sourceUrl = "http://192.168.1.20/audio.mp4"),
+                PlaybackDestination.Receiver(target),
+            )
+            advanceUntilIdle()
+            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+            assertTrue(posted.single().contains("t=a"))
+            assertTrue(posted.single().contains("songformat=aac"))
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
     }
 }
