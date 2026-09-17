@@ -475,8 +475,15 @@ class PlayerController(
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "Jellyfin client is not configured")
             return
         }
+        val startPositionTicks = JellyfinApi.startPositionTicks(_uiState.value.startPositionMs)
         val sent = runCatching {
-            client.playToSession(context.baseUrl, context.token, target.session.id, listOf(context.itemId))
+            client.playToSession(
+                context.baseUrl,
+                context.token,
+                target.session.id,
+                listOf(context.itemId),
+                startPositionTicks,
+            )
         }.getOrDefault(false)
         if (!isCurrent(generation)) return
         if (sent) {
@@ -731,6 +738,41 @@ class PlayerController(
             )
         }
     }
+    private suspend fun prepareRemoteResumeProxy(
+        target: CastTarget,
+        probe: ProbeResult,
+        generation: Long,
+    ) {
+        if (!isCurrent(generation)) return
+        val profile = currentOutputProfile ?: capabilityResolver.profileFor(target).also {
+            currentOutputProfile = it
+        }
+        val decision = FormatRouter.decide(
+            probe = probe,
+            profile = profile,
+            hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
+            preference = RouteOverride.ALWAYS_PROXY,
+            sourceIsRemotelyReachable = true,
+        )
+        val playable = decision as? RouteDecision.Playable ?: run {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                proxyUrl = null,
+                error = (decision as RouteDecision.Unsupported).message,
+            )
+            return
+        }
+        currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
+        _uiState.value = _uiState.value.copy(
+            phase = PlayerPhase.PREPARING_PROXY,
+            route = playable.route,
+            proxyUrl = null,
+            error = null,
+            planDetail = playable.detail,
+        )
+        prepareProxy(probe, playable.route, generation, playable.passthroughAudioCodecs)
+    }
+
     private suspend fun dispatchRemoteDirect(
         target: CastTarget,
         sourceUrl: String,
@@ -739,6 +781,14 @@ class PlayerController(
     ) {
         if (!isCurrent(generation)) return
         val state = _uiState.value
+        val resumePositionMs = state.startPositionMs
+        val durationMs = probe.durationMs
+        val canSeekResume = resumePositionMs <= 0L ||
+            (CastDispatcher.capabilities(target).supportsSeek && durationMs != null && durationMs > 0)
+        if (!canSeekResume) {
+            prepareRemoteResumeProxy(target, probe, generation)
+            return
+        }
         val media = PreparedCastMedia(
             url = sourceUrl,
             title = state.title ?: "Stream",
@@ -754,6 +804,13 @@ class PlayerController(
             return
         }
         if (result is app.rigel.cast.CastResult.Sent) {
+            if (resumePositionMs > 0 &&
+                !CastDispatcher.seekActive(resumePositionMs, durationMs ?: 0L)
+            ) {
+                stopReceiverBestEffort(target)
+                prepareRemoteResumeProxy(target, probe, generation)
+                return
+            }
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.PLAYING,
                 remotePlayback = true,

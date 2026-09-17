@@ -510,4 +510,27 @@ class CastDispatcherTest {
         assertFalse(session.commitActive(target, inFlightAttempt))
         assertNull(session.activeTarget())
     }
+    @Test
+    fun stopActiveReturnsRemoteResultAfterLocalTeardown() {
+        val engine = MockEngine { request ->
+            if (request.headers["SOAPACTION"]?.contains("#Stop") == true) {
+                respond("", HttpStatusCode.InternalServerError)
+            } else {
+                respond(
+                    content = "<ok/>",
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "text/xml"),
+                )
+            }
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(DlnaDevice("stop-1", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
+
+        assertTrue(runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) } is CastResult.Sent)
+        val stopped = runBlocking { CastDispatcher.stopActive(client) }
+
+        assertFalse(stopped)
+        assertTrue(port.stopRequested)
+        assertNull(CastDispatcher.activeTarget())
+    }
 }

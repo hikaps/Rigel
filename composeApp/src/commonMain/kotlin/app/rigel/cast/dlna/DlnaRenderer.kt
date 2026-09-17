@@ -99,6 +99,7 @@ object DlnaDeviceDescription {
 /** DLNA renderer control over UPnP AVTransport (playback) and RenderingControl (volume) SOAP. */
 class DlnaRenderer(private val client: HttpClient) {
     private val tag = "DlnaRenderer"
+    private val capabilityClient = client.config { followRedirects = false }
 
     suspend fun fetchDeviceDescription(usn: String, location: String): DlnaDevice? {
         val xml = runCatching { client.get(location).bodyAsText() }.getOrNull() ?: return null
@@ -114,6 +115,7 @@ class DlnaRenderer(private val client: HttpClient) {
             "GetProtocolInfo",
             DlnaSoap.getProtocolInfoBody(),
             device.friendlyName,
+            requestClient = capabilityClient,
         ) ?: return null
         return DlnaSoap.parseSinkProtocolInfo(xml)
     }
@@ -217,9 +219,10 @@ class DlnaRenderer(private val client: HttpClient) {
         action: String,
         body: String,
         deviceName: String,
+        requestClient: HttpClient = client,
     ): String? {
         return runCatching {
-            val response = client.post(serviceUrl) {
+            val response = requestClient.post(serviceUrl) {
                 contentType(ContentType.Text.Xml)
                 userAgent("Rigel/1.0")
                 header("SOAPACTION", "\"$serviceType#$action\"")

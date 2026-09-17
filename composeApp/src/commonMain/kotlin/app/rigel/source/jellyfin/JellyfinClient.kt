@@ -115,6 +115,9 @@ object JellyfinApi {
     fun sessionsUrl(base: String, userId: String): String =
         base.trimEnd('/') + "/Sessions?controllableByUserId=${encodeUrlComponent(userId)}"
 
+    fun startPositionTicks(positionMs: Long): Long =
+        positionMs.coerceAtLeast(0).coerceAtMost(Long.MAX_VALUE / 10_000L) * 10_000L
+
     fun jsonEscape(s: String): String =
         s.replace("\\", "\\\\").replace("\"", "\\\"")
 
@@ -240,11 +243,15 @@ class JellyfinClient(private val http: HttpClient) {
 
     suspend fun sessions(base: String, token: String, userId: String): List<JellyfinSession> {
         val normalizedBase = JellyfinApi.normalizeServerBase(base)
-        val resp = runCatching {
+        val resp = try {
             http.get(JellyfinApi.sessionsUrl(normalizedBase, userId)) {
                 header("X-Emby-Token", token)
             }.bodyAsText()
-        }.getOrNull() ?: return emptyList()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            return emptyList()
+        }
         val out = mutableListOf<JellyfinSession>()
         JsonObjectReader(
             source = resp,
@@ -264,9 +271,15 @@ class JellyfinClient(private val http: HttpClient) {
         return out
     }
     /** Cast a library item to a logged-in Jellyfin client session. */
-    suspend fun playToSession(base: String, token: String, sessionId: String, itemIds: List<String>): Boolean {
+    suspend fun playToSession(
+        base: String,
+        token: String,
+        sessionId: String,
+        itemIds: List<String>,
+        startPositionTicks: Long = 0,
+    ): Boolean {
         val resp = runCatching {
-            http.post(JellyfinApi.playUrl(base, sessionId, itemIds)) {
+            http.post(JellyfinApi.playUrl(base, sessionId, itemIds, startPositionTicks = startPositionTicks)) {
                 header("X-Emby-Token", token)
             }.status.value
         }.getOrNull()

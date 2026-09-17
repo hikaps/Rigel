@@ -792,6 +792,7 @@ class PlayerControllerTest {
         assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0", requests.last())
     }
 
+
     @Test
     fun stopPlaybackRetainsStopBeforeReplacementPlay() = runTest(dispatcher.scheduler) {
         val jfBase = "http://jf:8096"

@@ -85,10 +85,8 @@ object CastDispatcher : CastDispatching {
     suspend fun stopActive(client: HttpClient): Boolean = stopActiveThroughPlayback(client)
 
     private suspend fun stopActiveThroughPlayback(client: HttpClient?): Boolean {
-        if (activeTarget() == null) return false
-        playbackPort?.stopPlayback()
-        if (activeTarget() == null) return true
         val target = detachActive() ?: return false
+        playbackPort?.stopPlayback()
         return if (client == null) stopDetached(target) else stopDetached(target, client)
     }
 

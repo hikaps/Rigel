@@ -141,7 +141,8 @@ extension JellyfinClient {
         base: String,
         token: String,
         sessionId: String,
-        itemIds: [String]
+        itemIds: [String],
+        startPositionTicks: Int64 = 0
     ) async -> Bool {
         let ok = try? await JellyfinAsync.run {
             self.playToSession(
@@ -149,6 +150,7 @@ extension JellyfinClient {
                 token: token,
                 sessionId: sessionId,
                 itemIds: itemIds,
+                startPositionTicks: startPositionTicks,
                 completionHandler: $0
             )
         }

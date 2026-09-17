@@ -232,6 +232,7 @@ class DlnaRendererTest {
         assertEquals(setOf("h264"), profile.hlsVideoCodecs)
         assertEquals(setOf("aac"), profile.hlsAudioCodecs)
         assertTrue(profile.supportsHlsWebVtt)
+        assertEquals(1, engine.requestHistory.size)
     }
 
     @Test
@@ -276,5 +277,19 @@ class DlnaRendererTest {
         assertTrue(profile.hlsVideoCodecs.isEmpty())
         assertTrue(profile.hlsAudioCodecs.isEmpty())
         assertFalse(profile.supportsHlsWebVtt)
+    }
+
+    @Test
+    fun sinkProtocolInfoDoesNotFollowRedirects() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine {
+            respond(
+                "",
+                HttpStatusCode.TemporaryRedirect,
+                headersOf(HttpHeaders.Location, "http://10.0.0.6:1234/connection"),
+            )
+        }
+        val renderer = DlnaRenderer(HttpClient(engine))
+
+        assertNull(renderer.sinkProtocolInfo(device))
     }
 }
