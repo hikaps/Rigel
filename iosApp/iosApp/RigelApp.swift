@@ -5,6 +5,9 @@ import ComposeApp
 
 @MainActor
 final class AirPlayRouteMonitor: NSObject {
+    static func routeChanged(currentIdentity: String, routeId: String) -> Bool {
+        currentIdentity != "airplay:" + routeId
+    }
     private let session = AVAudioSession.sharedInstance()
     private var observer: NSObjectProtocol?
 
@@ -33,11 +36,12 @@ final class AirPlayRouteMonitor: NSObject {
             playerState.sourceUrl != nil
         let livePositionMs = SwiftPlayer.shared.currentPositionMs()
         if let airPlay {
+            let routeChanged = Self.routeChanged(currentIdentity: selection.identityKey, routeId: airPlay.uid)
             SwiftOutputSelection.shared.selectAirPlay(
                 routeId: airPlay.uid,
                 name: airPlay.portName
             )
-            if activePlayback {
+            if activePlayback && routeChanged {
                 SwiftPlayer.shared.selectAirPlay(
                     routeId: airPlay.uid,
                     name: airPlay.portName,

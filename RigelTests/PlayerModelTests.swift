@@ -58,6 +58,12 @@ private extension ProbeResult {
 final class PlayerModelTests: XCTestCase {
 
     @MainActor
+    func testAirPlayRouteIdentitySkipsUnchangedHandoff() {
+        XCTAssertFalse(AirPlayRouteMonitor.routeChanged(currentIdentity: "airplay:route-1", routeId: "route-1"))
+        XCTAssertTrue(AirPlayRouteMonitor.routeChanged(currentIdentity: "airplay:route-1", routeId: "route-2"))
+    }
+
+    @MainActor
     func testPlayingStateMapsAndPresentsPlayer() {
         let model = PlayerModel()
         let state = PlayerUiState(

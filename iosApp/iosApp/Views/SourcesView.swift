@@ -231,19 +231,15 @@ struct SourcesView: View {
 
     private func play(_ item: JellyfinItem) {
         model.play(item) { url, title, tracks, base, token, userId, itemId in
-            if player.futureDestinationAcceptsUrls {
-                _ = player.open(url: url, title: title, subtitleTracks: tracks)
-            } else {
-                _ = player.openJellyfin(
-                    url: url,
-                    title: title,
-                    subtitleTracks: [],
-                    baseUrl: base,
-                    token: token,
-                    userId: userId,
-                    itemId: itemId
-                )
-            }
+            _ = player.openJellyfin(
+                url: url,
+                title: title,
+                subtitleTracks: tracks,
+                baseUrl: base,
+                token: token,
+                userId: userId,
+                itemId: itemId
+            )
         }
     }
 }
