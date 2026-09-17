@@ -3,15 +3,45 @@ import AVKit
 import ComposeApp
 
 struct DevicesView: View {
+    let onSelected: ((CastTarget) -> Void)?
+    let onLocalSelected: (() -> Void)?
     @State private var devices: [DiscoveredDevice] = []
     @State private var scanning = false
     @State private var notice: String?
-    @State private var busyTarget: String?
     @State private var activeTarget: CastTarget?
+    @State private var selectedDestinationId = "local:iphone"
 
+    init(onSelected: ((CastTarget) -> Void)? = nil, onLocalSelected: (() -> Void)? = nil) {
+        self.onSelected = onSelected
+        self.onLocalSelected = onLocalSelected
+    }
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    Button {
+                        if let onLocalSelected {
+                            onLocalSelected()
+                        } else {
+                            SwiftOutputSelection.shared.selectLocal()
+                            selectedDestinationId = "local:iphone"
+                            notice = "Selected This iPhone"
+                        }
+                    } label: {
+                        HStack {
+                            Label("This iPhone", systemImage: "iphone")
+                            Spacer()
+                            if selectedDestinationId == "local:iphone" {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(Color.rigelStar)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } header: {
+                    Text("Playback destination")
+                }
+
                 Section {
                     HStack {
                         Text("AirPlay & Bluetooth")
@@ -23,7 +53,7 @@ struct DevicesView: View {
                 } header: {
                     Text("AirPlay")
                 } footer: {
-                    Text("Sends playback to Apple TVs, HomePods, and AirPlay speakers.")
+                    Text("Use the system picker for Apple TVs, HomePods, and AirPlay speakers.")
                 }
 
                 if let activeTarget {
@@ -34,11 +64,7 @@ struct DevicesView: View {
                             onEnded: { refreshActiveTarget() }
                         )
                     } header: {
-                        Text("Casting")
-                    } footer: {
-                        if let note = CastDispatcher.shared.capabilities(target: activeTarget).note {
-                            Text(note)
-                        }
+                        Text("Active remote playback")
                     }
                 }
 
@@ -56,7 +82,7 @@ struct DevicesView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("No screens found")
                                 .font(.subheadline.weight(.semibold))
-                            Text("Make sure your TV is on the same Wi-Fi, then scan again.")
+                            Text("Make sure your device is on the same Wi-Fi, then scan again.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
@@ -65,9 +91,9 @@ struct DevicesView: View {
                     ForEach(devices, id: \.stableId) { device in
                         DeviceRow(
                             device: device,
-                            isCasting: busyTarget == device.target.stableId,
+                            isSelected: selectedDestinationId == device.target.identityKey,
                             showRemove: device.via == "manual",
-                            onCast: { castNow(device) },
+                            onSelect: { select(device) },
                             onRemove: { remove(device) }
                         )
                     }
@@ -98,9 +124,7 @@ struct DevicesView: View {
             .navigationTitle("Playback Destination")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        scan()
-                    } label: {
+                    Button { scan() } label: {
                         Image(systemName: "arrow.clockwise")
                     }
                     .disabled(scanning)
@@ -108,6 +132,7 @@ struct DevicesView: View {
                 }
             }
             .task {
+                selectedDestinationId = SwiftOutputSelection.shared.snapshot().identityKey
                 refreshActiveTarget()
                 scan()
             }
@@ -123,34 +148,28 @@ struct DevicesView: View {
         notice = nil
         RigelCore.shared.devices.scan(timeoutMs: 5000) { found, _ in
             Task { @MainActor in
-                self.devices = found ?? []
-                self.scanning = false
+                let refreshed = found ?? []
+                devices = refreshed
+                for device in refreshed {
+                    if SwiftOutputSelection.shared.replaceIfSameIdentity(target: device.target) {
+                        break
+                    }
+                }
+                selectedDestinationId = SwiftOutputSelection.shared.snapshot().identityKey
+                scanning = false
             }
         }
     }
 
-    private func castNow(_ device: DiscoveredDevice) {
-        guard busyTarget == nil else { return }
-        guard let url = CastDispatcher.shared.remoteCastUrl(), !url.isEmpty else {
-            notice = "Nothing to send — play a stream first"
-            return
-        }
-
-        busyTarget = device.target.stableId
-        notice = nil
-        CastDispatcher.shared.cast(
-            target: device.target,
-            url: url,
-            title: CastDispatcher.shared.remoteCastTitle()
-        ) { result, _ in
-            Task { @MainActor in
-                self.busyTarget = nil
-                self.notice = result?.message ?? "Cast failed"
-                self.refreshActiveTarget()
-            }
+    private func select(_ device: DiscoveredDevice) {
+        if let onSelected {
+            onSelected(device.target)
+        } else {
+            SwiftOutputSelection.shared.selectReceiver(target: device.target)
+            selectedDestinationId = device.target.identityKey
+            notice = "Selected \(device.target.name)"
         }
     }
-
     private func remove(_ device: DiscoveredDevice) {
         guard device.via == "manual" else { return }
         RigelCore.shared.devices.removeManualDevice(target: device.target)
@@ -159,32 +178,28 @@ struct DevicesView: View {
 }
 
 private extension DiscoveredDevice {
-    var stableId: String { target.stableId }
+    var stableId: String { target.identityKey }
 }
 
 private struct DeviceRow: View {
     let device: DiscoveredDevice
-    let isCasting: Bool
+    let isSelected: Bool
     let showRemove: Bool
-    let onCast: (() -> Void)?
+    let onSelect: () -> Void
     let onRemove: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            if let onCast = onCast {
-                Button(action: onCast) {
-                    destinationLabel
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-                .disabled(isCasting)
-            } else {
+            Button(action: onSelect) {
                 destinationLabel
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .buttonStyle(.plain)
 
-            if isCasting {
-                ProgressView()
-                    .accessibilityLabel("Sending to \(device.target.name)")
+            if isSelected {
+                Image(systemName: "checkmark")
+                    .foregroundStyle(Color.rigelStar)
+                    .accessibilityLabel("Selected destination")
             } else if showRemove {
                 Menu {
                     Button("Remove", role: .destructive, action: onRemove)
@@ -204,12 +219,10 @@ private struct DeviceRow: View {
             Image(systemName: "tv")
                 .foregroundStyle(Color.rigelStar)
                 .frame(width: 26)
-
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.target.name)
                     .font(.body)
                     .lineLimit(1)
-
                 HStack(spacing: 6) {
                     Text(device.target.kindLabel)
                         .font(.caption2)
@@ -217,7 +230,6 @@ private struct DeviceRow: View {
                         .padding(.vertical, 2)
                         .background(Color.rigelStarDim, in: Capsule())
                         .foregroundStyle(Color.rigelStar)
-
                     if device.via == "manual" {
                         Text("Manual")
                             .font(.footnote)
@@ -229,14 +241,10 @@ private struct DeviceRow: View {
     }
 }
 
-/// Remote-control row for the active cast receiver. Pause/stop/volume are
-/// blind commands — receivers expose no session state back to Rigel — so the
-/// pause button tracks only what this row last sent.
 private struct CastSessionControls: View {
     let target: CastTarget
     let onNotice: (String) -> Void
     let onEnded: () -> Void
-
     @State private var paused = false
 
     private var capabilities: CastCapabilities {
@@ -248,11 +256,9 @@ private struct CastSessionControls: View {
             HStack(spacing: 8) {
                 Image(systemName: "tv")
                     .foregroundStyle(Color.rigelStar)
-
                 Text(target.name)
                     .font(.body.weight(.semibold))
                     .lineLimit(1)
-
                 Text(target.kindLabel)
                     .font(.caption2)
                     .padding(.horizontal, 6)
@@ -263,16 +269,13 @@ private struct CastSessionControls: View {
 
             HStack(spacing: 26) {
                 if capabilities.supportsPauseResume {
-                    remoteButton(
-                        paused ? "play.fill" : "pause.fill",
-                        label: paused ? "Resume" : "Pause"
-                    ) { perform(paused ? .resume : .pause) }
+                    remoteButton(paused ? "play.fill" : "pause.fill", label: paused ? "Resume" : "Pause") {
+                        perform(paused ? .resume : .pause)
+                    }
                 }
-
                 if capabilities.supportsStop {
                     remoteButton("stop.fill", label: "Stop") { perform(.stop) }
                 }
-
                 if capabilities.supportsVolume {
                     remoteButton("speaker.minus.fill", label: "Volume down") { perform(.volumeDown) }
                     remoteButton("speaker.plus.fill", label: "Volume up") { perform(.volumeUp) }
@@ -283,11 +286,7 @@ private struct CastSessionControls: View {
         .padding(.vertical, 2)
     }
 
-    private func remoteButton(
-        _ systemImage: String,
-        label: String,
-        action: @escaping () -> Void
-    ) -> some View {
+    private func remoteButton(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 18, weight: .semibold))
@@ -299,7 +298,6 @@ private struct CastSessionControls: View {
 
     private enum RemoteOp {
         case pause, resume, stop, volumeUp, volumeDown, mute
-
         var label: String {
             switch self {
             case .pause: "Pause"

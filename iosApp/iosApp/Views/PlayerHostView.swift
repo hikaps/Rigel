@@ -37,10 +37,18 @@ struct PlayerHostView: View {
             }
         }
         .sheet(isPresented: $showDevicesPicker) {
-            DevicesView()
+            DevicesView(
+                onSelected: { target in
+                    player.selectDestinationReceiver(target)
+                    showDevicesPicker = false
+                },
+                onLocalSelected: {
+                    player.selectDestinationLocal()
+                    showDevicesPicker = false
+                }
+            )
         }
     }
-
     @ViewBuilder
     private var content: some View {
         let phase = player.phase
@@ -112,10 +120,62 @@ struct PlayerHostView: View {
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
+        } else if phase == .connectingOutput {
+            stateContent {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(Color.rigelStar)
+                ProgressView()
+                    .tint(.white)
+                    .controlSize(.large)
+                    .accessibilityLabel("Connecting to destination")
+                Text("Connecting to \(player.destinationName)")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                if let detail = player.planDetail {
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                }
+                Button("Cancel", role: .cancel) { player.stop() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+            }
         } else if phase == .playing || phase == .buffering {
             let buffering = phase == .buffering || nativeBuffering
             ZStack {
-                if let url = player.playableURL {
+                if player.remotePlayback {
+                    stateContent {
+                        Image(systemName: "tv.fill")
+                            .font(.system(size: 42, weight: .medium))
+                            .foregroundStyle(Color.rigelStar)
+                        Text("Playing on \(player.destinationName)")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.white)
+                        if let detail = player.planDetail {
+                            Text(detail)
+                                .font(.subheadline)
+                                .foregroundStyle(.white.opacity(0.7))
+                                .multilineTextAlignment(.center)
+                        }
+                        Button("Playback destinations") { showDevicesPicker = true }
+                            .buttonStyle(.bordered)
+                        if remoteStopSupported {
+                            Button("Stop", role: .destructive) { player.stop() }
+                                .buttonStyle(.plain)
+                                .padding(.vertical, 10)
+                                .contentShape(Rectangle())
+                        }
+                        Button("Close", role: .cancel) { player.stop() }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white.opacity(0.8))
+                            .padding(.vertical, 10)
+                            .contentShape(Rectangle())
+                    }
+                } else if let url = player.playableURL {
                     PlayerView(
                         url: url,
                         title: player.displayTitle,
@@ -154,7 +214,7 @@ struct PlayerHostView: View {
                             .foregroundStyle(.white)
                     }
                 }
-                if buffering {
+                if buffering && !player.remotePlayback {
                     ProgressView()
                         .tint(.white)
                         .controlSize(.large)
@@ -209,7 +269,11 @@ struct PlayerHostView: View {
         }
     }
 
-    @ViewBuilder
+    private var remoteStopSupported: Bool {
+        guard player.remotePlayback, let target = CastDispatcher.shared.activeTarget() else { return true }
+        return CastDispatcher.shared.capabilities(target: target).supportsStop
+    }
+
     private func stateContent<Content: View>(
         @ViewBuilder content: () -> Content
     ) -> some View {

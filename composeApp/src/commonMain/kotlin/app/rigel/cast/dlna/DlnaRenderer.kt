@@ -1,6 +1,7 @@
 package app.rigel.cast.dlna
 
 import app.rigel.cast.DlnaDevice
+import app.rigel.cast.PreparedCastMedia
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -11,6 +12,7 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.userAgent
+import io.ktor.http.Url
 
 /**
  * Device-description parsing (no SCRD fetch per plan): extracts friendlyName,
@@ -34,7 +36,7 @@ object DlnaDeviceDescription {
         var avControlUrl: String? = null
         var eventSubUrl: String? = null
         var renderingControlUrl: String? = null
-
+        var connectionManagerUrl: String? = null
         fun controlUrlOf(serviceXml: String): String? =
             Regex("""<controlURL>\s*([^<]+?)\s*</controlURL>""")
                 .find(serviceXml)?.groupValues?.get(1)?.trim()
@@ -51,10 +53,15 @@ object DlnaDeviceDescription {
                 serviceType.contains("RenderingControl") && renderingControlUrl == null -> {
                     renderingControlUrl = controlUrlOf(service.value)
                 }
+                serviceType.contains("ConnectionManager") && connectionManagerUrl == null -> {
+                    connectionManagerUrl = controlUrlOf(service.value)
+                }
             }
         }
 
         val control = avControlUrl ?: return null
+        fun text(tag: String): String? = Regex("""<$tag>\s*([^<]+?)\s*</$tag>""")
+            .find(deviceXml)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
         return DlnaDevice(
             usn = usn,
             location = location,
@@ -62,6 +69,10 @@ object DlnaDeviceDescription {
             controlUrl = resolveUrl(location, control),
             renderingControlUrl = renderingControlUrl?.let { resolveUrl(location, it) },
             eventSubUrl = eventSubUrl,
+            manufacturer = text("manufacturer"),
+            modelName = text("modelName"),
+            modelNumber = text("modelNumber"),
+            connectionManagerUrl = connectionManagerUrl?.let { resolveUrl(location, it) },
         )
     }
 
@@ -75,18 +86,50 @@ object DlnaDeviceDescription {
             location.substringBeforeLast('/', location) + "/" + controlUrl
         }
     }
+
+    internal fun sameOrigin(first: String, second: String): Boolean {
+        val firstUrl = runCatching { Url(first) }.getOrNull() ?: return false
+        val secondUrl = runCatching { Url(second) }.getOrNull() ?: return false
+        return firstUrl.protocol.name.equals(secondUrl.protocol.name, ignoreCase = true) &&
+            firstUrl.host.equals(secondUrl.host, ignoreCase = true) &&
+            firstUrl.port == secondUrl.port
+    }
 }
 
 /** DLNA renderer control over UPnP AVTransport (playback) and RenderingControl (volume) SOAP. */
 class DlnaRenderer(private val client: HttpClient) {
     private val tag = "DlnaRenderer"
+    private val capabilityClient = client.config { followRedirects = false }
 
     suspend fun fetchDeviceDescription(usn: String, location: String): DlnaDevice? {
         val xml = runCatching { client.get(location).bodyAsText() }.getOrNull() ?: return null
         return DlnaDeviceDescription.parse(usn, location, xml)
     }
 
-    /** True when the renderer accepted the URI (SOAP round-trip succeeded). */
+    suspend fun sinkProtocolInfo(device: DlnaDevice): String? {
+        val url = device.connectionManagerUrl ?: return null
+        if (!DlnaDeviceDescription.sameOrigin(device.location, url)) return null
+        val xml = postForBody(
+            url,
+            DlnaSoap.CONNECTION_MANAGER_TYPE,
+            "GetProtocolInfo",
+            DlnaSoap.getProtocolInfoBody(),
+            device.friendlyName,
+            requestClient = capabilityClient,
+        ) ?: return null
+        return DlnaSoap.parseSinkProtocolInfo(xml)
+    }
+
+    suspend fun setAvTransportUri(device: DlnaDevice, media: PreparedCastMedia): Boolean = runCatching {
+        val response = client.post(device.controlUrl) {
+            contentType(ContentType.Text.Xml)
+            userAgent("Rigel/1.0")
+            header("SOAPACTION", "\"${DlnaSoap.SERVICE_TYPE}#SetAVTransportURI\"")
+            setBody(DlnaSoap.setAvTransportUriBody(media))
+        }
+        response.status.value in 200..299
+    }.getOrDefault(false)
+
     suspend fun setAvTransportUri(device: DlnaDevice, uri: String, title: String?): Boolean {
         val body = DlnaSoap.setAvTransportUriBody(uri, title)
         return runCatching {
@@ -176,9 +219,10 @@ class DlnaRenderer(private val client: HttpClient) {
         action: String,
         body: String,
         deviceName: String,
+        requestClient: HttpClient = client,
     ): String? {
         return runCatching {
-            val response = client.post(serviceUrl) {
+            val response = requestClient.post(serviceUrl) {
                 contentType(ContentType.Text.Xml)
                 userAgent("Rigel/1.0")
                 header("SOAPACTION", "\"$serviceType#$action\"")

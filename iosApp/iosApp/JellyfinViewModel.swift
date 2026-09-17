@@ -29,12 +29,10 @@ final class JellyfinViewModel: ObservableObject {
     @Published private(set) var searchBusy = false
     @Published private(set) var searchError: String?
 
-    @Published private(set) var sessions: [JellyfinSession] = []
 
     private var connectTask: Task<Void, Never>?
     private var browseTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
-    private var sessionsTask: Task<Void, Never>?
     private var playbackTask: Task<Void, Never>?
 
     private var settings: SettingsStore { RigelCore.shared.settings }
@@ -73,6 +71,8 @@ final class JellyfinViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
             busy = false
             if let auth {
+                let previousServer = settings.jellyfinServer()
+                if previousServer != server { SwiftOutputSelection.shared.clearJellyfinServer(serverBase: previousServer) }
                 settings.setJellyfinServer(v: server)
                 settings.setJellyfinUsername(v: username)
                 settings.setJellyfinToken(v: auth.token)
@@ -80,7 +80,6 @@ final class JellyfinViewModel: ObservableObject {
                 self.password = ""
                 loadedOnce = false
                 items = []
-                sessions = []
                 searchResults = []
                 searchPerformed = false
                 searchError = nil
@@ -95,11 +94,12 @@ final class JellyfinViewModel: ObservableObject {
 
     func disconnect() {
         invalidateInFlight()
-        settings.setJellyfinToken(v: "")
         busy = false
         searchBusy = false
+        SwiftOutputSelection.shared.clearJellyfinServer(serverBase: settings.jellyfinServer())
+        password = ""
+        settings.setJellyfinToken(v: "")
         items = []
-        sessions = []
         parentId = nil
         parentName = nil
         loadedOnce = false
@@ -127,9 +127,6 @@ final class JellyfinViewModel: ObservableObject {
                 busy = false
                 loadedOnce = true
                 items = found
-                if sessions.isEmpty {
-                    loadSessions()
-                }
             } catch is CancellationError {
                 return
             } catch {
@@ -202,7 +199,7 @@ final class JellyfinViewModel: ObservableObject {
     /// Resolves the playback payload for an item and hands it to `open`.
     /// Subtitle lookup failure plays the item without tracks (logged), and a
     /// superseded play never opens the player.
-    func play(_ item: JellyfinItem, open: @escaping (String, String, [SubtitleTrack]) -> Void) {
+    func play(_ item: JellyfinItem, open: @escaping (String, String, [SubtitleTrack], String, String, String, String) -> Void) {
         let url = JellyfinApi.shared.streamUrl(base: base, itemId: item.id, token: token)
         busy = true
         playbackTask?.cancel()
@@ -222,44 +219,15 @@ final class JellyfinViewModel: ObservableObject {
             }
             guard !Task.isCancelled else { return }
             busy = false
-            open(url, item.name, tracks)
+            open(url, item.name, tracks, base, token, userId, item.id)
         }
     }
 
-    func castToSession(_ session: JellyfinSession) {
-        guard let firstItem = items.first(where: { !$0.isFolder }) else {
-            notice = "No playable item loaded"
-            noticeIsError = true
-            return
-        }
-        busy = true
-        Task {
-            let ok = await jellyfin.playToSessionAsync(
-                base: base,
-                token: token,
-                sessionId: session.id,
-                itemIds: [firstItem.id]
-            )
-            guard !Task.isCancelled else { return }
-            busy = false
-            notice = ok ? "Sent to \(session.deviceName)" : "Cast failed"
-            noticeIsError = !ok
-        }
-    }
 
-    private func loadSessions() {
-        sessionsTask?.cancel()
-        sessionsTask = Task {
-            let list = await jellyfin.sessionsAsync(base: base, token: token)
-            guard !Task.isCancelled else { return }
-            sessions = list
-        }
-    }
 
     private func invalidateInFlight() {
         browseTask?.cancel()
         searchTask?.cancel()
-        sessionsTask?.cancel()
         playbackTask?.cancel()
     }
 

@@ -5,7 +5,9 @@ import app.rigel.cast.CastCapabilities
 import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
 import app.rigel.cast.KodiDevice
+import app.rigel.cast.PreparedCastMedia
 import app.rigel.cast.ReceiverAdapter
+import app.rigel.output.OutputMediaProfiles
 import io.ktor.client.HttpClient
 
 object KodiAdapter : ReceiverAdapter {
@@ -19,15 +21,16 @@ object KodiAdapter : ReceiverAdapter {
         supportsVolume = true,
         note = null,
     )
+    override suspend fun mediaProfile(target: CastTarget, client: HttpClient) =
+        OutputMediaProfiles.optimisticHttp((target as CastTarget.Kodi).name)
 
     override suspend fun cast(
         target: CastTarget,
-        url: String,
-        title: String,
+        media: PreparedCastMedia,
         client: HttpClient,
     ): CastResult {
         val device = (target as CastTarget.Kodi).device
-        val ok = KodiRenderer(client).launch(device.endpoint, url)
+        val ok = KodiRenderer(client).launch(device.endpoint, media.url)
         return if (ok) CastResult.Sent("Sent to ${target.name}") else CastResult.Rejected("Kodi rejected the URL")
     }
 

@@ -1,10 +1,64 @@
 import SwiftUI
 import UIKit
+import AVFAudio
 import ComposeApp
 
+@MainActor
+final class AirPlayRouteMonitor: NSObject {
+    static func routeChanged(currentIdentity: String, routeId: String) -> Bool {
+        currentIdentity != "airplay:" + routeId
+    }
+    private let session = AVAudioSession.sharedInstance()
+    private var observer: NSObjectProtocol?
+
+    override init() {
+        super.init()
+        observer = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: session,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.sync() }
+        }
+        sync()
+    }
+
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    func sync() {
+        let airPlay = session.currentRoute.outputs.first { $0.portType == .airPlay }
+        let selection = SwiftOutputSelection.shared.snapshot()
+        let playerState = SwiftPlayer.shared.snapshot()
+        let activePlayback = playerState.phase != .idle &&
+            playerState.phase != .error &&
+            playerState.sourceUrl != nil
+        let livePositionMs = SwiftPlayer.shared.currentPositionMs()
+        if let airPlay {
+            let routeChanged = Self.routeChanged(currentIdentity: selection.identityKey, routeId: airPlay.uid)
+            SwiftOutputSelection.shared.selectAirPlay(
+                routeId: airPlay.uid,
+                name: airPlay.portName
+            )
+            if activePlayback && routeChanged {
+                SwiftPlayer.shared.selectAirPlay(
+                    routeId: airPlay.uid,
+                    name: airPlay.portName,
+                    positionMs: livePositionMs
+                )
+            }
+        } else if selection.kind == .airplay {
+            if activePlayback {
+                SwiftPlayer.shared.selectLocal(positionMs: livePositionMs)
+            } else {
+                SwiftOutputSelection.shared.selectLocal()
+            }
+        }
+    }
+}
+
 final class AppDelegate: NSObject, UIApplicationDelegate {
-    /// App-wide orientation gate. `.allButUpsideDown` matches the Info.plist
-    /// mask; the player temporarily narrows it to landscape.
     static var orientationLock: UIInterfaceOrientationMask = .allButUpsideDown
 
     func application(
@@ -19,17 +73,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 struct RigelApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var player: PlayerModel
+    private let airPlayRouteMonitor: AirPlayRouteMonitor
 
     init() {
-        // PlayerModel() touches RigelCore (Kermit "app start" logs), so build it
-        // here, after the launch marker — a property default value would run
-        // before init()'s body and reverse the intended log order.
         NSLog("[RigelApp] launch pid=%d", getpid())
-        _player = StateObject(wrappedValue: PlayerModel())
         BridgeRegistry.register()
+        airPlayRouteMonitor = AirPlayRouteMonitor()
+        _player = StateObject(wrappedValue: PlayerModel())
         RigelIntake.shared.attach(controller: RigelCore.shared.controller)
-        // Test/automation hook: accept a rigel:// URL as a launch argument
-        // (avoids the system scheme-confirmation dialog in headless e2e runs).
         for arg in ProcessInfo.processInfo.arguments {
             if arg.hasPrefix("rigel://") {
                 NSLog("[RigelApp] launch-arg %@", arg)

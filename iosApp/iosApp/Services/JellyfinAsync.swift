@@ -131,9 +131,9 @@ extension JellyfinClient {
         }
     }
 
-    func sessionsAsync(base: String, token: String) async -> [JellyfinSession] {
+    func sessionsAsync(base: String, token: String, userId: String) async -> [JellyfinSession] {
         (try? await JellyfinAsync.run {
-            self.sessions(base: base, token: token, completionHandler: $0)
+            self.sessions(base: base, token: token, userId: userId, completionHandler: $0)
         }) ?? []
     }
 
@@ -141,7 +141,8 @@ extension JellyfinClient {
         base: String,
         token: String,
         sessionId: String,
-        itemIds: [String]
+        itemIds: [String],
+        startPositionTicks: Int64 = 0
     ) async -> Bool {
         let ok = try? await JellyfinAsync.run {
             self.playToSession(
@@ -149,6 +150,7 @@ extension JellyfinClient {
                 token: token,
                 sessionId: sessionId,
                 itemIds: itemIds,
+                startPositionTicks: startPositionTicks,
                 completionHandler: $0
             )
         }

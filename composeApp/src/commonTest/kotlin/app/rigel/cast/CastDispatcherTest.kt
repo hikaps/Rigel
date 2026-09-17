@@ -43,6 +43,7 @@ private class FakeBridges(private val lan: String?) :
         sourceUrl: String,
         headers: Map<String, String>,
         mode: String,
+        passthroughAudioCodecs: List<String>,
         startOffsetMs: Long,
         subtitleTracks: List<app.rigel.bridge.SubtitleTrack>,
         onReady: (String?, String?) -> Unit,
@@ -58,12 +59,17 @@ private class FakeBridges(private val lan: String?) :
 /** Records cast-active mirroring without a PlayerController. */
 private class RecordingPort : CastPlaybackPort {
     var active = false
+    var stopRequested = false
     override fun setCastActive(active: Boolean) {
         this.active = active
     }
 
     override fun remoteCastUrl(): String? = null
     override fun remoteCastTitle(): String = "Stream"
+    override fun stopPlayback() {
+        stopRequested = true
+        active = false
+    }
 }
 
 class CastDispatcherTest {
@@ -362,7 +368,7 @@ class CastDispatcherTest {
         assertEquals(
             listOf(
                 "http://10.0.0.9:8060/query/apps",
-                "http://10.0.0.9:8060/input/15985",
+                "http://10.0.0.9:8060/input/15985?t=v&u=http%3A%2F%2Forigin%2Fv.mp4&k=%28null%29&videoName=Movie&videoFormat=mp4",
                 "http://10.0.0.9:8060/keypress/Pause",
                 "http://10.0.0.9:8060/keypress/Home",
             ),
@@ -503,5 +509,28 @@ class CastDispatcherTest {
         assertNotNull(inFlightAttempt)
         assertFalse(session.commitActive(target, inFlightAttempt))
         assertNull(session.activeTarget())
+    }
+    @Test
+    fun stopActiveReturnsRemoteResultAfterLocalTeardown() {
+        val engine = MockEngine { request ->
+            if (request.headers["SOAPACTION"]?.contains("#Stop") == true) {
+                respond("", HttpStatusCode.InternalServerError)
+            } else {
+                respond(
+                    content = "<ok/>",
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "text/xml"),
+                )
+            }
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(DlnaDevice("stop-1", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
+
+        assertTrue(runBlocking { CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) } is CastResult.Sent)
+        val stopped = runBlocking { CastDispatcher.stopActive(client) }
+
+        assertFalse(stopped)
+        assertTrue(port.stopRequested)
+        assertNull(CastDispatcher.activeTarget())
     }
 }

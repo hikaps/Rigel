@@ -1,10 +1,13 @@
 package app.rigel.cast.chrome
 
+import app.rigel.cast.CastMediaKind
+import app.rigel.cast.CastMediaOrigin
 import app.rigel.cast.CastResult
 import app.rigel.cast.ChromeDevice
+import app.rigel.cast.PreparedCastMedia
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.resume
@@ -18,9 +21,15 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
     private val senderId = "sender-rigel"
     private val receiverId = "receiver-0"
 
-    suspend fun launch(device: ChromeDevice, url: String, title: String): CastResult = try {
+    suspend fun launch(device: ChromeDevice, url: String, title: String): CastResult =
+        launch(
+            device,
+            PreparedCastMedia(url, title, "video/mp4", "mp4", CastMediaKind.VIDEO, false, CastMediaOrigin.SOURCE),
+        )
+
+    suspend fun launch(device: ChromeDevice, media: PreparedCastMedia): CastResult = try {
         withTimeout(15_000) {
-            launchInternal(device, url, title)
+            launchInternal(device, media)
         }
     } catch (_: TimeoutCancellationException) {
         CastResult.Rejected("Chromecast did not confirm playback")
@@ -67,7 +76,7 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
         false
     }
 
-    private suspend fun launchInternal(device: ChromeDevice, url: String, title: String): CastResult {
+    private suspend fun launchInternal(device: ChromeDevice, media: PreparedCastMedia): CastResult {
         val events = Channel<Incoming>(Channel.UNLIMITED)
         val connection = open(
             device.host,
@@ -113,10 +122,11 @@ class ChromeRenderer(private val bridge: ChromecastBridge) {
                 mediaTransportId,
                 ChromePayloads.NS_MEDIA,
                 ChromePayloads.load(
-                    url = url,
-                    title = title,
-                    contentType = ChromePayloads.contentTypeFor(url),
+                    url = media.url,
+                    title = media.title,
+                    contentType = media.contentType,
                     requestId = loadRequestId,
+                    streamType = if (media.isLive) "LIVE" else "BUFFERED",
                 ),
             )
 

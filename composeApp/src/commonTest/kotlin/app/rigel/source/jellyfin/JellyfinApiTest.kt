@@ -49,25 +49,15 @@ class JellyfinApiTest {
     }
 
     @Test
-    fun playCommandBodies() {
+    fun playUrlEncodesSessionItemsAndParameters() {
         assertEquals(
-            """{"ItemIds":["a","b"],"PlayCommand":"PlayNow","StartPositionTicks":0}""",
-            JellyfinApi.playCommand(listOf("a", "b")),
-        )
-        assertTrue(JellyfinApi.playCommand(listOf("x")).contains("\"PlayCommand\":\"PlayNow\""))
-    }
-
-    @Test
-    fun jsonEscapeEscapesQuotesAndBackslashes() {
-        assertEquals("""a\"b\\c""", JellyfinApi.jsonEscape("""a"b\c"""))
-    }
-
-    @Test
-    fun playCommandInterpolatesIdsVerbatim() {
-        // ItemIds are server-assigned GUIDs; the builder does not JSON-escape them.
-        assertEquals(
-            """{"ItemIds":["a"b"],"PlayCommand":"PlayNow","StartPositionTicks":0}""",
-            JellyfinApi.playCommand(listOf("""a"b""")),
+            "http://jf:8096/Sessions/s%2F1/Playing?playCommand=PlayNow&itemIds=a%20b,c%2Fd&startPositionTicks=42",
+            JellyfinApi.playUrl(
+                base = "http://jf:8096/",
+                sessionId = "s/1",
+                itemIds = listOf("a b", "c/d"),
+                startPositionTicks = 42,
+            ),
         )
     }
 
@@ -85,5 +75,11 @@ class JellyfinApiTest {
             """MediaBrowser Client="C", Device="D", DeviceId="dev", Version="9.9"""",
             JellyfinApi.embyAuthHeader("dev", client = "C", device = "D", version = "9.9"),
         )
+    }
+
+    @Test
+    fun normalizeServerBasePreservesIpv6AuthorityBrackets() {
+        assertEquals("http://[::1]:8096", JellyfinApi.normalizeServerBase("http://[::1]:8096/"))
+        assertEquals("https://[2001:db8::1]/jellyfin", JellyfinApi.normalizeServerBase("HTTPS://[2001:DB8::1]/jellyfin/"))
     }
 }

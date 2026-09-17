@@ -112,6 +112,7 @@ final class RigelPlayerViewController: UIViewController {
     private var loadedTitle: String?
     private var startOffsetSeconds: Double = 0
     private var isProxyPlayback = false
+    private var resumeSeekApplied = false
     private var selectedExternalSubtitleUrl: String?
     private var selectedExternalSubtitleOption: AVMediaSelectionOption?
     private var proxyExternalSubtitleUrl: String?
@@ -1108,6 +1109,7 @@ final class RigelPlayerViewController: UIViewController {
         knownDurationSeconds = durationSeconds
         self.startOffsetSeconds = max(0, startOffsetSeconds.isFinite ? startOffsetSeconds : 0)
         isProxyPlayback = isProxy
+        resumeSeekApplied = false
         self.selectedExternalSubtitleUrl = selectedExternalSubtitleUrl
         proxyExternalSubtitleUrl = isProxy ? selectedExternalSubtitleUrl : nil
         applySubtitleAppearance(SubtitlePreferences.appearance)
@@ -1220,8 +1222,9 @@ final class RigelPlayerViewController: UIViewController {
 
     private var mediaSeconds: Double {
         let current = player?.currentTime().seconds ?? 0
-        guard current.isFinite else { return startOffsetSeconds }
-        return max(0, startOffsetSeconds + current)
+        let offset = isProxyPlayback ? startOffsetSeconds : 0
+        guard current.isFinite else { return offset }
+        return max(0, offset + current)
     }
 
     /// Feed the live export session the local playhead (≈1 Hz) so it can pace
@@ -1414,6 +1417,13 @@ final class RigelPlayerViewController: UIViewController {
         deactivateAudioSession()
     }
 
+
+    func currentPositionMs() -> Int64? {
+        guard let player else { return nil }
+        let seconds = player.currentTime().seconds + (isProxyPlayback ? startOffsetSeconds : 0)
+        guard seconds.isFinite, seconds >= 0 else { return nil }
+        return Int64((seconds * 1000).rounded(.down))
+    }
     private func tearDownPlayer() {
         externalPlaybackObservation?.invalidate()
         externalPlaybackObservation = nil
@@ -1444,6 +1454,7 @@ final class RigelPlayerViewController: UIViewController {
         knownDurationSeconds = nil
         startOffsetSeconds = 0
         isProxyPlayback = false
+        resumeSeekApplied = false
         phaseBufferingRequested = false
         lastReportedNativeBuffering = false
         lastRenderedPlaying = false
@@ -1531,6 +1542,11 @@ final class RigelPlayerViewController: UIViewController {
             pollTimer = nil
             events.onError(message: detail)
         case .readyToPlay:
+            if !isProxyPlayback && !resumeSeekApplied && startOffsetSeconds > 0 {
+                resumeSeekApplied = true
+                let target = CMTime(seconds: startOffsetSeconds, preferredTimescale: 600)
+                player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
             if player.timeControlStatus == .playing, !notifiedPlaying {
                 notifiedPlaying = true
                 NSLog("[RigelPlayer] playing")

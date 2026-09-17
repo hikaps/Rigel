@@ -45,6 +45,11 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         vc = nil
     }
 
+    func currentPositionMs() -> KotlinLong? {
+        guard let position = vc?.currentPositionMs() else { return nil }
+        return KotlinLong(longLong: position)
+    }
+
     /// Stops the given controller (per-player disposal is always safe; audio
     /// session release is reference-counted). Returns true only when that
     /// controller was still the bridge's current one, letting callers discard

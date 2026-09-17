@@ -1,6 +1,7 @@
 package app.rigel.cast.dlna
 
 import app.rigel.cast.DlnaDevice
+import app.rigel.cast.CastTarget
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -214,5 +215,81 @@ class DlnaRendererTest {
         assertTrue(requests[0].first.contains("RenderingControl:1#GetMute"))
         assertTrue(requests[1].first.contains("RenderingControl:1#SetMute"))
         assertTrue(requests[1].second.contains("<DesiredMute>1</DesiredMute>"))
+    }
+
+    @Test
+    fun httpGetTransportMapsToHttpAndHttpsSchemes() = kotlinx.coroutines.test.runTest {
+        val sink = "<Sink>http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_BL_CIF15_AAC,http-get:*:audio/mp4:AAC_ISO</Sink>"
+        val engine = MockEngine { respond(sink, HttpStatusCode.OK) }
+        val target = CastTarget.Dlna(device.copy(connectionManagerUrl = "http://10.0.0.5:1234/connection"))
+
+        val profile = DlnaAdapter.mediaProfile(target, HttpClient(engine))
+
+        assertTrue(profile.directSchemes.contains("http"))
+        assertTrue(profile.directSchemes.contains("https"))
+        assertFalse(profile.directSchemes.contains("http-get"))
+        assertTrue(profile.directAudioCodecs.contains("aac"))
+        assertEquals(setOf("h264"), profile.hlsVideoCodecs)
+        assertEquals(setOf("aac"), profile.hlsAudioCodecs)
+        assertTrue(profile.supportsHlsWebVtt)
+        assertEquals(1, engine.requestHistory.size)
+    }
+
+    @Test
+    fun mediaProfilePreservesAdvertisedHlsEntries() = kotlinx.coroutines.test.runTest {
+        val sink = "<Sink>http-get:*:video/mpegurl:AVC,http-get:*:audio/mpegurl:AAC</Sink>"
+        val engine = MockEngine { respond(sink, HttpStatusCode.OK) }
+        val target = CastTarget.Dlna(device.copy(connectionManagerUrl = "http://10.0.0.5:1234/connection"))
+
+        val profile = DlnaAdapter.mediaProfile(target, HttpClient(engine))
+
+        assertEquals(setOf("h264"), profile.hlsVideoCodecs)
+        assertEquals(setOf("aac"), profile.hlsAudioCodecs)
+        assertTrue(profile.supportsHlsWebVtt)
+        assertTrue(profile.directContainers.contains("m3u8"))
+    }
+
+    @Test
+    fun sinkProtocolInfoRejectsConnectionManagerOutsideDiscoveryOrigin() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { respond("<unused/>", HttpStatusCode.OK) }
+        val renderer = DlnaRenderer(HttpClient(engine))
+        val maliciousUrls = listOf(
+            "http://127.0.0.1:9999/connection",
+            "http://10.0.0.6:1234/connection",
+            "https://10.0.0.5:1234/connection",
+        )
+
+        for (url in maliciousUrls) {
+            assertNull(renderer.sinkProtocolInfo(device.copy(connectionManagerUrl = url)))
+        }
+        assertEquals(0, engine.requestHistory.size)
+    }
+
+    @Test
+    fun mediaProfileDoesNotInventHlsCodecsForUnknownAdvertisedEntry() = kotlinx.coroutines.test.runTest {
+        val sink = "<Sink>http-get:*:video/mpegurl:UNKNOWN</Sink>"
+        val engine = MockEngine { respond(sink, HttpStatusCode.OK) }
+        val target = CastTarget.Dlna(device.copy(connectionManagerUrl = "http://10.0.0.5:1234/connection"))
+
+        val profile = DlnaAdapter.mediaProfile(target, HttpClient(engine))
+
+        assertTrue(profile.directContainers.contains("m3u8"))
+        assertTrue(profile.hlsVideoCodecs.isEmpty())
+        assertTrue(profile.hlsAudioCodecs.isEmpty())
+        assertFalse(profile.supportsHlsWebVtt)
+    }
+
+    @Test
+    fun sinkProtocolInfoDoesNotFollowRedirects() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine {
+            respond(
+                "",
+                HttpStatusCode.TemporaryRedirect,
+                headersOf(HttpHeaders.Location, "http://10.0.0.6:1234/connection"),
+            )
+        }
+        val renderer = DlnaRenderer(HttpClient(engine))
+
+        assertNull(renderer.sinkProtocolInfo(device))
     }
 }

@@ -29,6 +29,11 @@ data class ProbeResult(
     val pixFmt: String? = null,
     val width: Int = 0,
     val height: Int = 0,
+    val videoProfile: String? = null,
+    val videoLevel: Int? = null,
+    val frameRate: Double? = null,
+    val bitRate: Long? = null,
+    val maxAudioChannels: Int = 0,
 )
 
 interface DiscoveryBridge {
@@ -45,6 +50,7 @@ interface TranscodeBridge {
         sourceUrl: String,
         headers: Map<String, String>,
         mode: String,
+        passthroughAudioCodecs: List<String>,
         startOffsetMs: Long,
         subtitleTracks: List<SubtitleTrack>,
         onReady: (relativePlaylistPath: String?, errorMsg: String?) -> Unit,

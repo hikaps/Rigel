@@ -1,7 +1,11 @@
 package app.rigel.player
 
 import app.rigel.cast.CastDispatcher
+import app.rigel.cast.CastMediaKind
+import app.rigel.cast.CastMediaOrigin
 import app.rigel.cast.CastPlaybackPort
+import app.rigel.cast.CastTarget
+import app.rigel.cast.PreparedCastMedia
 
 import app.rigel.bridge.Bridges
 import app.rigel.bridge.ProbeResult
@@ -9,10 +13,22 @@ import app.rigel.bridge.SubtitleTrack
 
 import app.rigel.gateway.FormatRouter
 import app.rigel.gateway.PlaybackRoute
+import app.rigel.gateway.RouteDecision
 import app.rigel.intake.IntakeRequest
+import app.rigel.intake.JellyfinPlaybackContext
 import app.rigel.intake.UrlIntake
+import app.rigel.output.DefaultOutputCapabilityResolver
+import app.rigel.output.OutputCapabilityResolver
+import app.rigel.output.OutputKind
+import app.rigel.output.OutputMediaProfile
+import app.rigel.output.OutputMediaProfiles
+import app.rigel.output.OutputSelection
+import app.rigel.output.PlaybackDestination
+import app.rigel.output.RemoteUrlPolicy
 import app.rigel.settings.RouteOverride
 import app.rigel.settings.SettingsStore
+import app.rigel.source.jellyfin.JellyfinApi
+import app.rigel.source.jellyfin.JellyfinClient
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,12 +40,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlin.random.Random
 
-enum class PlayerPhase { IDLE, PROBING, PREPARING_PROXY, BUFFERING, PLAYING, ERROR }
+enum class PlayerPhase { IDLE, PROBING, PREPARING_PROXY, CONNECTING_OUTPUT, BUFFERING, PLAYING, ERROR }
 
 data class PlayerUiState(
     val phase: PlayerPhase = PlayerPhase.IDLE,
     val sourceUrl: String? = null,
     val filename: String? = null,
+    val title: String? = null,
     val subtitleTracks: List<SubtitleTrack> = emptyList(),
     val selectedExternalSubtitleUrl: String? = null,
     val route: PlaybackRoute? = null,
@@ -39,6 +56,11 @@ data class PlayerUiState(
     val castActive: Boolean = false,
     val startPositionMs: Long = 0,
     val sender: String? = null,
+    val destinationKind: OutputKind = OutputKind.LOCAL,
+    val destinationName: String = "This iPhone",
+    val destinationId: String = "local:iphone",
+    val remotePlayback: Boolean = false,
+    val planDetail: String? = null,
 ) {
 
 
@@ -66,6 +88,9 @@ data class PlayerUiState(
  */
 class PlayerController(
     private val settings: SettingsStore,
+    private val outputSelection: OutputSelection = OutputSelection(),
+    private val capabilityResolver: OutputCapabilityResolver = DefaultOutputCapabilityResolver,
+    private val jellyfin: JellyfinClient? = null,
 ) : CastPlaybackPort {
     private val tag = "PlayerController"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -73,8 +98,15 @@ class PlayerController(
     private var loadGeneration = 0L
     private var pendingJob: Job? = null
     private var pendingSessionId: String? = null
-    /** Subtitle URL baked into the live proxy playlist, if any. */
     private var proxySessionSubtitleUrl: String? = null
+    private var jellyfinStopJob: Job? = null
+    private var receiverStopJob: Job? = null
+    private var pendingReceiverTarget: CastTarget? = null
+    private var pendingReceiverStopJob: Job? = null
+    private var currentDestination: PlaybackDestination = PlaybackDestination.Local
+    private var currentRequest: IntakeRequest? = null
+    private var currentPassthroughAudioCodecs: Set<String> = OutputMediaProfiles.local.directAudioCodecs
+    private var currentOutputProfile: OutputMediaProfile? = null
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
@@ -95,26 +127,126 @@ class PlayerController(
         loadRequest(request.copy(title = title, subtitleTracks = finalTracks))
         return true
     }
+    fun loadJellyfinItem(
+        rawUrl: String,
+        title: String,
+        subtitleTracks: List<SubtitleTrack>,
+        baseUrl: String,
+        token: String,
+        userId: String,
+        itemId: String,
+    ): Boolean {
+        val request = UrlIntake.parse(rawUrl) ?: return false
+        loadRequest(
+            request.copy(
+                title = title,
+                subtitleTracks = subtitleTracks,
+                jellyfinContext = JellyfinPlaybackContext(baseUrl, token, userId, itemId),
+            ),
+        )
+        return true
+    }
 
-
-    fun loadRequest(request: IntakeRequest) {
-        invalidatePendingWork()
-        CastDispatcher.clearActive()
+    fun loadRequest(request: IntakeRequest, destinationOverride: PlaybackDestination? = null) {
+        val outstandingStop = jellyfinStopJob
+        val outstandingReceiverStop = receiverStopJob
+        val staleStop = stopJellyfinIfActive()
+        val pendingReceiverStop = invalidatePendingWork()
+        val detachedTarget = CastDispatcher.detachActive()
+        val detachedStop = detachedTarget?.let(::stopDetachedReceiver)
         successCallbackUrl = request.successCallbackUrl
-        settings.addToLinkHistory(request.sourceUrl, request.title ?: request.filename)
+        val resolvedTitle = resolveTitle(request)
+        settings.addToLinkHistory(request.sourceUrl, resolvedTitle)
         directFallbackUsed = false
+        currentRequest = request
+        currentDestination = destinationOverride ?: outputSelection.snapshot().destination
+        currentPassthroughAudioCodecs = OutputMediaProfiles.local.directAudioCodecs
+        currentOutputProfile = null
         val generation = loadGeneration
         _uiState.value = PlayerUiState(
             phase = PlayerPhase.PROBING,
             sourceUrl = request.sourceUrl,
             filename = request.filename,
+            title = resolvedTitle,
             subtitleTracks = request.subtitleTracks,
             selectedExternalSubtitleUrl = request.subtitleTracks.firstOrNull { it.url.isNotBlank() }?.url,
             castActive = false,
             startPositionMs = 0,
             sender = request.xSource,
+            destinationKind = currentDestination.kind,
+            destinationName = currentDestination.displayName,
+            destinationId = currentDestination.identityKey,
         )
-        pendingJob = scope.launch { probeAndRoute(request, generation) }
+        val jellyfinTarget = (currentDestination as? PlaybackDestination.Receiver)?.target
+            as? CastTarget.JellyfinSessionTarget
+        if (jellyfinTarget != null) {
+            _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
+            pendingJob = scope.launch {
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
+                playJellyfin(request, generation, jellyfinTarget)
+            }
+        } else {
+            pendingJob = scope.launch {
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
+                probeAndRoute(request, generation)
+            }
+        }
+    }
+    fun selectLocal(positionMs: Long) = selectDestination(PlaybackDestination.Local, positionMs)
+
+    fun selectAirPlay(routeId: String, name: String, positionMs: Long) =
+        selectDestination(PlaybackDestination.AirPlay(routeId, name), positionMs)
+
+    fun selectReceiver(target: CastTarget, positionMs: Long) =
+        selectDestination(PlaybackDestination.Receiver(target), positionMs)
+
+    private fun selectDestination(destination: PlaybackDestination, positionMs: Long) {
+        when (destination) {
+            PlaybackDestination.Local -> outputSelection.selectLocal()
+            is PlaybackDestination.AirPlay -> outputSelection.selectAirPlay(destination.routeId, destination.name)
+            is PlaybackDestination.Receiver -> outputSelection.selectReceiver(destination.target)
+        }
+        val request = currentRequest ?: return
+        val current = _uiState.value
+        val probe = current.probe
+        // Leaving a Jellyfin destination must stop that session too; both
+        // superseded stops complete before replacement playback is issued.
+        val outstandingStop = jellyfinStopJob
+        val outstandingReceiverStop = receiverStopJob
+        val staleStop = stopJellyfinIfActive()
+        val detachedStop = CastDispatcher.detachActive()
+            ?.let(::stopDetachedReceiver)
+        val pendingReceiverStop = invalidatePendingWork()
+        currentDestination = destination
+        currentOutputProfile = null
+        val duration = probe?.durationMs
+        val resume = if (duration != null && duration > 0) positionMs.coerceIn(0, duration) else positionMs.coerceAtLeast(0)
+        val generation = loadGeneration
+        _uiState.value = current.copy(
+            phase = PlayerPhase.PROBING,
+            proxyUrl = null,
+            castActive = false,
+            remotePlayback = false,
+            destinationKind = destination.kind,
+            destinationName = destination.displayName,
+            destinationId = destination.identityKey,
+            startPositionMs = resume,
+            error = null,
+        )
+        val jellyfinTarget = (destination as? PlaybackDestination.Receiver)?.target
+            as? CastTarget.JellyfinSessionTarget
+        if (jellyfinTarget != null) {
+            _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
+            pendingJob = scope.launch {
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
+                playJellyfin(request, generation, jellyfinTarget)
+            }
+        } else {
+            pendingJob = scope.launch {
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
+                probeAndRoute(request, generation, probe)
+            }
+        }
     }
 
     override fun setCastActive(active: Boolean) {
@@ -160,7 +292,7 @@ class PlayerController(
             val route = current.route ?: PlaybackRoute.REMUX
             val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
                 ?: positionMs.coerceAtLeast(0)
-            invalidatePendingWork()
+            val pendingReceiverStop = invalidatePendingWork()
             directFallbackUsed = false
             val generation = loadGeneration
             _uiState.value = cleared.copy(
@@ -169,7 +301,10 @@ class PlayerController(
                 proxyUrl = null,
                 startPositionMs = target,
             )
-            pendingJob = scope.launch { prepareProxy(probe, route, generation) }
+            pendingJob = scope.launch {
+                awaitStaleStops(pendingReceiverStop)
+                prepareProxy(probe, route, generation)
+            }
             return
         }
         if (track.url.isBlank()) return
@@ -193,14 +328,28 @@ class PlayerController(
             return
         }
 
-        val route = FormatRouter.decide(probe, hasSelectedExternalSubtitle = true)
+        val routeDecision = FormatRouter.decide(
+            probe = probe,
+            profile = currentOutputProfile ?: profileForCurrentDestination(),
+            hasSelectedExternalSubtitle = true,
+            preference = settings.routeOverride(),
+        )
+        val playable = routeDecision as? RouteDecision.Playable ?: run {
+            _uiState.value = selected.copy(
+                phase = PlayerPhase.ERROR,
+                error = (routeDecision as RouteDecision.Unsupported).message,
+            )
+            return
+        }
+        currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
+        val route = playable.route
         if (route == PlaybackRoute.DIRECT) {
             _uiState.value = selected
             return
         }
         val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
             ?: positionMs.coerceAtLeast(0)
-        invalidatePendingWork()
+        val pendingReceiverStop = invalidatePendingWork()
         directFallbackUsed = false
         val generation = loadGeneration
         _uiState.value = selected.copy(
@@ -209,7 +358,10 @@ class PlayerController(
             proxyUrl = null,
             startPositionMs = target,
         )
-        pendingJob = scope.launch { prepareProxy(probe, route, generation) }
+        pendingJob = scope.launch {
+            awaitStaleStops(pendingReceiverStop)
+            prepareProxy(probe, route, generation)
+        }
     }
 
     fun seek(positionMs: Long, durationMs: Long) {
@@ -234,7 +386,7 @@ class PlayerController(
         val route = current.route ?: return
         val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
             ?: positionMs.coerceAtLeast(0)
-        invalidatePendingWork()
+        val pendingReceiverStop = invalidatePendingWork()
         val generation = loadGeneration
         directFallbackUsed = false
         _uiState.value = current.copy(
@@ -242,11 +394,15 @@ class PlayerController(
             error = null,
             startPositionMs = target,
         )
-        pendingJob = scope.launch { prepareProxy(probe, route, generation) }
+        pendingJob = scope.launch {
+            awaitStaleStops(pendingReceiverStop)
+            prepareProxy(probe, route, generation)
+        }
     }
 
-    private fun invalidatePendingWork() {
+    private fun invalidatePendingWork(): Job? {
         val sessionId = pendingSessionId ?: _uiState.value.proxyUrl?.let(::extractSessionId)
+        val cancellationStop = schedulePendingReceiverStop(pendingJob)
         loadGeneration += 1
         pendingJob?.cancel()
         pendingJob = null
@@ -256,13 +412,103 @@ class PlayerController(
         }
         pendingSessionId = null
         proxySessionSubtitleUrl = null
+        return cancellationStop
+    }
+
+    private fun schedulePendingReceiverStop(pending: Job?): Job? {
+        val target = pendingReceiverTarget
+        val previous = pendingReceiverStopJob
+        if (target == null) return previous
+        val job = scope.launch {
+            previous?.join()
+            pending?.join()
+            stopReceiverBestEffort(target)
+        }
+        pendingReceiverStopJob = job
+        job.invokeOnCompletion {
+            if (pendingReceiverStopJob === job) pendingReceiverStopJob = null
+        }
+        return job
+    }
+
+    private suspend fun stopReceiverBestEffort(target: CastTarget) {
+        runCatching {
+            if (CastDispatcher.activeTarget()?.identityKey == target.identityKey) {
+                CastDispatcher.detachActive()
+            }
+            CastDispatcher.stopDetached(target)
+        }
+    }
+
+    private suspend fun castReceiver(target: CastTarget, media: PreparedCastMedia): app.rigel.cast.CastResult {
+        pendingReceiverTarget = target
+        return try {
+            CastDispatcher.cast(target, media)
+        } finally {
+            if (pendingReceiverTarget?.identityKey == target.identityKey) pendingReceiverTarget = null
+        }
     }
 
     private fun isCurrent(generation: Long): Boolean = generation == loadGeneration
+    private suspend fun playJellyfin(
+        request: IntakeRequest,
+        generation: Long,
+        target: CastTarget.JellyfinSessionTarget,
+    ) {
+        val context = request.jellyfinContext
+        if (context == null) {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                error = "Jellyfin destinations only support Jellyfin library items",
+            )
+            return
+        }
+        val requestBase = JellyfinApi.normalizeServerBase(context.baseUrl)
+        if (requestBase != target.serverBase) {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                error = "Selected Jellyfin client belongs to a different server",
+            )
+            return
+        }
+        val client = jellyfin ?: run {
+            _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "Jellyfin client is not configured")
+            return
+        }
+        val startPositionTicks = JellyfinApi.startPositionTicks(_uiState.value.startPositionMs)
+        val sent = runCatching {
+            client.playToSession(
+                context.baseUrl,
+                context.token,
+                target.session.id,
+                listOf(context.itemId),
+                startPositionTicks,
+            )
+        }.getOrDefault(false)
+        if (!isCurrent(generation)) return
+        if (sent) {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.PLAYING,
+                route = null,
+                proxyUrl = null,
+                remotePlayback = true,
+                castActive = true,
+                planDetail = "Jellyfin is choosing direct play or conversion",
+            )
+        } else {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                error = "Jellyfin could not start this item on ${target.name}",
+            )
+        }
+    }
 
-
-    private suspend fun probeAndRoute(request: IntakeRequest, generation: Long) {
-        val (probe, probeError) = Bridges.probe(request.sourceUrl, emptyMap())
+    private suspend fun probeAndRoute(
+        request: IntakeRequest,
+        generation: Long,
+        knownProbe: ProbeResult? = null,
+    ) {
+        val (probe, probeError) = knownProbe?.let { it to null } ?: Bridges.probe(request.sourceUrl, emptyMap())
         if (!isCurrent(generation)) return
         if (probe == null) {
             Logger.w(tag) { "probe failed: $probeError" }
@@ -275,42 +521,77 @@ class PlayerController(
         if (_uiState.value.selectedExternalSubtitleUrl != null && probe.videoCodec == null) {
             _uiState.value = _uiState.value.copy(selectedExternalSubtitleUrl = null)
         }
-        val hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null
-        val route = if (hasSelectedExternalSubtitle && probe.videoCodec != null) {
-            FormatRouter.decide(probe, hasSelectedExternalSubtitle = true)
-        } else {
-            when (val override = settings.routeOverride()) {
-                RouteOverride.DIRECT -> PlaybackRoute.DIRECT
-                RouteOverride.ALWAYS_PROXY -> PlaybackRoute.REMUX
-                RouteOverride.AUTO -> FormatRouter.decide(
-                    probe,
-                    hasSelectedExternalSubtitle = false,
-                )
-            }
+        val destination = currentDestination
+        if (destination is PlaybackDestination.Receiver && destination.target is CastTarget.JellyfinSessionTarget) {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                probe = probe,
+                error = "Jellyfin destinations only support Jellyfin library items",
+            )
+            return
         }
+        val profile = when (destination) {
+            PlaybackDestination.Local -> OutputMediaProfiles.local
+            is PlaybackDestination.AirPlay -> OutputMediaProfiles.airPlay(destination.displayName)
+            is PlaybackDestination.Receiver -> capabilityResolver.profileFor(destination.target)
+        }
+        currentOutputProfile = profile
+        val remoteTarget = (destination as? PlaybackDestination.Receiver)?.target
+        val remoteReachable = remoteTarget == null || RemoteUrlPolicy.isReceiverFetchable(request.sourceUrl, profile)
+        val hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null
+        val routeDecision = FormatRouter.decide(
+            probe = probe,
+            profile = profile,
+            hasSelectedExternalSubtitle = hasSelectedExternalSubtitle,
+            preference = settings.routeOverride(),
+            sourceIsRemotelyReachable = remoteReachable,
+        )
         if (!isCurrent(generation)) return
-        Logger.i(tag) { "route=$route container=${probe.container} video=${probe.videoCodec} audio=${probe.audioCodecs}" }
-        when (route) {
+        val playable = routeDecision as? RouteDecision.Playable ?: run {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                probe = probe,
+                error = (routeDecision as RouteDecision.Unsupported).message,
+            )
+            return
+        }
+        currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
+        Logger.i(tag) { "route=${playable.route} destination=${destination.displayName} container=${probe.container} video=${probe.videoCodec} audio=${probe.audioCodecs}" }
+        when (playable.route) {
             PlaybackRoute.DIRECT -> {
                 _uiState.value = _uiState.value.copy(
-                    phase = PlayerPhase.PLAYING,
+                    phase = if (remoteTarget == null) PlayerPhase.PLAYING else PlayerPhase.CONNECTING_OUTPUT,
                     route = PlaybackRoute.DIRECT,
                     proxyUrl = null,
                     probe = probe,
+                    planDetail = playable.detail,
                 )
+                if (remoteTarget == null) {
+                    return
+                }
+                dispatchRemoteDirect(remoteTarget, request.sourceUrl, probe, generation)
             }
             PlaybackRoute.REMUX, PlaybackRoute.TRANSCODE -> {
                 _uiState.value = _uiState.value.copy(
                     phase = PlayerPhase.PREPARING_PROXY,
-                    route = route,
+                    route = playable.route,
                     probe = probe,
+                    planDetail = playable.detail,
                 )
-                prepareProxy(probe, route, generation)
+                prepareProxy(probe, playable.route, generation, playable.passthroughAudioCodecs)
             }
         }
     }
-    private suspend fun prepareProxy(probe: ProbeResult, route: PlaybackRoute, generation: Long) {
+    private suspend fun prepareProxy(
+        probe: ProbeResult,
+        route: PlaybackRoute,
+        generation: Long,
+        passthroughAudioCodecs: Set<String> = currentPassthroughAudioCodecs,
+    ) {
         if (!isCurrent(generation)) return
+        // Rebuild paths (seek, subtitle change, retry, fallback) re-derive the
+        // receiver here so a remote session never silently drops to local.
+        val remoteTarget = (currentDestination as? PlaybackDestination.Receiver)?.target
         val sourceUrl = _uiState.value.sourceUrl ?: run {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "No source URL")
             return
@@ -340,18 +621,14 @@ class PlayerController(
             sourceUrl = sourceUrl,
             headers = emptyMap(),
             mode = route.name.lowercase(),
+            passthroughAudioCodecs = passthroughAudioCodecs.toList(),
             startOffsetMs = startOffsetMs,
             subtitleTracks = subtitleTracks,
             onError = { message ->
-                val error = if (selectedSubtitle) {
-                    "Could not prepare the selected subtitle"
-                } else {
-                    message
-                }
+                val error = if (selectedSubtitle) "Could not prepare the selected subtitle" else message
                 scope.launch { failProxySession(sessionId, generation, error) }
             },
         )
-
         if (!isCurrent(generation)) {
             Bridges.stopHlsSession(sessionId)
             if (pendingSessionId == sessionId) pendingSessionId = null
@@ -359,28 +636,20 @@ class PlayerController(
         }
         if (relPath == null) {
             if (pendingSessionId == sessionId) pendingSessionId = null
-            val error = if (selectedSubtitle) {
-                "Could not prepare the selected subtitle"
-            } else {
-                transcodeError ?: "Transcode/remux failed"
-            }
-            Logger.w(tag) { "HLS session failed: $error" }
-            _uiState.value = _uiState.value.copy(
-                phase = PlayerPhase.ERROR,
-                error = error,
-            )
+            val error = if (selectedSubtitle) "Could not prepare the selected subtitle"
+                else transcodeError ?: "Transcode/remux failed"
+            _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = error)
             return
         }
         val (port, serverError) = Bridges.startHttpServer()
         if (!isCurrent(generation)) {
             Bridges.stopHlsSession(sessionId)
-            if (pendingSessionId == null || pendingSessionId == sessionId) Bridges.stopHttpServer()
+            Bridges.stopHttpServer()
             if (pendingSessionId == sessionId) pendingSessionId = null
             return
         }
         if (port < 0) {
             if (pendingSessionId == sessionId) pendingSessionId = null
-            Logger.w(tag) { "HTTP server failed: $serverError" }
             Bridges.stopHlsSession(sessionId)
             Bridges.stopHttpServer()
             _uiState.value = _uiState.value.copy(
@@ -389,43 +658,227 @@ class PlayerController(
             )
             return
         }
-        // AirPlay video is remote playback: the TV fetches the HLS playlist and
-        // segments itself, so the URL must be reachable from the LAN, not loopback.
-        // Loopback is the fallback when no Wi-Fi address is available (still plays locally).
-        val host = Bridges.lanBaseUrl() ?: "http://127.0.0.1:$port"
-        val proxyUrl = "$host/$relPath"
+        val lanBase = Bridges.lanBaseUrl()
+        val requiresLanBase = remoteTarget != null || currentDestination is PlaybackDestination.AirPlay
+        if (requiresLanBase && lanBase == null) {
+            Bridges.stopHlsSession(sessionId)
+            Bridges.stopHttpServer()
+            if (pendingSessionId == sessionId) pendingSessionId = null
+            val destinationName = remoteTarget?.name ?: currentDestination.displayName
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                error = "No local network address is available for $destinationName",
+            )
+            return
+        }
+        val proxyUrl = if (requiresLanBase) {
+            "${lanBase!!}/$relPath"
+        } else {
+            "${lanBase ?: "http://127.0.0.1:$port"}/$relPath"
+        }
         if (!isCurrent(generation)) {
             Bridges.stopHlsSession(sessionId)
-            if (pendingSessionId == null || pendingSessionId == sessionId) Bridges.stopHttpServer()
+            Bridges.stopHttpServer()
             if (pendingSessionId == sessionId) pendingSessionId = null
             return
         }
         pendingSessionId = null
         proxySessionSubtitleUrl = subtitleTracks.firstOrNull()?.url
-        Logger.i(tag) { "proxy ready: $proxyUrl" }
-        val activeTarget = if (_uiState.value.castActive) CastDispatcher.activeTarget() else null
-        _uiState.value = _uiState.value.copy(phase = PlayerPhase.PLAYING, proxyUrl = proxyUrl)
-        if (activeTarget != null) {
-            val state = _uiState.value
-            val remoteUrl = CastDispatcher.remoteCastUrl(
-                isPlaying = state.phase == PlayerPhase.PLAYING,
-                proxyUrl = state.proxyUrl,
-                sourceUrl = state.sourceUrl,
+        if (remoteTarget == null) {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.PLAYING,
+                proxyUrl = proxyUrl,
             )
-            if (remoteUrl != null) {
-                scope.launch {
-                    runCatching {
-                        CastDispatcher.recastIfActive(
-                            activeTarget,
-                            remoteUrl,
-                            CastDispatcher.remoteCastTitle(state.filename, state.sourceUrl),
-                        )
-                    }.onFailure { error ->
-                        Logger.w(tag) { "proxy recast failed: ${error.message}" }
-                    }
-                }
+            return
+        }
+        val media = PreparedCastMedia(
+            url = proxyUrl,
+            title = state.title ?: "Stream",
+            contentType = "application/vnd.apple.mpegurl",
+            container = "m3u8",
+            kind = if (probe.videoCodec == null) CastMediaKind.AUDIO else CastMediaKind.VIDEO,
+            isLive = probe.isLive,
+            origin = CastMediaOrigin.PROXY,
+        )
+        _uiState.value = _uiState.value.copy(
+            phase = PlayerPhase.CONNECTING_OUTPUT,
+            proxyUrl = proxyUrl,
+        )
+        val result = castReceiver(remoteTarget, media)
+        if (!isCurrent(generation)) {
+            stopReceiverBestEffort(remoteTarget)
+            Bridges.stopHlsSession(sessionId)
+            return
+        }
+        if (result is app.rigel.cast.CastResult.Sent) {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.PLAYING,
+                proxyUrl = proxyUrl,
+                remotePlayback = true,
+                castActive = true,
+            )
+        } else {
+            Bridges.stopHlsSession(sessionId)
+            Bridges.stopHttpServer()
+            if (route != PlaybackRoute.TRANSCODE && !directFallbackUsed) {
+                directFallbackUsed = true
+                _uiState.value = _uiState.value.copy(
+                    phase = PlayerPhase.PREPARING_PROXY,
+                    route = PlaybackRoute.TRANSCODE,
+                    proxyUrl = null,
+                    error = null,
+                )
+                prepareProxy(probe, PlaybackRoute.TRANSCODE, generation, emptySet())
+                return
+            }
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                proxyUrl = null,
+                error = result.message,
+            )
+        }
+    }
+    private suspend fun prepareRemoteResumeProxy(
+        target: CastTarget,
+        probe: ProbeResult,
+        generation: Long,
+    ) {
+        if (!isCurrent(generation)) return
+        val profile = currentOutputProfile ?: capabilityResolver.profileFor(target).also {
+            currentOutputProfile = it
+        }
+        val decision = FormatRouter.decide(
+            probe = probe,
+            profile = profile,
+            hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
+            preference = RouteOverride.ALWAYS_PROXY,
+            sourceIsRemotelyReachable = true,
+        )
+        val playable = decision as? RouteDecision.Playable ?: run {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                proxyUrl = null,
+                error = (decision as RouteDecision.Unsupported).message,
+            )
+            return
+        }
+        currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
+        _uiState.value = _uiState.value.copy(
+            phase = PlayerPhase.PREPARING_PROXY,
+            route = playable.route,
+            proxyUrl = null,
+            error = null,
+            planDetail = playable.detail,
+        )
+        prepareProxy(probe, playable.route, generation, playable.passthroughAudioCodecs)
+    }
+
+    private suspend fun dispatchRemoteDirect(
+        target: CastTarget,
+        sourceUrl: String,
+        probe: ProbeResult,
+        generation: Long,
+    ) {
+        if (!isCurrent(generation)) return
+        val state = _uiState.value
+        val resumePositionMs = state.startPositionMs
+        val durationMs = probe.durationMs
+        val canSeekResume = resumePositionMs <= 0L ||
+            (CastDispatcher.capabilities(target).supportsSeek && durationMs != null && durationMs > 0)
+        if (!canSeekResume) {
+            prepareRemoteResumeProxy(target, probe, generation)
+            return
+        }
+        val media = PreparedCastMedia(
+            url = sourceUrl,
+            title = state.title ?: "Stream",
+            contentType = contentTypeForProbe(probe),
+            container = probe.container.lowercase(),
+            kind = if (probe.videoCodec == null) CastMediaKind.AUDIO else CastMediaKind.VIDEO,
+            isLive = probe.isLive,
+            origin = CastMediaOrigin.SOURCE,
+        )
+        val result = castReceiver(target, media)
+        if (!isCurrent(generation)) {
+            stopReceiverBestEffort(target)
+            return
+        }
+        if (result is app.rigel.cast.CastResult.Sent) {
+            if (resumePositionMs > 0 &&
+                !CastDispatcher.seekActive(resumePositionMs, durationMs ?: 0L)
+            ) {
+                stopReceiverBestEffort(target)
+                prepareRemoteResumeProxy(target, probe, generation)
+                return
+            }
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.PLAYING,
+                remotePlayback = true,
+                castActive = true,
+            )
+            return
+        }
+        capabilityResolver.invalidate(target)
+        if (!directFallbackUsed) {
+            directFallbackUsed = true
+            currentPassthroughAudioCodecs = emptySet()
+            val profile = capabilityResolver.profileFor(target)
+            currentOutputProfile = profile
+            val decision = FormatRouter.decide(
+                probe = probe,
+                profile = profile,
+                hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
+                preference = RouteOverride.ALWAYS_PROXY,
+                sourceIsRemotelyReachable = true,
+            )
+            val playable = decision as? RouteDecision.Playable ?: run {
+                _uiState.value = _uiState.value.copy(
+                    phase = PlayerPhase.ERROR,
+                    error = (decision as RouteDecision.Unsupported).message,
+                )
+                return
+            }
+            currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.PREPARING_PROXY,
+                route = playable.route,
+                error = null,
+            )
+            prepareProxy(probe, playable.route, generation, playable.passthroughAudioCodecs)
+            return
+        }
+        _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = result.message)
+    }
+
+    private fun contentTypeForProbe(probe: ProbeResult): String {
+        val container = probe.container.lowercase()
+        if (probe.videoCodec == null) {
+            return when (container) {
+                "m3u8", "hls" -> "application/vnd.apple.mpegurl"
+                "m4a", "mp4", "m4v" -> "audio/mp4"
+                "mp3" -> "audio/mpeg"
+                "aac" -> "audio/aac"
+                "flac" -> "audio/flac"
+                else -> "audio/mpeg"
             }
         }
+        return when (container) {
+            "mp4", "m4v" -> "video/mp4"
+            "mov" -> "video/quicktime"
+            "m3u8", "hls" -> "application/vnd.apple.mpegurl"
+            "mp3" -> "audio/mpeg"
+            "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
+            "flac" -> "audio/flac"
+            else -> "video/mp4"
+        }
+    }
+
+
+    private fun profileForCurrentDestination(): OutputMediaProfile = when (val destination = currentDestination) {
+        PlaybackDestination.Local -> OutputMediaProfiles.local
+        is PlaybackDestination.AirPlay -> OutputMediaProfiles.airPlay(destination.displayName)
+        is PlaybackDestination.Receiver -> OutputMediaProfiles.familyDefault(destination.target)
     }
     private fun failProxySession(sessionId: String, generation: Long, message: String) {
         if (!isCurrent(generation)) return
@@ -437,35 +890,116 @@ class PlayerController(
         Bridges.stopHttpServer()
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = message)
     }
+    private suspend fun proxyRetryDecision(probe: ProbeResult): RouteDecision {
+        val profile = currentOutputProfile ?: when (val destination = currentDestination) {
+            PlaybackDestination.Local -> OutputMediaProfiles.local
+            is PlaybackDestination.AirPlay -> OutputMediaProfiles.airPlay(destination.displayName)
+            is PlaybackDestination.Receiver -> capabilityResolver.profileFor(destination.target).also {
+                currentOutputProfile = it
+            }
+        }
+        return FormatRouter.decide(
+            probe = probe,
+            profile = profile,
+            hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
+            preference = RouteOverride.ALWAYS_PROXY,
+            sourceIsRemotelyReachable = true,
+        )
+    }
 
-    /** Error retry: force the REMUX proxy path. */
+    /** Retry through the negotiated destination profile's safe proxy route. */
     fun retryWithProxy() {
         val current = _uiState.value
         val sourceUrl = current.sourceUrl ?: return
-        invalidatePendingWork()
+        val pendingReceiverStop = invalidatePendingWork()
         directFallbackUsed = true
         val generation = loadGeneration
-        _uiState.value = current.copy(phase = PlayerPhase.PROBING, error = null, route = PlaybackRoute.REMUX, proxyUrl = null)
+        _uiState.value = current.copy(phase = PlayerPhase.PROBING, error = null, route = null, proxyUrl = null)
         pendingJob = scope.launch {
+            awaitStaleStops(pendingReceiverStop)
             val (probe, _) = Bridges.probe(sourceUrl, emptyMap())
             if (!isCurrent(generation)) return@launch
             if (probe == null) {
                 _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "Probe failed again")
                 return@launch
             }
-            _uiState.value = _uiState.value.copy(probe = probe)
-            prepareProxy(probe, PlaybackRoute.REMUX, generation)
+            val decision = proxyRetryDecision(probe)
+            val playable = decision as? RouteDecision.Playable ?: run {
+                _uiState.value = _uiState.value.copy(
+                    phase = PlayerPhase.ERROR,
+                    probe = probe,
+                    error = (decision as RouteDecision.Unsupported).message,
+                )
+                return@launch
+            }
+            currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.PREPARING_PROXY,
+                route = playable.route,
+                probe = probe,
+                error = null,
+                planDetail = playable.detail,
+            )
+            prepareProxy(probe, playable.route, generation, playable.passthroughAudioCodecs)
         }
     }
+    private fun stopDetachedReceiver(target: CastTarget): Job {
+        val previous = receiverStopJob
+        val job = scope.launch {
+            previous?.join()
+            CastDispatcher.stopDetached(target)
+        }
+        receiverStopJob = job
+        job.invokeOnCompletion {
+            if (receiverStopJob === job) receiverStopJob = null
+        }
+        return job
+    }
 
-    fun stopPlayback() {
+
+    private fun stopJellyfinIfActive(): Job? {
+        val target = (currentDestination as? PlaybackDestination.Receiver)?.target
+            as? CastTarget.JellyfinSessionTarget ?: return null
+        val context = currentRequest?.jellyfinContext ?: return null
+        val client = jellyfin ?: return null
+        val previous = jellyfinStopJob
+        val job = scope.launch {
+            previous?.join()
+            client.stopSession(context.baseUrl, context.token, target.session.id)
+        }
+        jellyfinStopJob = job
+        job.invokeOnCompletion {
+            if (jellyfinStopJob === job) jellyfinStopJob = null
+        }
+        return job
+    }
+
+    /** Replacement playback awaits superseded stops so a late stop cannot kill the new session. */
+    private suspend fun awaitStaleStops(vararg stops: Job?) {
+        stops.forEach { it?.join() }
+    }
+
+    override fun stopPlayback() {
+        val stopJob = stopJellyfinIfActive()
+        if (stopJob != null) jellyfinStopJob = stopJob
         invalidatePendingWork()
-        CastDispatcher.clearActive()
+        _uiState.value = PlayerUiState()
+        val detachedTarget = CastDispatcher.detachActive()
+        detachedTarget?.let(::stopDetachedReceiver)
         Bridges.stopHttpServer()
         UrlIntake.fireSuccess(successCallbackUrl)
         successCallbackUrl = null
-        _uiState.value = PlayerUiState()
     }
+
+    private fun airPlayFallbackDecision(probe: ProbeResult): RouteDecision.Playable? =
+        FormatRouter.decide(
+            probe = probe,
+            profile = OutputMediaProfiles.local.copy(detail = currentDestination.displayName),
+            hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
+            preference = RouteOverride.ALWAYS_PROXY,
+            sourceIsRemotelyReachable = true,
+        ) as? RouteDecision.Playable
+
 
     /**
      * Native playback failure seam. A DIRECT decoder failure gets exactly one
@@ -481,6 +1015,37 @@ class PlayerController(
             current.phase == PlayerPhase.PROBING ||
             current.phase == PlayerPhase.BUFFERING
         ) return
+        val airPlayProbe = current.probe
+        if (currentDestination is PlaybackDestination.AirPlay &&
+            !directFallbackUsed &&
+            current.phase == PlayerPhase.PLAYING &&
+            current.route == PlaybackRoute.DIRECT &&
+            current.proxyUrl == null &&
+            airPlayProbe != null
+        ) {
+            directFallbackUsed = true
+            val fallback = airPlayFallbackDecision(airPlayProbe)
+            if (fallback == null) {
+                _uiState.value = current.copy(
+                    phase = PlayerPhase.ERROR,
+                    error = "AirPlay fallback route unavailable",
+                )
+                return
+            }
+            currentPassthroughAudioCodecs = fallback.passthroughAudioCodecs
+            val generation = loadGeneration
+            _uiState.value = current.copy(
+                phase = PlayerPhase.PREPARING_PROXY,
+                route = fallback.route,
+                proxyUrl = null,
+                error = null,
+                planDetail = fallback.detail,
+            )
+            pendingJob = scope.launch {
+                prepareProxy(airPlayProbe, fallback.route, generation, fallback.passthroughAudioCodecs)
+            }
+            return
+        }
         if (!directFallbackUsed && current.phase == PlayerPhase.PLAYING &&
             current.route == PlaybackRoute.DIRECT && current.proxyUrl == null && current.probe != null
         ) {
@@ -494,6 +1059,12 @@ class PlayerController(
         }
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = message)
     }
+
+    private fun resolveTitle(request: IntakeRequest): String =
+        request.title?.trim()?.takeIf { it.isNotEmpty() }
+            ?: request.filename?.trim()?.takeIf { it.isNotEmpty() }
+            ?: request.sourceUrl.substringBefore('?').substringAfterLast("/").takeIf { it.isNotEmpty() }
+            ?: "Stream"
 
     private fun extractSessionId(proxyUrl: String): String =
         proxyUrl.substringBeforeLast('/').substringAfterLast('/')

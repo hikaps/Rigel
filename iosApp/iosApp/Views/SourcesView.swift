@@ -212,29 +212,6 @@ struct SourcesView: View {
                 }
             }
 
-            if !model.sessions.isEmpty {
-                Section("Cast library item to a client") {
-                    ForEach(model.sessions, id: \.id) { session in
-                        HStack {
-                            Image(systemName: "airplayvideo")
-                                .foregroundStyle(Color.rigelStar)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(session.deviceName)
-                                    .font(.body)
-                                    .lineLimit(1)
-                                Text(session.client)
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("Cast") { model.castToSession(session) }
-                                .buttonStyle(.borderedProminent)
-                                .tint(Color.rigelStar)
-                                .disabled(model.busy)
-                        }
-                    }
-                }
-            }
 
             if let notice = model.notice {
                 Section {
@@ -245,7 +222,7 @@ struct SourcesView: View {
             }
 
             Section {
-                Text("Note: Jellyfin session remote control plays library items only — arbitrary URLs cannot be pushed to Jellyfin clients.")
+                Text("Choose a Jellyfin client in Playback Destination before playing a library item. Arbitrary URLs cannot be pushed to Jellyfin clients.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -253,8 +230,16 @@ struct SourcesView: View {
     }
 
     private func play(_ item: JellyfinItem) {
-        model.play(item) { url, title, tracks in
-            _ = player.open(url: url, title: title, subtitleTracks: tracks)
+        model.play(item) { url, title, tracks, base, token, userId, itemId in
+            _ = player.openJellyfin(
+                url: url,
+                title: title,
+                subtitleTracks: tracks,
+                baseUrl: base,
+                token: token,
+                userId: userId,
+                itemId: itemId
+            )
         }
     }
 }

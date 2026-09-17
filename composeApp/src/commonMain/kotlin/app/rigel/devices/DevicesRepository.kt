@@ -6,11 +6,16 @@ import app.rigel.cast.ReceiverRegistry
 import app.rigel.cast.ChromeDevice
 import app.rigel.cast.chrome.ChromecastBridgeFactory
 import app.rigel.settings.SettingsStore
+import app.rigel.source.jellyfin.JellyfinClient
+import app.rigel.source.jellyfin.JellyfinSession
+
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -26,13 +31,14 @@ data class DiscoveredDevice(
 class DevicesRepository(
     private val client: HttpClient,
     private val settings: SettingsStore,
+    private val jellyfin: JellyfinClient? = null,
 ) {
     private val tag = "DevicesRepository"
 
     suspend fun scan(timeoutMs: Long = 5000): List<DiscoveredDevice> = coroutineScope {
         val ssdpTargets = ReceiverRegistry.adapters.flatMap { it.ssdpTargets }.distinct()
-        // SSDP and mDNS are independent search windows; run them concurrently
-        // instead of paying both timeouts back to back.
+        // SSDP, mDNS, and Jellyfin are independent search windows; run them
+        // concurrently so Jellyfin cannot extend the network-discovery window.
         val ssdpSearch = async {
             runCatching { Bridges.ssdpSearch(ssdpTargets, timeoutMs.toInt()) }
                 .getOrDefault(emptyList())
@@ -41,6 +47,20 @@ class DevicesRepository(
             if (ChromecastBridgeFactory.current != null) {
                 runCatching { discoverChromecast(timeoutMs.toInt()) }.getOrDefault(emptyList())
             } else {
+                emptyList()
+            }
+        }
+        val jellyfinSearch = async {
+            val service = jellyfin ?: return@async emptyList<JellyfinSession>()
+            val base = settings.jellyfinServer().trim().trimEnd('/')
+            val token = settings.jellyfinToken()
+            val userId = settings.jellyfinUserId()
+            if (base.isEmpty() || token.isEmpty() || userId.isEmpty()) return@async emptyList()
+            try {
+                withTimeoutOrNull(timeoutMs) { service.sessions(base, token, userId) }.orEmpty()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
                 emptyList()
             }
         }
@@ -71,6 +91,9 @@ class DevicesRepository(
         }.awaitAll().filterNotNull()
         manualTargets.forEach { target ->
             if (found.none { it.target.name == target.name }) found += DiscoveredDevice(target, "manual")
+        }
+        jellyfinSearch.await().forEach {
+            found += DiscoveredDevice(CastTarget.JellyfinSessionTarget(it), "jellyfin")
         }
         found
     }

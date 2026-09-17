@@ -1,8 +1,8 @@
 package app.rigel.cast
 
 import app.rigel.bridge.SsdpDevice
+import app.rigel.output.OutputMediaProfile
 import io.ktor.client.HttpClient
-
 /**
  * Per-receiver-family contract. Each adapter owns discovery enrichment,
  * manual-IP probing, cast dispatch, persistence encoding, and capabilities.
@@ -18,9 +18,12 @@ interface ReceiverAdapter {
 
     fun capabilities(): CastCapabilities
 
-    /** Send a URL to the remote renderer; [CastResult.message] is user-facing. */
-    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): CastResult
-    /** Seek the active remote item; false means this receiver cannot seek. */
+    /** Media compatibility profile; control capabilities above are independent. */
+    suspend fun mediaProfile(target: CastTarget, client: HttpClient): OutputMediaProfile =
+        app.rigel.output.OutputMediaProfiles.familyDefault(target)
+
+    /** Send prepared media to the remote renderer; [CastResult.message] is user-facing. */
+    suspend fun cast(target: CastTarget, media: PreparedCastMedia, client: HttpClient): CastResult
     suspend fun seek(
         target: CastTarget,
         positionMs: Long,

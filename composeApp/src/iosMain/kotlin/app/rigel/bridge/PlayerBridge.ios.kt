@@ -27,6 +27,7 @@ interface NativePlayerBridge {
         startOffsetMs: Long,
     )
     fun stop()
+    fun currentPositionMs(): Long?
 }
 
 object PlayerBridgeFactory {

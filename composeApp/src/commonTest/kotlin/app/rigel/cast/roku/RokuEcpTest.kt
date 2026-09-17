@@ -1,5 +1,8 @@
 package app.rigel.cast.roku
 
+import app.rigel.cast.CastMediaKind
+import app.rigel.cast.CastMediaOrigin
+import app.rigel.cast.PreparedCastMedia
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -60,5 +63,42 @@ class RokuEcpTest {
         assertEquals("a%20b%2Fc", RokuEcp.formEncode("a b/c"))
         assertEquals("h%C3%A9llo", RokuEcp.formEncode("héllo"))
         assertEquals("%3A%2F%2F", RokuEcp.formEncode("://"))
+    }
+
+    @Test
+    fun audioHlsUsesRokuHlsForm() {
+        val query = RokuEcp.launchQuery(
+            PreparedCastMedia(
+                url = "http://lan.example/session/index.m3u8",
+                title = "Audio stream",
+                contentType = "application/vnd.apple.mpegurl",
+                container = "m3u8",
+                kind = CastMediaKind.AUDIO,
+                isLive = false,
+                origin = CastMediaOrigin.PROXY,
+            ),
+        )
+
+        assertTrue(query.startsWith("t=v&"))
+        assertTrue(query.contains("videoFormat=hls"))
+        assertFalse(query.contains("songformat="))
+    }
+
+    @Test
+    fun directAacMp4UsesAacSongFormat() {
+        val query = RokuEcp.launchQuery(
+            PreparedCastMedia(
+                url = "http://lan.example/audio.mp4",
+                title = "AAC audio",
+                contentType = "audio/mp4",
+                container = "mp4",
+                kind = CastMediaKind.AUDIO,
+                isLive = false,
+                origin = CastMediaOrigin.SOURCE,
+            ),
+        )
+
+        assertTrue(query.startsWith("t=a&"))
+        assertTrue(query.contains("songformat=aac"))
     }
 }

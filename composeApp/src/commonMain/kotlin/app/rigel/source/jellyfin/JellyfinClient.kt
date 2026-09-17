@@ -10,6 +10,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.Url
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import kotlinx.coroutines.CancellationException
@@ -24,6 +25,8 @@ data class JellyfinSession(
     val id: String,
     val deviceName: String,
     val client: String,
+    val serverBase: String = "",
+    val supportsMediaControl: Boolean? = null,
 )
 
 data class JellyfinAuth(
@@ -43,9 +46,21 @@ private data class JellyfinSubtitleCandidate(
  * library ItemIds only (platform limit, surfaced in UI).
  */
 object JellyfinApi {
+    fun normalizeServerBase(value: String): String {
+        val trimmed = value.trim().trimEnd('/')
+        val url = runCatching { Url(trimmed) }.getOrNull() ?: return trimmed
+        val host = url.host.lowercase().let { host ->
+            if (host.contains(':') && !host.startsWith('[')) "[$host]" else host
+        }
+        val authority = buildString {
+            append(host)
+            if (url.port != url.protocol.defaultPort) append(':').append(url.port)
+        }
+        return url.protocol.name.lowercase() + "://" + authority + url.encodedPath.trimEnd('/')
+    }
+
     fun authBody(username: String, password: String): String =
         """{"Username":"${jsonEscape(username)}","Pw":"${jsonEscape(password)}"}"""
-
     fun embyAuthHeader(deviceId: String, client: String = "Rigel", device: String = "Rigel iOS", version: String = "1.0"): String =
         "MediaBrowser Client=\"$client\", Device=\"$device\", DeviceId=\"$deviceId\", Version=\"$version\""
 
@@ -85,8 +100,23 @@ object JellyfinApi {
             "/Videos/${encodeUrlComponent(itemId)}/${encodeUrlComponent(mediaSourceId)}" +
             "/Subtitles/$index/Stream.vtt?api_key=${encodeUrlComponent(token)}"
 
-    fun playCommand(itemIds: List<String>, command: String = "PlayNow"): String =
-        """{"ItemIds":[${itemIds.joinToString(",") { "\"$it\"" }}],"PlayCommand":"$command","StartPositionTicks":0}"""
+    fun playUrl(
+        base: String,
+        sessionId: String,
+        itemIds: List<String>,
+        command: String = "PlayNow",
+        startPositionTicks: Long = 0,
+    ): String =
+        base.trimEnd('/') + "/Sessions/${encodeUrlComponent(sessionId)}/Playing" +
+            "?playCommand=${encodeUrlComponent(command)}" +
+            "&itemIds=${itemIds.joinToString(",") { encodeUrlComponent(it) }}" +
+            "&startPositionTicks=$startPositionTicks"
+
+    fun sessionsUrl(base: String, userId: String): String =
+        base.trimEnd('/') + "/Sessions?controllableByUserId=${encodeUrlComponent(userId)}"
+
+    fun startPositionTicks(positionMs: Long): Long =
+        positionMs.coerceAtLeast(0).coerceAtMost(Long.MAX_VALUE / 10_000L) * 10_000L
 
     fun jsonEscape(s: String): String =
         s.replace("\\", "\\\\").replace("\"", "\\\"")
@@ -211,24 +241,56 @@ class JellyfinClient(private val http: HttpClient) {
         }
     }
 
-    suspend fun sessions(base: String, token: String): List<JellyfinSession> {
-        val resp = runCatching {
-            http.get(base.trimEnd('/') + "/Sessions") { header("X-Emby-Token", token) }.bodyAsText()
-        }.getOrNull() ?: return emptyList()
-        val out = mutableListOf<JellyfinSession>()
-        for (m in Regex("""\{[^{}]*?"Id":"([^"]+)"[^{}]*?"DeviceName":"([^"]+)"[^{}]*?"Client":"([^"]+)"[^{}]*?}""").findAll(resp)) {
-            out += JellyfinSession(m.groupValues[1], m.groupValues[2], m.groupValues[3])
+    suspend fun sessions(base: String, token: String, userId: String): List<JellyfinSession> {
+        val normalizedBase = JellyfinApi.normalizeServerBase(base)
+        val resp = try {
+            http.get(JellyfinApi.sessionsUrl(normalizedBase, userId)) {
+                header("X-Emby-Token", token)
+            }.bodyAsText()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            return emptyList()
         }
+        val out = mutableListOf<JellyfinSession>()
+        JsonObjectReader(
+            source = resp,
+            onObjectAtPath = { path, fields ->
+                if (path.size != 1) return@JsonObjectReader
+                val id = fields["Id"] ?: return@JsonObjectReader
+                val deviceName = fields["DeviceName"] ?: return@JsonObjectReader
+                val client = fields["Client"] ?: return@JsonObjectReader
+                val supportsMediaControl = fields["SupportsMediaControl"]
+                    ?.let { it.equals("true", ignoreCase = true) }
+                    ?: fields["SupportsRemoteControl"]
+                        ?.let { it.equals("true", ignoreCase = true) }
+                if (supportsMediaControl == false) return@JsonObjectReader
+                out += JellyfinSession(id, deviceName, client, normalizedBase, supportsMediaControl)
+            },
+        ).parseObjectsWithPaths()
         return out
     }
-
     /** Cast a library item to a logged-in Jellyfin client session. */
-    suspend fun playToSession(base: String, token: String, sessionId: String, itemIds: List<String>): Boolean {
+    suspend fun playToSession(
+        base: String,
+        token: String,
+        sessionId: String,
+        itemIds: List<String>,
+        startPositionTicks: Long = 0,
+    ): Boolean {
         val resp = runCatching {
-            http.post(base.trimEnd('/') + "/Sessions/$sessionId/Playing") {
+            http.post(JellyfinApi.playUrl(base, sessionId, itemIds, startPositionTicks = startPositionTicks)) {
                 header("X-Emby-Token", token)
-                contentType(ContentType.Application.Json)
-                setBody(JellyfinApi.playCommand(itemIds))
+            }.status.value
+        }.getOrNull()
+        return resp != null && resp in 200..299
+    }
+
+    /** Remote stop command for a client session (Playing/Stopped is the client-side report endpoint; it does not stop playback). */
+    suspend fun stopSession(base: String, token: String, sessionId: String): Boolean {
+        val resp = runCatching {
+            http.post(base.trimEnd('/') + "/Sessions/$sessionId/Playing/Stop") {
+                header("X-Emby-Token", token)
             }.status.value
         }.getOrNull()
         return resp != null && resp in 200..299

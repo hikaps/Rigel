@@ -6,13 +6,27 @@ import app.rigel.bridge.ProbeResult
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.TranscodeBridge
 import app.rigel.bridge.SubtitleTrack
+import app.rigel.cast.CastDispatcher
+import app.rigel.cast.CastTarget
+import app.rigel.cast.DlnaDevice
+import app.rigel.cast.RokuDevice
 
 import app.rigel.gateway.PlaybackRoute
+import app.rigel.output.PlaybackDestination
 import app.rigel.intake.IntakeRequest
+import app.rigel.intake.JellyfinPlaybackContext
 import app.rigel.settings.LinkHistoryEntry
 import app.rigel.settings.RouteOverride
 import app.rigel.settings.SettingsStore
+import app.rigel.source.jellyfin.JellyfinClient
+import app.rigel.source.jellyfin.JellyfinSession
 import com.russhwolf.settings.MapSettings
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.TextContent
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -53,7 +67,10 @@ class PlayerControllerTest {
     /** When non-null, startHlsSession defers its onReady until fired here. */
     private var pendingReady: ((String?, String?) -> Unit)? = null
 
-    private fun controller(settings: SettingsStore = SettingsStore(MapSettings(mutableMapOf()))): PlayerController {
+    private fun controller(
+        settings: SettingsStore = SettingsStore(MapSettings(mutableMapOf())),
+        jellyfin: JellyfinClient? = null,
+    ): PlayerController {
         RigelBridgeFactory.register(
             discovery = null,
             probe = object : ProbeBridge {
@@ -67,6 +84,7 @@ class PlayerControllerTest {
                     sourceUrl: String,
                     headers: Map<String, String>,
                     mode: String,
+                    passthroughAudioCodecs: List<String>,
                     startOffsetMs: Long,
                     subtitleTracks: List<SubtitleTrack>,
                     onReady: (String?, String?) -> Unit,
@@ -97,7 +115,7 @@ class PlayerControllerTest {
                 override fun lanBaseUrl(): String? = lanBase
             },
         )
-        return PlayerController(settings)
+        return PlayerController(settings, jellyfin = jellyfin)
     }
 
     private val request = IntakeRequest(
@@ -118,6 +136,8 @@ class PlayerControllerTest {
     @AfterTest
     fun tearDown() {
         Dispatchers.resetMain()
+        CastDispatcher.clearActive()
+        CastDispatcher.install(null, null)
         RigelBridgeFactory.register(discovery = null, probe = null, transcode = null, httpServer = null)
     }
 
@@ -162,7 +182,7 @@ class PlayerControllerTest {
         val c = controller(settings)
         assertTrue(c.loadRaw("http://h/v.mp4"))
         assertEquals(
-            listOf(LinkHistoryEntry("http://h/v.mp4", null)),
+            listOf(LinkHistoryEntry("http://h/v.mp4", "v.mp4")),
             settings.linkHistory(),
         )
     }
@@ -220,8 +240,8 @@ class PlayerControllerTest {
         c.loadRequest(request.copy(subtitleTracks = listOf(track)))
         advanceUntilIdle()
 
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
-        assertEquals(listOf(track), hlsSubtitleTracks.last())
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertTrue(hlsModes.isEmpty())
     }
 
     @Test
@@ -673,5 +693,441 @@ class PlayerControllerTest {
         assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
         assertNotNull(c.uiState.value.proxyUrl)
         pendingReady = null
+    }
+
+    @Test
+    fun proxyRebuildDuringCastKeepsRemoteTarget() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        val posted = mutableListOf<Pair<String, String?>>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    posted += request.url.toString() to ((request.body as? TextContent)?.text)
+                    respond("", HttpStatusCode.OK)
+                }
+            }
+        }
+        lanBase = "http://192.168.1.50:8090"
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        CastDispatcher.install(c, client)
+        try {
+            val target = CastTarget.Dlna(
+                DlnaDevice("usn-1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+            )
+            c.loadRequest(request, PlaybackDestination.Receiver(target))
+            advanceUntilIdle()
+            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase, "state=${c.uiState.value} hls=${hlsModes} posted=${posted}")
+            assertTrue(c.uiState.value.remotePlayback)
+            val castsAfterLoad = posted.count { it.first.contains("/control") }
+
+            c.seek(45_000, 60_000)
+            advanceUntilIdle()
+
+            // The rebuild must re-derive the receiver and recast, not silently
+            // switch this media to local iPhone playback.
+            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+            assertTrue(c.uiState.value.remotePlayback)
+            assertTrue(c.uiState.value.castActive)
+            assertTrue(posted.count { it.first.contains("/control") } > castsAfterLoad)
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
+    fun replacementJellyfinPlayAwaitsPreviousSessionStop() = runTest(dispatcher.scheduler) {
+        val jfBase = "http://jf:8096"
+        val requests = mutableListOf<String>()
+        val stopGate = CompletableDeferred<Unit>()
+        val engineDispatcher = dispatcher
+        val client = JellyfinClient(HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    requests += url
+                    if (url.endsWith("/Playing/Stop")) stopGate.await()
+                    respond("", HttpStatusCode.NoContent)
+                }
+            }
+        })
+        val c = controller(jellyfin = client)
+        fun jfRequest(itemId: String) = request.copy(
+            sourceUrl = "$jfBase/Videos/$itemId/stream?Static=true&api_key=tok",
+            jellyfinContext = JellyfinPlaybackContext(jfBase, "tok", "u1", itemId),
+        )
+        fun jfTarget(sessionId: String) = PlaybackDestination.Receiver(
+            CastTarget.JellyfinSessionTarget(JellyfinSession(sessionId, "TV", "Jellyfin Web", jfBase)),
+        )
+
+        c.loadRequest(jfRequest("i1"), jfTarget("s1"))
+        advanceUntilIdle()
+        assertEquals(listOf("$jfBase/Sessions/s1/Playing?playCommand=PlayNow&itemIds=i1&startPositionTicks=0"), requests)
+
+        c.loadRequest(jfRequest("i2"), jfTarget("s2"))
+        advanceUntilIdle()
+        // The old session's stop is still in flight; the replacement play must
+        // not have been issued yet, or the late stop would kill the new item.
+        assertTrue(requests.none { it.contains("/Sessions/s2/Playing") })
+        assertEquals("$jfBase/Sessions/s1/Playing/Stop", requests.last())
+
+        stopGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0", requests.last())
+    }
+
+
+    @Test
+    fun stopPlaybackRetainsStopBeforeReplacementPlay() = runTest(dispatcher.scheduler) {
+        val jfBase = "http://jf:8096"
+        val requests = mutableListOf<String>()
+        val firstStopGate = CompletableDeferred<Unit>()
+        var stopCount = 0
+        val engineDispatcher = dispatcher
+        val client = JellyfinClient(HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    requests += url
+                    if (url.endsWith("/Playing/Stop")) {
+                        stopCount += 1
+                        if (stopCount == 1) firstStopGate.await()
+                    }
+                    respond("", HttpStatusCode.NoContent)
+                }
+            }
+        })
+        val c = controller(jellyfin = client)
+        fun jfRequest(itemId: String) = request.copy(
+            sourceUrl = "${jfBase}/Videos/${itemId}/stream?Static=true&api_key=tok",
+            jellyfinContext = JellyfinPlaybackContext(jfBase, "tok", "u1", itemId),
+        )
+        fun jfTarget(sessionId: String) = PlaybackDestination.Receiver(
+            CastTarget.JellyfinSessionTarget(JellyfinSession(sessionId, "TV", "Jellyfin Web", jfBase)),
+        )
+
+        c.loadRequest(jfRequest("i1"), jfTarget("s1"))
+        advanceUntilIdle()
+        c.stopPlayback()
+        advanceUntilIdle()
+
+        c.loadRequest(jfRequest("i2"), jfTarget("s2"))
+        advanceUntilIdle()
+        assertTrue(requests.none { it.contains("/Sessions/s2/Playing") })
+
+        firstStopGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0", requests.last())
+    }
+
+    @Test
+    fun directAudioMp4UsesAudioMimeForRoku() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult("mp4", null, listOf("aac"), emptyList(), 60_000, isLive = false, pixFmt = null)
+        val posted = mutableListOf<String>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    if (url.endsWith("/query/apps")) {
+                        respond("<apps><app id=\"15985\">Play on Roku</app></apps>", HttpStatusCode.OK)
+                    } else {
+                        posted += url
+                        respond("", HttpStatusCode.OK)
+                    }
+                }
+            }
+        }
+        val c = controller()
+        val target = CastTarget.Roku(RokuDevice("r-aac", "http://192.168.1.9:8060/", "Roku"))
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(
+                request.copy(sourceUrl = "http://192.168.1.20/audio.mp4"),
+                PlaybackDestination.Receiver(target),
+            )
+            advanceUntilIdle()
+            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+            assertTrue(posted.single().contains("t=a"))
+            assertTrue(posted.single().contains("songformat=aac"))
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
+    fun stopPlaybackRetainsReceiverStopBeforeReplacementCast() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        val source = "http://192.168.1.20/movie.mp4"
+        val actions = mutableListOf<String>()
+        val firstStopGate = CompletableDeferred<Unit>()
+        var stopCount = 0
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val action = request.headers["SOAPACTION"] ?: ""
+                    actions += action
+                    if (action.contains("#Stop")) {
+                        stopCount += 1
+                        if (stopCount == 1) firstStopGate.await()
+                    }
+                    respond("<ok/>", HttpStatusCode.OK)
+                }
+            }
+        }
+        lanBase = "http://192.168.1.50:8090"
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        val target = CastTarget.Dlna(
+            DlnaDevice("stop-r1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+        )
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(request.copy(sourceUrl = source), PlaybackDestination.Receiver(target))
+            advanceUntilIdle()
+            val initialCasts = actions.count { it.contains("#SetAVTransportURI") }
+            assertEquals(1, initialCasts, "state=${c.uiState.value} hls=${hlsModes} actions=${actions}")
+
+            c.stopPlayback()
+            advanceUntilIdle()
+            c.loadRequest(request.copy(sourceUrl = source), PlaybackDestination.Receiver(target))
+            advanceUntilIdle()
+            assertEquals(initialCasts, actions.count { it.contains("#SetAVTransportURI") })
+
+            firstStopGate.complete(Unit)
+            advanceUntilIdle()
+            assertEquals(initialCasts + 1, actions.count { it.contains("#SetAVTransportURI") })
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
+    fun airPlayDirectFailureFallsBackToRemuxForH264Aac() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult("matroska", "h264", listOf("aac"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        lanBase = "http://192.168.1.50:8090"
+        val c = controller()
+        c.loadRequest(
+            request.copy(sourceUrl = "http://h/movie.mkv"),
+            PlaybackDestination.AirPlay("air-1", "Living Room"),
+        )
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertTrue(hlsModes.isEmpty())
+
+        c.reportError("AirPlay decoder failure")
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals(listOf("remux"), hlsModes)
+    }
+
+    @Test
+    fun airPlayDirectFailureFallsBackToTranscodeForUnsupportedVideo() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult("webm", "vp9", listOf("opus"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        lanBase = "http://192.168.1.50:8090"
+        val c = controller()
+        c.loadRequest(
+            request.copy(sourceUrl = "http://h/movie.webm"),
+            PlaybackDestination.AirPlay("air-1", "Living Room"),
+        )
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.reportError("AirPlay unsupported video")
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertEquals(listOf("transcode"), hlsModes)
+    }
+
+    @Test
+    fun airPlayAlwaysProxySkipsDirectAttempt() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        lanBase = "http://192.168.1.50:8090"
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        c.loadRequest(
+            request.copy(sourceUrl = "http://h/movie.mp4"),
+            PlaybackDestination.AirPlay("air-1", "Living Room"),
+        )
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals(listOf("remux"), hlsModes)
+    }
+
+    @Test
+    fun localRoutingRemainsConservativeForUnsupportedVideo() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult("webm", "vp9", listOf("opus"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        val c = controller()
+        c.loadRequest(request.copy(sourceUrl = "http://h/movie.webm"), PlaybackDestination.Local)
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertEquals(listOf("transcode"), hlsModes)
+
+    }
+    @Test
+    fun airPlayProxyRequiresLanBase() = runTest(dispatcher.scheduler) {
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        val c = controller(settings)
+        c.loadRequest(
+            request.copy(sourceUrl = "http://h/movie.mp4"),
+            PlaybackDestination.AirPlay("air-1", "Living Room"),
+        )
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertTrue(c.uiState.value.error!!.contains("No local network address"), "error=${c.uiState.value.error}")
+    }
+
+    @Test
+    fun airPlaySubtitleChangeUsesAirPlayProxyProfileUnderDirectOverride() = runTest(dispatcher.scheduler) {
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "DIRECT")))
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        lanBase = "http://192.168.1.50:8090"
+        val c = controller(settings)
+        c.loadRequest(
+            request.copy(sourceUrl = "http://h/movie.mp4"),
+            PlaybackDestination.AirPlay("air-1", "Living Room"),
+        )
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
+        c.selectExternalSubtitle(track, positionMs = 15_000)
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals(listOf(track), hlsSubtitleTracks.last())
+    }
+
+    @Test
+    fun cancellingPendingRokuCastStopsTheReceiver() = runTest(dispatcher.scheduler) {
+        val urls = mutableListOf<String>()
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        val castGate = CompletableDeferred<Unit>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    urls += url
+                    if (url.contains("/input/15985")) castGate.await()
+                    respond("", HttpStatusCode.OK)
+                }
+            }
+        }
+        val c = controller()
+        val target = CastTarget.Roku(RokuDevice("pending-r1", "http://192.168.1.9:8060/", "Roku"))
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(
+                request.copy(sourceUrl = "http://192.168.1.20/movie.mp4"),
+                PlaybackDestination.Receiver(target),
+            )
+            advanceUntilIdle()
+
+            c.stopPlayback()
+            advanceUntilIdle()
+            castGate.complete(Unit)
+            advanceUntilIdle()
+
+            assertTrue(urls.any { it.endsWith("/keypress/Home") }, "urls=$urls")
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
     }
 }

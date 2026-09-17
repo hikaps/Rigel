@@ -41,6 +41,7 @@ object Bridges {
         sourceUrl: String,
         headers: Map<String, String>,
         mode: String,
+        passthroughAudioCodecs: List<String>,
         startOffsetMs: Long,
         subtitleTracks: List<SubtitleTrack>,
         onError: (String) -> Unit,
@@ -52,6 +53,7 @@ object Bridges {
                 sourceUrl,
                 headers,
                 mode,
+                passthroughAudioCodecs,
                 startOffsetMs,
                 subtitleTracks,
                 onReady = { path, error ->
