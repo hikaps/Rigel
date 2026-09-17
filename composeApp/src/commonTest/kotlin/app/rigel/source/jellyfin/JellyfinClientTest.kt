@@ -234,6 +234,24 @@ class JellyfinClientTest {
     }
 
     @Test
+    fun stopSessionPostsStopCommand() = kotlinx.coroutines.test.runTest {
+        val posted = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            posted += request.url.toString()
+            respond("", HttpStatusCode.NoContent)
+        }
+        val ok = JellyfinClient(HttpClient(engine)).stopSession(base, "tok", "s1")
+        assertTrue(ok)
+        assertEquals("$base/Sessions/s1/Playing/Stop", posted.single())
+    }
+
+    @Test
+    fun stopSessionFalseOnNon2xx() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { respond("", HttpStatusCode.InternalServerError) }
+        assertFalse(JellyfinClient(HttpClient(engine)).stopSession(base, "tok", "s1"))
+    }
+
+    @Test
     fun itemSubtitleTracksParsesExternalLanguages() = kotlinx.coroutines.test.runTest {
         val json = """
             {

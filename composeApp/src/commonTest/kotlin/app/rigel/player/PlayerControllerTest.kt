@@ -6,13 +6,26 @@ import app.rigel.bridge.ProbeResult
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.TranscodeBridge
 import app.rigel.bridge.SubtitleTrack
+import app.rigel.cast.CastDispatcher
+import app.rigel.cast.CastTarget
+import app.rigel.cast.DlnaDevice
 
 import app.rigel.gateway.PlaybackRoute
+import app.rigel.output.PlaybackDestination
 import app.rigel.intake.IntakeRequest
+import app.rigel.intake.JellyfinPlaybackContext
 import app.rigel.settings.LinkHistoryEntry
 import app.rigel.settings.RouteOverride
 import app.rigel.settings.SettingsStore
+import app.rigel.source.jellyfin.JellyfinClient
+import app.rigel.source.jellyfin.JellyfinSession
 import com.russhwolf.settings.MapSettings
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.TextContent
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -53,7 +66,10 @@ class PlayerControllerTest {
     /** When non-null, startHlsSession defers its onReady until fired here. */
     private var pendingReady: ((String?, String?) -> Unit)? = null
 
-    private fun controller(settings: SettingsStore = SettingsStore(MapSettings(mutableMapOf()))): PlayerController {
+    private fun controller(
+        settings: SettingsStore = SettingsStore(MapSettings(mutableMapOf())),
+        jellyfin: JellyfinClient? = null,
+    ): PlayerController {
         RigelBridgeFactory.register(
             discovery = null,
             probe = object : ProbeBridge {
@@ -98,7 +114,7 @@ class PlayerControllerTest {
                 override fun lanBaseUrl(): String? = lanBase
             },
         )
-        return PlayerController(settings)
+        return PlayerController(settings, jellyfin = jellyfin)
     }
 
     private val request = IntakeRequest(
@@ -119,6 +135,8 @@ class PlayerControllerTest {
     @AfterTest
     fun tearDown() {
         Dispatchers.resetMain()
+        CastDispatcher.clearActive()
+        CastDispatcher.install(null, null)
         RigelBridgeFactory.register(discovery = null, probe = null, transcode = null, httpServer = null)
     }
 
@@ -674,5 +692,89 @@ class PlayerControllerTest {
         assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
         assertNotNull(c.uiState.value.proxyUrl)
         pendingReady = null
+    }
+
+    @Test
+    fun proxyRebuildDuringCastKeepsRemoteTarget() = runTest(dispatcher.scheduler) {
+        val posted = mutableListOf<Pair<String, String?>>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    posted += request.url.toString() to ((request.body as? TextContent)?.text)
+                    respond("", HttpStatusCode.OK)
+                }
+            }
+        }
+        lanBase = "http://192.168.1.50:8090"
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        CastDispatcher.install(c, client)
+        try {
+            val target = CastTarget.Dlna(
+                DlnaDevice("usn-1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+            )
+            c.loadRequest(request, PlaybackDestination.Receiver(target))
+            advanceUntilIdle()
+            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+            assertTrue(c.uiState.value.remotePlayback)
+            val castsAfterLoad = posted.count { it.first.contains("/control") }
+
+            c.seek(45_000, 60_000)
+            advanceUntilIdle()
+
+            // The rebuild must re-derive the receiver and recast, not silently
+            // switch this media to local iPhone playback.
+            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+            assertTrue(c.uiState.value.remotePlayback)
+            assertTrue(c.uiState.value.castActive)
+            assertTrue(posted.count { it.first.contains("/control") } > castsAfterLoad)
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
+    fun replacementJellyfinPlayAwaitsPreviousSessionStop() = runTest(dispatcher.scheduler) {
+        val jfBase = "http://jf:8096"
+        val requests = mutableListOf<String>()
+        val stopGate = CompletableDeferred<Unit>()
+        val engineDispatcher = dispatcher
+        val client = JellyfinClient(HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    requests += url
+                    if (url.endsWith("/Playing/Stop")) stopGate.await()
+                    respond("", HttpStatusCode.NoContent)
+                }
+            }
+        })
+        val c = controller(jellyfin = client)
+        fun jfRequest(itemId: String) = request.copy(
+            sourceUrl = "$jfBase/Videos/$itemId/stream?Static=true&api_key=tok",
+            jellyfinContext = JellyfinPlaybackContext(jfBase, "tok", "u1", itemId),
+        )
+        fun jfTarget(sessionId: String) = PlaybackDestination.Receiver(
+            CastTarget.JellyfinSessionTarget(JellyfinSession(sessionId, "TV", "Jellyfin Web", jfBase)),
+        )
+
+        c.loadRequest(jfRequest("i1"), jfTarget("s1"))
+        advanceUntilIdle()
+        assertEquals(listOf("$jfBase/Sessions/s1/Playing"), requests)
+
+        c.loadRequest(jfRequest("i2"), jfTarget("s2"))
+        advanceUntilIdle()
+        // The old session's stop is still in flight; the replacement play must
+        // not have been issued yet, or the late stop would kill the new item.
+        assertTrue(requests.none { it.contains("/Sessions/s2/Playing") })
+        assertEquals("$jfBase/Sessions/s1/Playing/Stop", requests.last())
+
+        stopGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("$jfBase/Sessions/s2/Playing", requests.last())
     }
 }

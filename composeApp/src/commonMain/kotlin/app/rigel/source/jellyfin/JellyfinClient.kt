@@ -245,9 +245,10 @@ class JellyfinClient(private val http: HttpClient) {
         return resp != null && resp in 200..299
     }
 
+    /** Remote stop command for a client session (Playing/Stopped is the client-side report endpoint; it does not stop playback). */
     suspend fun stopSession(base: String, token: String, sessionId: String): Boolean {
         val resp = runCatching {
-            http.post(base.trimEnd('/') + "/Sessions/$sessionId/Playing/Stopped") {
+            http.post(base.trimEnd('/') + "/Sessions/$sessionId/Playing/Stop") {
                 header("X-Emby-Token", token)
             }.status.value
         }.getOrNull()

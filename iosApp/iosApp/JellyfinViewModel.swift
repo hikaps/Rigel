@@ -94,6 +94,8 @@ final class JellyfinViewModel: ObservableObject {
 
     func disconnect() {
         invalidateInFlight()
+        busy = false
+        searchBusy = false
         SwiftOutputSelection.shared.clearJellyfinServer(serverBase: settings.jellyfinServer())
         password = ""
         settings.setJellyfinToken(v: "")

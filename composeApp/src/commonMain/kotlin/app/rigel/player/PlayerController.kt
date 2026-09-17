@@ -143,10 +143,10 @@ class PlayerController(
     }
 
     fun loadRequest(request: IntakeRequest, destinationOverride: PlaybackDestination? = null) {
-        stopJellyfinIfActive()
+        val staleStop = stopJellyfinIfActive()
         invalidatePendingWork()
         val detachedTarget = CastDispatcher.detachActive()
-        if (detachedTarget != null) scope.launch { CastDispatcher.stopDetached(detachedTarget) }
+        val detachedStop = detachedTarget?.let { scope.launch { CastDispatcher.stopDetached(it) } }
         successCallbackUrl = request.successCallbackUrl
         val resolvedTitle = resolveTitle(request)
         settings.addToLinkHistory(request.sourceUrl, resolvedTitle)
@@ -173,9 +173,15 @@ class PlayerController(
             as? CastTarget.JellyfinSessionTarget
         if (jellyfinTarget != null) {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
-            pendingJob = scope.launch { playJellyfin(request, generation, jellyfinTarget) }
+            pendingJob = scope.launch {
+                awaitStaleStops(staleStop, detachedStop)
+                playJellyfin(request, generation, jellyfinTarget)
+            }
         } else {
-            pendingJob = scope.launch { probeAndRoute(request, generation) }
+            pendingJob = scope.launch {
+                awaitStaleStops(staleStop, detachedStop)
+                probeAndRoute(request, generation)
+            }
         }
     }
     fun selectLocal(positionMs: Long) = selectDestination(PlaybackDestination.Local, positionMs)
@@ -195,10 +201,11 @@ class PlayerController(
         val request = currentRequest ?: return
         val current = _uiState.value
         val probe = current.probe
-        val oldTarget = CastDispatcher.detachActive()
-        if (oldTarget != null) {
-            scope.launch { CastDispatcher.stopDetached(oldTarget) }
-        }
+        // Leaving a Jellyfin destination must stop that session too; both
+        // superseded stops complete before replacement playback is issued.
+        val staleStop = stopJellyfinIfActive()
+        val detachedStop = CastDispatcher.detachActive()
+            ?.let { scope.launch { CastDispatcher.stopDetached(it) } }
         invalidatePendingWork()
         currentDestination = destination
         val duration = probe?.durationMs
@@ -219,9 +226,15 @@ class PlayerController(
             as? CastTarget.JellyfinSessionTarget
         if (jellyfinTarget != null) {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
-            pendingJob = scope.launch { playJellyfin(request, generation, jellyfinTarget) }
+            pendingJob = scope.launch {
+                awaitStaleStops(staleStop, detachedStop)
+                playJellyfin(request, generation, jellyfinTarget)
+            }
         } else {
-            pendingJob = scope.launch { probeAndRoute(request, generation, probe) }
+            pendingJob = scope.launch {
+                awaitStaleStops(staleStop, detachedStop)
+                probeAndRoute(request, generation, probe)
+            }
         }
     }
 
@@ -491,7 +504,7 @@ class PlayerController(
                     probe = probe,
                     planDetail = playable.detail,
                 )
-                prepareProxy(probe, playable.route, generation, playable.passthroughAudioCodecs, remoteTarget)
+                prepareProxy(probe, playable.route, generation, playable.passthroughAudioCodecs)
             }
         }
     }
@@ -500,9 +513,11 @@ class PlayerController(
         route: PlaybackRoute,
         generation: Long,
         passthroughAudioCodecs: Set<String> = currentPassthroughAudioCodecs,
-        remoteTarget: CastTarget? = null,
     ) {
         if (!isCurrent(generation)) return
+        // Rebuild paths (seek, subtitle change, retry, fallback) re-derive the
+        // receiver here so a remote session never silently drops to local.
+        val remoteTarget = (currentDestination as? PlaybackDestination.Receiver)?.target
         val sourceUrl = _uiState.value.sourceUrl ?: run {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "No source URL")
             return
@@ -632,7 +647,7 @@ class PlayerController(
                     proxyUrl = null,
                     error = null,
                 )
-                prepareProxy(probe, PlaybackRoute.TRANSCODE, generation, emptySet(), remoteTarget)
+                prepareProxy(probe, PlaybackRoute.TRANSCODE, generation, emptySet())
                 return
             }
             _uiState.value = _uiState.value.copy(
@@ -678,7 +693,7 @@ class PlayerController(
                 route = PlaybackRoute.TRANSCODE,
                 error = null,
             )
-            prepareProxy(probe, PlaybackRoute.TRANSCODE, generation, emptySet(), target)
+            prepareProxy(probe, PlaybackRoute.TRANSCODE, generation, emptySet())
             return
         }
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = result.message)
@@ -725,12 +740,18 @@ class PlayerController(
             prepareProxy(probe, PlaybackRoute.REMUX, generation)
         }
     }
-    private fun stopJellyfinIfActive() {
+    /** Fire-and-forget stop for the active Jellyfin session; returns the job so replacement playback can await it. */
+    private fun stopJellyfinIfActive(): Job? {
         val target = (currentDestination as? PlaybackDestination.Receiver)?.target
-            as? CastTarget.JellyfinSessionTarget ?: return
-        val context = currentRequest?.jellyfinContext ?: return
-        val client = jellyfin ?: return
-        scope.launch { client.stopSession(context.baseUrl, context.token, target.session.id) }
+            as? CastTarget.JellyfinSessionTarget ?: return null
+        val context = currentRequest?.jellyfinContext ?: return null
+        val client = jellyfin ?: return null
+        return scope.launch { client.stopSession(context.baseUrl, context.token, target.session.id) }
+    }
+
+    /** Replacement playback awaits superseded stops so a late stop cannot kill the new session. */
+    private suspend fun awaitStaleStops(vararg stops: Job?) {
+        stops.forEach { it?.join() }
     }
 
     fun stopPlayback() {
