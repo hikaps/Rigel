@@ -101,6 +101,8 @@ class PlayerController(
     private var proxySessionSubtitleUrl: String? = null
     private var jellyfinStopJob: Job? = null
     private var receiverStopJob: Job? = null
+    private var pendingReceiverTarget: CastTarget? = null
+    private var pendingReceiverStopJob: Job? = null
     private var currentDestination: PlaybackDestination = PlaybackDestination.Local
     private var currentRequest: IntakeRequest? = null
     private var currentPassthroughAudioCodecs: Set<String> = OutputMediaProfiles.local.directAudioCodecs
@@ -148,7 +150,7 @@ class PlayerController(
         val outstandingStop = jellyfinStopJob
         val outstandingReceiverStop = receiverStopJob
         val staleStop = stopJellyfinIfActive()
-        invalidatePendingWork()
+        val pendingReceiverStop = invalidatePendingWork()
         val detachedTarget = CastDispatcher.detachActive()
         val detachedStop = detachedTarget?.let(::stopDetachedReceiver)
         successCallbackUrl = request.successCallbackUrl
@@ -178,12 +180,12 @@ class PlayerController(
         if (jellyfinTarget != null) {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, detachedStop)
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
                 playJellyfin(request, generation, jellyfinTarget)
             }
         } else {
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, detachedStop)
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
                 probeAndRoute(request, generation)
             }
         }
@@ -212,7 +214,7 @@ class PlayerController(
         val staleStop = stopJellyfinIfActive()
         val detachedStop = CastDispatcher.detachActive()
             ?.let(::stopDetachedReceiver)
-        invalidatePendingWork()
+        val pendingReceiverStop = invalidatePendingWork()
         currentDestination = destination
         val duration = probe?.durationMs
         val resume = if (duration != null && duration > 0) positionMs.coerceIn(0, duration) else positionMs.coerceAtLeast(0)
@@ -233,12 +235,12 @@ class PlayerController(
         if (jellyfinTarget != null) {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, detachedStop)
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
                 playJellyfin(request, generation, jellyfinTarget)
             }
         } else {
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, detachedStop)
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
                 probeAndRoute(request, generation, probe)
             }
         }
@@ -287,7 +289,7 @@ class PlayerController(
             val route = current.route ?: PlaybackRoute.REMUX
             val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
                 ?: positionMs.coerceAtLeast(0)
-            invalidatePendingWork()
+            val pendingReceiverStop = invalidatePendingWork()
             directFallbackUsed = false
             val generation = loadGeneration
             _uiState.value = cleared.copy(
@@ -296,7 +298,10 @@ class PlayerController(
                 proxyUrl = null,
                 startPositionMs = target,
             )
-            pendingJob = scope.launch { prepareProxy(probe, route, generation) }
+            pendingJob = scope.launch {
+                awaitStaleStops(pendingReceiverStop)
+                prepareProxy(probe, route, generation)
+            }
             return
         }
         if (track.url.isBlank()) return
@@ -322,7 +327,7 @@ class PlayerController(
 
         val route = (FormatRouter.decide(
             probe = probe,
-            profile = OutputMediaProfiles.local,
+            profile = profileForCurrentDestination(),
             hasSelectedExternalSubtitle = true,
             preference = settings.routeOverride(),
         ) as? RouteDecision.Playable)?.route ?: PlaybackRoute.TRANSCODE
@@ -332,7 +337,7 @@ class PlayerController(
         }
         val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
             ?: positionMs.coerceAtLeast(0)
-        invalidatePendingWork()
+        val pendingReceiverStop = invalidatePendingWork()
         directFallbackUsed = false
         val generation = loadGeneration
         _uiState.value = selected.copy(
@@ -341,7 +346,10 @@ class PlayerController(
             proxyUrl = null,
             startPositionMs = target,
         )
-        pendingJob = scope.launch { prepareProxy(probe, route, generation) }
+        pendingJob = scope.launch {
+            awaitStaleStops(pendingReceiverStop)
+            prepareProxy(probe, route, generation)
+        }
     }
 
     fun seek(positionMs: Long, durationMs: Long) {
@@ -366,7 +374,7 @@ class PlayerController(
         val route = current.route ?: return
         val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
             ?: positionMs.coerceAtLeast(0)
-        invalidatePendingWork()
+        val pendingReceiverStop = invalidatePendingWork()
         val generation = loadGeneration
         directFallbackUsed = false
         _uiState.value = current.copy(
@@ -374,11 +382,15 @@ class PlayerController(
             error = null,
             startPositionMs = target,
         )
-        pendingJob = scope.launch { prepareProxy(probe, route, generation) }
+        pendingJob = scope.launch {
+            awaitStaleStops(pendingReceiverStop)
+            prepareProxy(probe, route, generation)
+        }
     }
 
-    private fun invalidatePendingWork() {
+    private fun invalidatePendingWork(): Job? {
         val sessionId = pendingSessionId ?: _uiState.value.proxyUrl?.let(::extractSessionId)
+        val cancellationStop = schedulePendingReceiverStop(pendingJob)
         loadGeneration += 1
         pendingJob?.cancel()
         pendingJob = null
@@ -388,6 +400,41 @@ class PlayerController(
         }
         pendingSessionId = null
         proxySessionSubtitleUrl = null
+        return cancellationStop
+    }
+
+    private fun schedulePendingReceiverStop(pending: Job?): Job? {
+        val target = pendingReceiverTarget
+        val previous = pendingReceiverStopJob
+        if (target == null) return previous
+        val job = scope.launch {
+            previous?.join()
+            pending?.join()
+            stopReceiverBestEffort(target)
+        }
+        pendingReceiverStopJob = job
+        job.invokeOnCompletion {
+            if (pendingReceiverStopJob === job) pendingReceiverStopJob = null
+        }
+        return job
+    }
+
+    private suspend fun stopReceiverBestEffort(target: CastTarget) {
+        runCatching {
+            if (CastDispatcher.activeTarget()?.identityKey == target.identityKey) {
+                CastDispatcher.detachActive()
+            }
+            CastDispatcher.stopDetached(target)
+        }
+    }
+
+    private suspend fun castReceiver(target: CastTarget, media: PreparedCastMedia): app.rigel.cast.CastResult {
+        pendingReceiverTarget = target
+        return try {
+            CastDispatcher.cast(target, media)
+        } finally {
+            if (pendingReceiverTarget?.identityKey == target.identityKey) pendingReceiverTarget = null
+        }
     }
 
     private fun isCurrent(generation: Long): Boolean = generation == loadGeneration
@@ -592,17 +639,23 @@ class PlayerController(
             return
         }
         val lanBase = Bridges.lanBaseUrl()
-        if (remoteTarget != null && lanBase == null) {
+        val requiresLanBase = remoteTarget != null || currentDestination is PlaybackDestination.AirPlay
+        if (requiresLanBase && lanBase == null) {
             Bridges.stopHlsSession(sessionId)
             Bridges.stopHttpServer()
             if (pendingSessionId == sessionId) pendingSessionId = null
+            val destinationName = remoteTarget?.name ?: currentDestination.displayName
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
-                error = "No local network address is available for ${remoteTarget.name}",
+                error = "No local network address is available for $destinationName",
             )
             return
         }
-        val proxyUrl = "${lanBase ?: "http://127.0.0.1:$port"}/$relPath"
+        val proxyUrl = if (requiresLanBase) {
+            "${lanBase!!}/$relPath"
+        } else {
+            "${lanBase ?: "http://127.0.0.1:$port"}/$relPath"
+        }
         if (!isCurrent(generation)) {
             Bridges.stopHlsSession(sessionId)
             Bridges.stopHttpServer()
@@ -631,8 +684,9 @@ class PlayerController(
             phase = PlayerPhase.CONNECTING_OUTPUT,
             proxyUrl = proxyUrl,
         )
-        val result = CastDispatcher.cast(remoteTarget, media)
+        val result = castReceiver(remoteTarget, media)
         if (!isCurrent(generation)) {
+            stopReceiverBestEffort(remoteTarget)
             Bridges.stopHlsSession(sessionId)
             return
         }
@@ -681,8 +735,11 @@ class PlayerController(
             isLive = probe.isLive,
             origin = CastMediaOrigin.SOURCE,
         )
-        val result = CastDispatcher.cast(target, media)
-        if (!isCurrent(generation)) return
+        val result = castReceiver(target, media)
+        if (!isCurrent(generation)) {
+            stopReceiverBestEffort(target)
+            return
+        }
         if (result is app.rigel.cast.CastResult.Sent) {
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.PLAYING,
@@ -730,6 +787,12 @@ class PlayerController(
         }
     }
 
+
+    private fun profileForCurrentDestination(): OutputMediaProfile = when (val destination = currentDestination) {
+        PlaybackDestination.Local -> OutputMediaProfiles.local
+        is PlaybackDestination.AirPlay -> OutputMediaProfiles.airPlay(destination.displayName)
+        is PlaybackDestination.Receiver -> OutputMediaProfiles.familyDefault(destination.target)
+    }
     private fun failProxySession(sessionId: String, generation: Long, message: String) {
         if (!isCurrent(generation)) return
         loadGeneration += 1
@@ -745,11 +808,12 @@ class PlayerController(
     fun retryWithProxy() {
         val current = _uiState.value
         val sourceUrl = current.sourceUrl ?: return
-        invalidatePendingWork()
+        val pendingReceiverStop = invalidatePendingWork()
         directFallbackUsed = true
         val generation = loadGeneration
         _uiState.value = current.copy(phase = PlayerPhase.PROBING, error = null, route = PlaybackRoute.REMUX, proxyUrl = null)
         pendingJob = scope.launch {
+            awaitStaleStops(pendingReceiverStop)
             val (probe, _) = Bridges.probe(sourceUrl, emptyMap())
             if (!isCurrent(generation)) return@launch
             if (probe == null) {

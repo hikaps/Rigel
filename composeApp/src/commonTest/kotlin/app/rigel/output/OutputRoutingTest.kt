@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
 class OutputRoutingTest {
     private fun probe(
         container: String,
-        video: String = "h264",
+        video: String? = "h264",
         audio: List<String> = listOf("aac"),
         width: Int = 1280,
         height: Int = 720,
@@ -119,5 +119,32 @@ class OutputRoutingTest {
             sourceIsRemotelyReachable = true,
         ) as RouteDecision.Playable
         assertEquals(PlaybackRoute.TRANSCODE, local.route)
+    }
+
+    @Test
+    fun audioOnlyReceiverCanUseAdvertisedAacHlsWithoutVideoCodec() {
+        val profile = OutputMediaProfile(
+            mode = ReceiverCompatibilityMode.DECLARED,
+            source = CapabilitySource.ADVERTISED,
+            directSchemes = setOf("http"),
+            directContainers = setOf("mp4"),
+            directVideoCodecs = emptySet(),
+            directAudioCodecs = setOf("aac"),
+            directPixelFormats = emptySet(),
+            hlsVideoCodecs = emptySet(),
+            hlsAudioCodecs = setOf("aac"),
+            supportsHlsWebVtt = false,
+            detail = "Audio receiver",
+        )
+
+        val decision = FormatRouter.decide(
+            probe = probe("matroska", video = null),
+            profile = profile,
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+
+        assertEquals(PlaybackRoute.REMUX, decision.route)
     }
 }

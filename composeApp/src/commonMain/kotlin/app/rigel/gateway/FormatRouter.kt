@@ -131,9 +131,10 @@ object FormatRouter {
         profile: OutputMediaProfile,
         hasSelectedExternalSubtitle: Boolean,
     ): RouteDecision.Playable? {
-        if (profile.hlsVideoCodecs.isEmpty() || profile.hlsAudioCodecs.isEmpty()) return null
+        if (profile.hlsAudioCodecs.isEmpty()) return null
         if (hasSelectedExternalSubtitle && !profile.supportsHlsWebVtt) return null
         val video = probe.videoCodec?.lowercase()
+        if (video != null && profile.hlsVideoCodecs.isEmpty()) return null
         if (video != null && (video !in profile.hlsVideoCodecs || !directPlayablePixelFormat(probe.pixFmt))) return null
         if (video != null && !dimensionsFit(probe, profile)) return null
         val passthrough = probe.audioCodecs.map { it.lowercase() }
@@ -151,10 +152,11 @@ object FormatRouter {
         probe: ProbeResult,
         hasSelectedExternalSubtitle: Boolean,
     ): RouteDecision.Playable? {
-        if (profile.hlsVideoCodecs.contains("h264") &&
-            profile.hlsAudioCodecs.contains("aac") &&
+        val video = probe.videoCodec?.lowercase()
+        if (profile.hlsAudioCodecs.contains("aac") &&
+            (video == null || profile.hlsVideoCodecs.contains("h264")) &&
             (!hasSelectedExternalSubtitle || profile.supportsHlsWebVtt) &&
-            dimensionsFitTranscode(probe, profile)
+            (video == null || dimensionsFitTranscode(probe, profile))
         ) {
             return RouteDecision.Playable(
                 route = PlaybackRoute.TRANSCODE,
