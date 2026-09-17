@@ -19,10 +19,14 @@ object RokuEcp {
 
     fun launchQuery(media: PreparedCastMedia): String {
         val url = "u=${formEncode(media.url)}&k=%28null%29"
-        return if (media.kind == CastMediaKind.AUDIO) {
-            "t=a&$url&songname=${formEncode(media.title)}&songformat=${audioFormat(media.container)}"
-        } else {
-            "t=v&$url&videoName=${formEncode(media.title)}&videoFormat=${videoFormat(media.container)}"
+        val container = media.container.lowercase()
+        return when {
+            container == "m3u8" || container == "hls" ->
+                "t=v&$url&videoName=${formEncode(media.title)}&videoFormat=hls"
+            media.kind == CastMediaKind.AUDIO ->
+                "t=a&$url&songname=${formEncode(media.title)}&songformat=${audioFormat(media.container)}"
+            else ->
+                "t=v&$url&videoName=${formEncode(media.title)}&videoFormat=${videoFormat(media.container)}"
         }
     }
 

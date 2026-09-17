@@ -1,6 +1,7 @@
 package app.rigel.cast.dlna
 
 import app.rigel.cast.DlnaDevice
+import app.rigel.cast.CastTarget
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -214,5 +215,18 @@ class DlnaRendererTest {
         assertTrue(requests[0].first.contains("RenderingControl:1#GetMute"))
         assertTrue(requests[1].first.contains("RenderingControl:1#SetMute"))
         assertTrue(requests[1].second.contains("<DesiredMute>1</DesiredMute>"))
+    }
+
+    @Test
+    fun httpGetTransportMapsToHttpAndHttpsSchemes() = kotlinx.coroutines.test.runTest {
+        val sink = "<Sink>http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_BL_CIF15_AAC,http-get:*:audio/mp4:AAC_ISO</Sink>"
+        val engine = MockEngine { respond(sink, HttpStatusCode.OK) }
+        val target = CastTarget.Dlna(device.copy(connectionManagerUrl = "http://10.0.0.5:1234/connection"))
+
+        val profile = DlnaAdapter.mediaProfile(target, HttpClient(engine))
+
+        assertTrue(profile.directSchemes.contains("http"))
+        assertTrue(profile.directSchemes.contains("https"))
+        assertFalse(profile.directSchemes.contains("http-get"))
     }
 }

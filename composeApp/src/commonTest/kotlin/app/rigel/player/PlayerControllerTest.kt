@@ -777,4 +777,48 @@ class PlayerControllerTest {
         advanceUntilIdle()
         assertEquals("$jfBase/Sessions/s2/Playing", requests.last())
     }
+
+    @Test
+    fun stopPlaybackRetainsStopBeforeReplacementPlay() = runTest(dispatcher.scheduler) {
+        val jfBase = "http://jf:8096"
+        val requests = mutableListOf<String>()
+        val firstStopGate = CompletableDeferred<Unit>()
+        var stopCount = 0
+        val engineDispatcher = dispatcher
+        val client = JellyfinClient(HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    requests += url
+                    if (url.endsWith("/Playing/Stop")) {
+                        stopCount += 1
+                        if (stopCount == 1) firstStopGate.await()
+                    }
+                    respond("", HttpStatusCode.NoContent)
+                }
+            }
+        })
+        val c = controller(jellyfin = client)
+        fun jfRequest(itemId: String) = request.copy(
+            sourceUrl = "${jfBase}/Videos/${itemId}/stream?Static=true&api_key=tok",
+            jellyfinContext = JellyfinPlaybackContext(jfBase, "tok", "u1", itemId),
+        )
+        fun jfTarget(sessionId: String) = PlaybackDestination.Receiver(
+            CastTarget.JellyfinSessionTarget(JellyfinSession(sessionId, "TV", "Jellyfin Web", jfBase)),
+        )
+
+        c.loadRequest(jfRequest("i1"), jfTarget("s1"))
+        advanceUntilIdle()
+        c.stopPlayback()
+        advanceUntilIdle()
+
+        c.loadRequest(jfRequest("i2"), jfTarget("s2"))
+        advanceUntilIdle()
+        assertTrue(requests.none { it.contains("/Sessions/s2/Playing") })
+
+        firstStopGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("${jfBase}/Sessions/s2/Playing", requests.last())
+    }
 }

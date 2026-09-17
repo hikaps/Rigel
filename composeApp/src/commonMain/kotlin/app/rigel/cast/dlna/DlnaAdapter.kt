@@ -48,7 +48,10 @@ object DlnaAdapter : ReceiverAdapter {
             val scheme = fields[0].lowercase()
             val mime = fields[2].lowercase()
             val profile = fields.drop(3).joinToString(":").lowercase()
-            schemes += scheme
+            when (scheme) {
+                "http-get" -> schemes += setOf("http", "https")
+                else -> schemes += scheme
+            }
             val isHls = mime.contains("mpegurl") || mime.contains("m3u8")
             val isVideo = mime.startsWith("video/")
             val isAudio = mime.startsWith("audio/")
