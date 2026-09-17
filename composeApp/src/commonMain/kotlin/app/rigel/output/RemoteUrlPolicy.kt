@@ -18,7 +18,7 @@ object RemoteUrlPolicy {
     private fun isLoopbackIpv4(host: String): Boolean {
         val parts = host.split('.')
         if (parts.size !in 1..4 || parts.any { it.isEmpty() }) return false
-        val values = parts.map { it.toLongOrNull() ?: return false }
+        val values = parts.map { parseNumericPart(it) ?: return false }
         val address = when (parts.size) {
             1 -> values[0].takeIf { it <= 0xFFFF_FFFFL } ?: return false
             2 -> if (values[0] <= 0xFF && values[1] <= 0xFF_FFFFL) {
@@ -33,5 +33,16 @@ object RemoteUrlPolicy {
             else -> return false
         }
         return address in 0x7F000000L..0x7FFFFFFFL
+    }
+
+    private fun parseNumericPart(value: String): Long? {
+        val lower = value.lowercase()
+        val (digits, radix) = when {
+            lower.startsWith("0x") -> lower.substring(2) to 16
+            lower.length > 1 && lower.startsWith('0') -> lower.substring(1) to 8
+            else -> lower to 10
+        }
+        if (digits.isEmpty()) return null
+        return digits.toLongOrNull(radix)?.takeIf { it >= 0 }
     }
 }

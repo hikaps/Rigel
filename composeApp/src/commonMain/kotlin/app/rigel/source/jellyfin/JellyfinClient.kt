@@ -48,8 +48,11 @@ object JellyfinApi {
     fun normalizeServerBase(value: String): String {
         val trimmed = value.trim().trimEnd('/')
         val url = runCatching { Url(trimmed) }.getOrNull() ?: return trimmed
+        val host = url.host.lowercase().let { host ->
+            if (host.contains(':') && !host.startsWith('[')) "[$host]" else host
+        }
         val authority = buildString {
-            append(url.host.lowercase())
+            append(host)
             if (url.port != url.protocol.defaultPort) append(':').append(url.port)
         }
         return url.protocol.name.lowercase() + "://" + authority + url.encodedPath.trimEnd('/')

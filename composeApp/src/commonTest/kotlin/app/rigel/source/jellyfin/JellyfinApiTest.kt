@@ -86,4 +86,10 @@ class JellyfinApiTest {
             JellyfinApi.embyAuthHeader("dev", client = "C", device = "D", version = "9.9"),
         )
     }
+
+    @Test
+    fun normalizeServerBasePreservesIpv6AuthorityBrackets() {
+        assertEquals("http://[::1]:8096", JellyfinApi.normalizeServerBase("http://[::1]:8096/"))
+        assertEquals("https://[2001:db8::1]/jellyfin", JellyfinApi.normalizeServerBase("HTTPS://[2001:DB8::1]/jellyfin/"))
+    }
 }

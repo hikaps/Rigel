@@ -1415,10 +1415,10 @@ final class RigelPlayerViewController: UIViewController {
     }
 
 
-    func currentPositionMs() -> Int64 {
-        guard let player else { return 0 }
+    func currentPositionMs() -> Int64? {
+        guard let player else { return nil }
         let seconds = player.currentTime().seconds
-        guard seconds.isFinite, seconds >= 0 else { return 0 }
+        guard seconds.isFinite, seconds >= 0 else { return nil }
         return Int64((seconds * 1000).rounded(.down))
     }
     private func tearDownPlayer() {

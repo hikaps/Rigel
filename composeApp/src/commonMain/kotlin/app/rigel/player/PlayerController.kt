@@ -765,12 +765,29 @@ class PlayerController(
         if (!directFallbackUsed) {
             directFallbackUsed = true
             currentPassthroughAudioCodecs = emptySet()
+            val profile = capabilityResolver.profileFor(target)
+            currentOutputProfile = profile
+            val decision = FormatRouter.decide(
+                probe = probe,
+                profile = profile,
+                hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
+                preference = RouteOverride.ALWAYS_PROXY,
+                sourceIsRemotelyReachable = true,
+            )
+            val playable = decision as? RouteDecision.Playable ?: run {
+                _uiState.value = _uiState.value.copy(
+                    phase = PlayerPhase.ERROR,
+                    error = (decision as RouteDecision.Unsupported).message,
+                )
+                return
+            }
+            currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.PREPARING_PROXY,
-                route = PlaybackRoute.TRANSCODE,
+                route = playable.route,
                 error = null,
             )
-            prepareProxy(probe, PlaybackRoute.TRANSCODE, generation, emptySet())
+            prepareProxy(probe, playable.route, generation, playable.passthroughAudioCodecs)
             return
         }
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = result.message)
@@ -816,15 +833,22 @@ class PlayerController(
         Bridges.stopHttpServer()
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = message)
     }
-
-    private fun proxyRetryDecision(probe: ProbeResult): RouteDecision =
-        FormatRouter.decide(
+    private suspend fun proxyRetryDecision(probe: ProbeResult): RouteDecision {
+        val profile = currentOutputProfile ?: when (val destination = currentDestination) {
+            PlaybackDestination.Local -> OutputMediaProfiles.local
+            is PlaybackDestination.AirPlay -> OutputMediaProfiles.airPlay(destination.displayName)
+            is PlaybackDestination.Receiver -> capabilityResolver.profileFor(destination.target).also {
+                currentOutputProfile = it
+            }
+        }
+        return FormatRouter.decide(
             probe = probe,
-            profile = currentOutputProfile ?: profileForCurrentDestination(),
+            profile = profile,
             hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
             preference = RouteOverride.ALWAYS_PROXY,
             sourceIsRemotelyReachable = true,
         )
+    }
 
     /** Retry through the negotiated destination profile's safe proxy route. */
     fun retryWithProxy() {
