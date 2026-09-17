@@ -926,12 +926,12 @@ class PlayerController(
         val stopJob = stopJellyfinIfActive()
         if (stopJob != null) jellyfinStopJob = stopJob
         invalidatePendingWork()
+        _uiState.value = PlayerUiState()
         val detachedTarget = CastDispatcher.detachActive()
         detachedTarget?.let(::stopDetachedReceiver)
         Bridges.stopHttpServer()
         UrlIntake.fireSuccess(successCallbackUrl)
         successCallbackUrl = null
-        _uiState.value = PlayerUiState()
     }
 
     private fun airPlayFallbackDecision(probe: ProbeResult): RouteDecision.Playable? =

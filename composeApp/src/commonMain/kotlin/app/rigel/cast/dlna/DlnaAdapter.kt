@@ -42,6 +42,7 @@ object DlnaAdapter : ReceiverAdapter {
         val audios = mutableSetOf<String>()
         val hlsVideos = mutableSetOf<String>()
         val hlsAudios = mutableSetOf<String>()
+        var hasAdvertisedHlsEntry = false
         sink.split(',').forEach { raw ->
             val fields = raw.trim().split(':')
             if (fields.size < 4) return@forEach
@@ -53,6 +54,7 @@ object DlnaAdapter : ReceiverAdapter {
                 else -> schemes += scheme
             }
             val isHls = mime.contains("mpegurl") || mime.contains("m3u8")
+            if (isHls) hasAdvertisedHlsEntry = true
             val isVideo = mime.startsWith("video/")
             val isAudio = mime.startsWith("audio/")
             val h264 = profile.contains("avc") || profile.contains("h264")
@@ -73,6 +75,8 @@ object DlnaAdapter : ReceiverAdapter {
         if (containers.isEmpty() && videos.isEmpty() && audios.isEmpty()) {
             return OutputMediaProfiles.conservativeReceiver(name, "DLNA compatibility profile")
         }
+        val hlsFallback = !hasAdvertisedHlsEntry
+        val conservative = OutputMediaProfiles.conservativeReceiver(name)
         return OutputMediaProfile(
             mode = ReceiverCompatibilityMode.DECLARED,
             source = CapabilitySource.ADVERTISED,
@@ -81,9 +85,9 @@ object DlnaAdapter : ReceiverAdapter {
             directVideoCodecs = videos,
             directAudioCodecs = audios,
             directPixelFormats = setOf("yuv420p", "nv12"),
-            hlsVideoCodecs = hlsVideos,
-            hlsAudioCodecs = hlsAudios,
-            supportsHlsWebVtt = hlsVideos.isNotEmpty(),
+            hlsVideoCodecs = if (hlsFallback) conservative.hlsVideoCodecs else hlsVideos,
+            hlsAudioCodecs = if (hlsFallback) conservative.hlsAudioCodecs else hlsAudios,
+            supportsHlsWebVtt = if (hlsFallback) conservative.supportsHlsWebVtt else hlsVideos.isNotEmpty(),
             detail = name,
         )
     }

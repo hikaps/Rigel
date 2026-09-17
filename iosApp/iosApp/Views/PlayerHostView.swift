@@ -142,6 +142,7 @@ struct PlayerHostView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.white.opacity(0.8))
                     .padding(.vertical, 10)
+                    .contentShape(Rectangle())
             }
         } else if phase == .playing || phase == .buffering {
             let buffering = phase == .buffering || nativeBuffering
@@ -165,7 +166,14 @@ struct PlayerHostView: View {
                         if remoteStopSupported {
                             Button("Stop", role: .destructive) { player.stop() }
                                 .buttonStyle(.plain)
+                                .padding(.vertical, 10)
+                                .contentShape(Rectangle())
                         }
+                        Button("Close", role: .cancel) { player.stop() }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white.opacity(0.8))
+                            .padding(.vertical, 10)
+                            .contentShape(Rectangle())
                     }
                 } else if let url = player.playableURL {
                     PlayerView(
