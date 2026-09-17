@@ -67,6 +67,30 @@ final class ProbeTest: XCTestCase {
         )
     }
 
+    func testRemuxTimestampsRepairMissingSourceTimes() {
+        let first = RigelHlsExporter.repairedRemuxTimestamps(
+            pts: Int64.min,
+            dts: Int64.min,
+            duration: 0,
+            nextTimestamp: nil,
+            frameDuration: 40
+        )
+        XCTAssertEqual(first.pts, 0)
+        XCTAssertEqual(first.dts, 0)
+        XCTAssertEqual(first.nextTimestamp, 40)
+
+        let second = RigelHlsExporter.repairedRemuxTimestamps(
+            pts: Int64.min,
+            dts: Int64.min,
+            duration: 0,
+            nextTimestamp: first.nextTimestamp,
+            frameDuration: 40
+        )
+        XCTAssertEqual(second.pts, 40)
+        XCTAssertEqual(second.dts, 40)
+        XCTAssertEqual(second.nextTimestamp, 80)
+    }
+
     func testHardwareFramesContextUsesBufferData() {
         let size = MemoryLayout<AVHWFramesContext>.size
         guard let frames = av_buffer_alloc(size) else {

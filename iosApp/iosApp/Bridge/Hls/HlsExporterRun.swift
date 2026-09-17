@@ -490,6 +490,12 @@ extension RigelHlsExporter {
         var lastReadinessCheck = DispatchTime(uptimeNanoseconds: 0)
         var lastInputUs: Int64 = 0
         let externalSourceCount = externalSubtitleOutputs.count
+        let remuxVideoFrameDuration: Int64? = {
+            guard mode == "remux", let videoIndex = selectedVideoIndex,
+                  let videoStream = ctx.pointee.streams[Int(videoIndex)] else { return nil }
+            return remuxFrameDuration(inputStream: videoStream)
+        }()
+        var nextRemuxVideoTimestamp: Int64?
         while true {
             if isCancelled(session) { break }
             paceExport(session: session, exportedUs: lastInputUs)
@@ -527,6 +533,18 @@ extension RigelHlsExporter {
                             if let chain = videoChain, chain.inputIndex == inIdx {
                                 writeTranscodedVideo(chain: chain, packet: &primaryPacket, out: out, outStream: outStream)
                             } else {
+                                if let frameDuration = remuxVideoFrameDuration {
+                                    let repaired = repairedRemuxTimestamps(
+                                        pts: primaryPacket.pts,
+                                        dts: primaryPacket.dts,
+                                        duration: primaryPacket.duration,
+                                        nextTimestamp: nextRemuxVideoTimestamp,
+                                        frameDuration: frameDuration
+                                    )
+                                    primaryPacket.pts = repaired.pts
+                                    primaryPacket.dts = repaired.dts
+                                    nextRemuxVideoTimestamp = repaired.nextTimestamp
+                                }
                                 writeRemuxPacket(
                                     &primaryPacket,
                                     inStream: inStream,
