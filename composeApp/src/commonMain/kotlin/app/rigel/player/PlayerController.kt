@@ -100,6 +100,7 @@ class PlayerController(
     private var pendingSessionId: String? = null
     private var proxySessionSubtitleUrl: String? = null
     private var jellyfinStopJob: Job? = null
+    private var receiverStopJob: Job? = null
     private var currentDestination: PlaybackDestination = PlaybackDestination.Local
     private var currentRequest: IntakeRequest? = null
     private var currentPassthroughAudioCodecs: Set<String> = OutputMediaProfiles.local.directAudioCodecs
@@ -145,10 +146,11 @@ class PlayerController(
 
     fun loadRequest(request: IntakeRequest, destinationOverride: PlaybackDestination? = null) {
         val outstandingStop = jellyfinStopJob
+        val outstandingReceiverStop = receiverStopJob
         val staleStop = stopJellyfinIfActive()
         invalidatePendingWork()
         val detachedTarget = CastDispatcher.detachActive()
-        val detachedStop = detachedTarget?.let { scope.launch { CastDispatcher.stopDetached(it) } }
+        val detachedStop = detachedTarget?.let(::stopDetachedReceiver)
         successCallbackUrl = request.successCallbackUrl
         val resolvedTitle = resolveTitle(request)
         settings.addToLinkHistory(request.sourceUrl, resolvedTitle)
@@ -176,12 +178,12 @@ class PlayerController(
         if (jellyfinTarget != null) {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, detachedStop)
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, detachedStop)
                 playJellyfin(request, generation, jellyfinTarget)
             }
         } else {
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, detachedStop)
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, detachedStop)
                 probeAndRoute(request, generation)
             }
         }
@@ -206,9 +208,10 @@ class PlayerController(
         // Leaving a Jellyfin destination must stop that session too; both
         // superseded stops complete before replacement playback is issued.
         val outstandingStop = jellyfinStopJob
+        val outstandingReceiverStop = receiverStopJob
         val staleStop = stopJellyfinIfActive()
         val detachedStop = CastDispatcher.detachActive()
-            ?.let { scope.launch { CastDispatcher.stopDetached(it) } }
+            ?.let(::stopDetachedReceiver)
         invalidatePendingWork()
         currentDestination = destination
         val duration = probe?.durationMs
@@ -230,12 +233,12 @@ class PlayerController(
         if (jellyfinTarget != null) {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, detachedStop)
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, detachedStop)
                 playJellyfin(request, generation, jellyfinTarget)
             }
         } else {
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, detachedStop)
+                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, detachedStop)
                 probeAndRoute(request, generation, probe)
             }
         }
@@ -756,7 +759,20 @@ class PlayerController(
             prepareProxy(probe, PlaybackRoute.REMUX, generation)
         }
     }
-    /** Stop the active Jellyfin session and retain the job for replacement ordering. */
+    private fun stopDetachedReceiver(target: CastTarget): Job {
+        val previous = receiverStopJob
+        val job = scope.launch {
+            previous?.join()
+            CastDispatcher.stopDetached(target)
+        }
+        receiverStopJob = job
+        job.invokeOnCompletion {
+            if (receiverStopJob === job) receiverStopJob = null
+        }
+        return job
+    }
+
+
     private fun stopJellyfinIfActive(): Job? {
         val target = (currentDestination as? PlaybackDestination.Receiver)?.target
             as? CastTarget.JellyfinSessionTarget ?: return null
@@ -784,7 +800,7 @@ class PlayerController(
         if (stopJob != null) jellyfinStopJob = stopJob
         invalidatePendingWork()
         val detachedTarget = CastDispatcher.detachActive()
-        if (detachedTarget != null) scope.launch { CastDispatcher.stopDetached(detachedTarget) }
+        detachedTarget?.let(::stopDetachedReceiver)
         Bridges.stopHttpServer()
         UrlIntake.fireSuccess(successCallbackUrl)
         successCallbackUrl = null

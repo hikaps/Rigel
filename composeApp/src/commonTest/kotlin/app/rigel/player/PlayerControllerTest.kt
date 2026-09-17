@@ -859,4 +859,53 @@ class PlayerControllerTest {
             CastDispatcher.install(null, null)
         }
     }
+
+    @Test
+    fun stopPlaybackRetainsReceiverStopBeforeReplacementCast() = runTest(dispatcher.scheduler) {
+        val source = "http://192.168.1.20/movie.mp4"
+        val actions = mutableListOf<String>()
+        val firstStopGate = CompletableDeferred<Unit>()
+        var stopCount = 0
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val action = request.headers["SOAPACTION"] ?: ""
+                    actions += action
+                    if (action.contains("#Stop")) {
+                        stopCount += 1
+                        if (stopCount == 1) firstStopGate.await()
+                    }
+                    respond("<ok/>", HttpStatusCode.OK)
+                }
+            }
+        }
+        lanBase = "http://192.168.1.50:8090"
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        val target = CastTarget.Dlna(
+            DlnaDevice("stop-r1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+        )
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(request.copy(sourceUrl = source), PlaybackDestination.Receiver(target))
+            advanceUntilIdle()
+            val initialCasts = actions.count { it.contains("#SetAVTransportURI") }
+            assertEquals(1, initialCasts)
+
+            c.stopPlayback()
+            advanceUntilIdle()
+            c.loadRequest(request.copy(sourceUrl = source), PlaybackDestination.Receiver(target))
+            advanceUntilIdle()
+            assertEquals(initialCasts, actions.count { it.contains("#SetAVTransportURI") })
+
+            firstStopGate.complete(Unit)
+            advanceUntilIdle()
+            assertEquals(initialCasts + 1, actions.count { it.contains("#SetAVTransportURI") })
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
 }

@@ -162,8 +162,10 @@ struct PlayerHostView: View {
                         }
                         Button("Playback destinations") { showDevicesPicker = true }
                             .buttonStyle(.bordered)
-                        Button("Stop", role: .destructive) { player.stop() }
-                            .buttonStyle(.plain)
+                        if remoteStopSupported {
+                            Button("Stop", role: .destructive) { player.stop() }
+                                .buttonStyle(.plain)
+                        }
                     }
                 } else if let url = player.playableURL {
                     PlayerView(
@@ -259,7 +261,11 @@ struct PlayerHostView: View {
         }
     }
 
-    @ViewBuilder
+    private var remoteStopSupported: Bool {
+        guard player.remotePlayback, let target = CastDispatcher.shared.activeTarget() else { return true }
+        return CastDispatcher.shared.capabilities(target: target).supportsStop
+    }
+
     private func stateContent<Content: View>(
         @ViewBuilder content: () -> Content
     ) -> some View {

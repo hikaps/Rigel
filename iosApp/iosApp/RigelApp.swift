@@ -28,12 +28,10 @@ final class AirPlayRouteMonitor: NSObject {
         let airPlay = session.currentRoute.outputs.first { $0.portType == .airPlay }
         let selection = SwiftOutputSelection.shared.snapshot()
         if let airPlay {
-            if selection.kind == .local || selection.kind == .airplay {
-                SwiftOutputSelection.shared.selectAirPlay(
-                    routeId: airPlay.uid,
-                    name: airPlay.portName
-                )
-            }
+            SwiftOutputSelection.shared.selectAirPlay(
+                routeId: airPlay.uid,
+                name: airPlay.portName
+            )
         } else if selection.kind == .airplay {
             SwiftOutputSelection.shared.selectLocal()
         }
