@@ -817,14 +817,23 @@ class PlayerController(
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = message)
     }
 
-    /** Error retry: force the REMUX proxy path. */
+    private fun proxyRetryDecision(probe: ProbeResult): RouteDecision =
+        FormatRouter.decide(
+            probe = probe,
+            profile = currentOutputProfile ?: profileForCurrentDestination(),
+            hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
+            preference = RouteOverride.ALWAYS_PROXY,
+            sourceIsRemotelyReachable = true,
+        )
+
+    /** Retry through the negotiated destination profile's safe proxy route. */
     fun retryWithProxy() {
         val current = _uiState.value
         val sourceUrl = current.sourceUrl ?: return
         val pendingReceiverStop = invalidatePendingWork()
         directFallbackUsed = true
         val generation = loadGeneration
-        _uiState.value = current.copy(phase = PlayerPhase.PROBING, error = null, route = PlaybackRoute.REMUX, proxyUrl = null)
+        _uiState.value = current.copy(phase = PlayerPhase.PROBING, error = null, route = null, proxyUrl = null)
         pendingJob = scope.launch {
             awaitStaleStops(pendingReceiverStop)
             val (probe, _) = Bridges.probe(sourceUrl, emptyMap())
@@ -833,8 +842,24 @@ class PlayerController(
                 _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "Probe failed again")
                 return@launch
             }
-            _uiState.value = _uiState.value.copy(probe = probe)
-            prepareProxy(probe, PlaybackRoute.REMUX, generation)
+            val decision = proxyRetryDecision(probe)
+            val playable = decision as? RouteDecision.Playable ?: run {
+                _uiState.value = _uiState.value.copy(
+                    phase = PlayerPhase.ERROR,
+                    probe = probe,
+                    error = (decision as RouteDecision.Unsupported).message,
+                )
+                return@launch
+            }
+            currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.PREPARING_PROXY,
+                route = playable.route,
+                probe = probe,
+                error = null,
+                planDetail = playable.detail,
+            )
+            prepareProxy(probe, playable.route, generation, playable.passthroughAudioCodecs)
         }
     }
     private fun stopDetachedReceiver(target: CastTarget): Job {

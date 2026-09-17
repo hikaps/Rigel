@@ -31,6 +31,7 @@ final class AirPlayRouteMonitor: NSObject {
         let activePlayback = playerState.phase != .idle &&
             playerState.phase != .error &&
             playerState.sourceUrl != nil
+        let livePositionMs = SwiftPlayer.shared.currentPositionMs()
         if let airPlay {
             SwiftOutputSelection.shared.selectAirPlay(
                 routeId: airPlay.uid,
@@ -40,12 +41,12 @@ final class AirPlayRouteMonitor: NSObject {
                 SwiftPlayer.shared.selectAirPlay(
                     routeId: airPlay.uid,
                     name: airPlay.portName,
-                    positionMs: playerState.startPositionMs
+                    positionMs: livePositionMs
                 )
             }
         } else if selection.kind == .airplay {
             if activePlayback {
-                SwiftPlayer.shared.selectLocal(positionMs: playerState.startPositionMs)
+                SwiftPlayer.shared.selectLocal(positionMs: livePositionMs)
             } else {
                 SwiftOutputSelection.shared.selectLocal()
             }

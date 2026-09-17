@@ -1414,6 +1414,13 @@ final class RigelPlayerViewController: UIViewController {
         deactivateAudioSession()
     }
 
+
+    func currentPositionMs() -> Int64 {
+        guard let player else { return 0 }
+        let seconds = player.currentTime().seconds
+        guard seconds.isFinite, seconds >= 0 else { return 0 }
+        return Int64((seconds * 1000).rounded(.down))
+    }
     private func tearDownPlayer() {
         externalPlaybackObservation?.invalidate()
         externalPlaybackObservation = nil

@@ -45,6 +45,10 @@ final class RigelPlayerBridge: NSObject, NativePlayerBridge {
         vc = nil
     }
 
+    func currentPositionMs() -> Int64 {
+        vc?.currentPositionMs() ?? 0
+    }
+
     /// Stops the given controller (per-player disposal is always safe; audio
     /// session release is reference-counted). Returns true only when that
     /// controller was still the bridge's current one, letting callers discard

@@ -70,6 +70,8 @@ class OutputRoutingTest {
         assertFalse(RemoteUrlPolicy.isReceiverFetchable("http://127.0.0.1:8080/movie.mp4", profile))
         assertFalse(RemoteUrlPolicy.isReceiverFetchable("http://localhost./movie.mp4", profile))
         assertFalse(RemoteUrlPolicy.isReceiverFetchable("file:///movie.mp4", profile))
+        assertFalse(RemoteUrlPolicy.isReceiverFetchable("http://127.1/movie.mp4", profile))
+        assertFalse(RemoteUrlPolicy.isReceiverFetchable("http://2130706433/movie.mp4", profile))
         assertTrue(RemoteUrlPolicy.isReceiverFetchable("http://192.168.1.20/movie.mp4", profile))
     }
 

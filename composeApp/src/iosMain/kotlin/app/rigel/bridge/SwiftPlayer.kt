@@ -18,6 +18,8 @@ object SwiftPlayer {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     fun snapshot(): PlayerUiState = RigelCore.controller.uiState.value
+    fun currentPositionMs(): Long =
+        PlayerBridgeFactory.create()?.currentPositionMs() ?: RigelCore.controller.uiState.value.startPositionMs
 
     /** Fires on the main thread on every state change; cancel the Job to stop observing. */
     fun observe(onChange: (PlayerUiState) -> Unit): Job =

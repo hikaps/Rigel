@@ -11,12 +11,27 @@ object RemoteUrlPolicy {
         val host = url.host.trim().trim('[', ']').lowercase().trimEnd('.')
         if (host.isEmpty() || host == "localhost" || host.endsWith(".localhost")) return false
         if (host == "0.0.0.0" || host == "::" || host == "0:0:0:0:0:0:0:0" || host == "::1") return false
-        val first = host.substringBefore('.')
-        val ipv4Parts = host.split('.')
-        if (ipv4Parts.size == 4 && ipv4Parts.all { it.toIntOrNull() != null }) {
-            val firstOctet = first.toInt()
-            if (firstOctet == 127) return false
-        }
+        if (isLoopbackIpv4(host)) return false
         return true
+    }
+
+    private fun isLoopbackIpv4(host: String): Boolean {
+        val parts = host.split('.')
+        if (parts.size !in 1..4 || parts.any { it.isEmpty() }) return false
+        val values = parts.map { it.toLongOrNull() ?: return false }
+        val address = when (parts.size) {
+            1 -> values[0].takeIf { it <= 0xFFFF_FFFFL } ?: return false
+            2 -> if (values[0] <= 0xFF && values[1] <= 0xFF_FFFFL) {
+                values[0] * 0x1000000L + values[1]
+            } else return false
+            3 -> if (values[0] <= 0xFF && values[1] <= 0xFF && values[2] <= 0xFFFF) {
+                values[0] * 0x1000000L + values[1] * 0x10000L + values[2]
+            } else return false
+            4 -> if (values.all { it <= 0xFF }) {
+                values[0] * 0x1000000L + values[1] * 0x10000L + values[2] * 0x100L + values[3]
+            } else return false
+            else -> return false
+        }
+        return address in 0x7F000000L..0x7FFFFFFFL
     }
 }
