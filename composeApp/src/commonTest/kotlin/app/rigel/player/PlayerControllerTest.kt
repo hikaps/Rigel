@@ -778,7 +778,7 @@ class PlayerControllerTest {
 
         c.loadRequest(jfRequest("i1"), jfTarget("s1"))
         advanceUntilIdle()
-        assertEquals(listOf("$jfBase/Sessions/s1/Playing"), requests)
+        assertEquals(listOf("$jfBase/Sessions/s1/Playing?playCommand=PlayNow&itemIds=i1&startPositionTicks=0"), requests)
 
         c.loadRequest(jfRequest("i2"), jfTarget("s2"))
         advanceUntilIdle()
@@ -789,7 +789,7 @@ class PlayerControllerTest {
 
         stopGate.complete(Unit)
         advanceUntilIdle()
-        assertEquals("$jfBase/Sessions/s2/Playing", requests.last())
+        assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0", requests.last())
     }
 
     @Test
@@ -833,7 +833,7 @@ class PlayerControllerTest {
 
         firstStopGate.complete(Unit)
         advanceUntilIdle()
-        assertEquals("${jfBase}/Sessions/s2/Playing", requests.last())
+        assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0", requests.last())
     }
 
     @Test

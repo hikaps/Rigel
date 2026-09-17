@@ -200,31 +200,41 @@ class JellyfinClientTest {
     }
 
     @Test
-    fun sessionsParseDeviceAndClient() = kotlinx.coroutines.test.runTest {
+    fun sessionsFilterControllableClientsAndIgnorePropertyOrder() = kotlinx.coroutines.test.runTest {
+        val requested = mutableListOf<String>()
         val json = """[
-            {"Id":"s1","DeviceName":"iPhone","Client":"Jellyfin Mobile"},
-            {"Id":"s2","DeviceName":"Living Room","Client":"Jellyfin for Roku"}
+            {"Id":"s1","Client":"Jellyfin Mobile","DeviceName":"iPhone","SupportsMediaControl":true},
+            {"Id":"s2","Client":"Jellyfin Web","DeviceName":"Browser","SupportsMediaControl":false}
         ]"""
-        val engine = MockEngine { respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
-        val sessions = JellyfinClient(HttpClient(engine)).sessions(base, "tok")
-        assertEquals(2, sessions.size)
-        assertEquals(JellyfinSession("s1", "iPhone", "Jellyfin Mobile", base), sessions[0])
-        assertEquals(JellyfinSession("s2", "Living Room", "Jellyfin for Roku", base), sessions[1])
+        val engine = MockEngine { request ->
+            requested += request.url.toString()
+            respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val sessions = JellyfinClient(HttpClient(engine)).sessions(base, "tok", "user-1")
+
+        assertEquals("$base/Sessions?controllableByUserId=user-1", requested.single())
+        assertEquals(1, sessions.size)
+        assertEquals(
+            JellyfinSession("s1", "iPhone", "Jellyfin Mobile", base, supportsMediaControl = true),
+            sessions.single(),
+        )
     }
 
     @Test
-    fun playToSessionPostsPlayCommand() = kotlinx.coroutines.test.runTest {
-        val posted = mutableListOf<Pair<String, String>>()
+    fun playToSessionUsesJellyfinQueryParameters() = kotlinx.coroutines.test.runTest {
+        val requested = mutableListOf<io.ktor.http.Url>()
         val engine = MockEngine { request ->
-            if (request.method == HttpMethod.Post) {
-                posted += request.url.toString() to ((request.body as? TextContent)?.text ?: "")
-            }
+            if (request.method == HttpMethod.Post) requested += request.url
             respond("", HttpStatusCode.OK)
         }
         val ok = JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("a", "b"))
+
         assertTrue(ok)
-        assertEquals("$base/Sessions/s1/Playing", posted[0].first)
-        assertTrue(posted[0].second.contains("\"ItemIds\":[\"a\",\"b\"]"))
+        val url = requested.single()
+        assertEquals("/Sessions/s1/Playing", url.encodedPath)
+        assertEquals("PlayNow", url.parameters["playCommand"])
+        assertEquals("a,b", url.parameters["itemIds"])
+        assertEquals("0", url.parameters["startPositionTicks"])
     }
 
     @Test

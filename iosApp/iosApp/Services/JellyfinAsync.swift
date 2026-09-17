@@ -131,9 +131,9 @@ extension JellyfinClient {
         }
     }
 
-    func sessionsAsync(base: String, token: String) async -> [JellyfinSession] {
+    func sessionsAsync(base: String, token: String, userId: String) async -> [JellyfinSession] {
         (try? await JellyfinAsync.run {
-            self.sessions(base: base, token: token, completionHandler: $0)
+            self.sessions(base: base, token: token, userId: userId, completionHandler: $0)
         }) ?? []
     }
 

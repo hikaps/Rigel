@@ -26,6 +26,7 @@ data class JellyfinSession(
     val deviceName: String,
     val client: String,
     val serverBase: String = "",
+    val supportsMediaControl: Boolean? = null,
 )
 
 data class JellyfinAuth(
@@ -99,8 +100,20 @@ object JellyfinApi {
             "/Videos/${encodeUrlComponent(itemId)}/${encodeUrlComponent(mediaSourceId)}" +
             "/Subtitles/$index/Stream.vtt?api_key=${encodeUrlComponent(token)}"
 
-    fun playCommand(itemIds: List<String>, command: String = "PlayNow"): String =
-        """{"ItemIds":[${itemIds.joinToString(",") { "\"$it\"" }}],"PlayCommand":"$command","StartPositionTicks":0}"""
+    fun playUrl(
+        base: String,
+        sessionId: String,
+        itemIds: List<String>,
+        command: String = "PlayNow",
+        startPositionTicks: Long = 0,
+    ): String =
+        base.trimEnd('/') + "/Sessions/${encodeUrlComponent(sessionId)}/Playing" +
+            "?playCommand=${encodeUrlComponent(command)}" +
+            "&itemIds=${itemIds.joinToString(",") { encodeUrlComponent(it) }}" +
+            "&startPositionTicks=$startPositionTicks"
+
+    fun sessionsUrl(base: String, userId: String): String =
+        base.trimEnd('/') + "/Sessions?controllableByUserId=${encodeUrlComponent(userId)}"
 
     fun jsonEscape(s: String): String =
         s.replace("\\", "\\\\").replace("\"", "\\\"")
@@ -225,24 +238,36 @@ class JellyfinClient(private val http: HttpClient) {
         }
     }
 
-    suspend fun sessions(base: String, token: String): List<JellyfinSession> {
+    suspend fun sessions(base: String, token: String, userId: String): List<JellyfinSession> {
         val normalizedBase = JellyfinApi.normalizeServerBase(base)
         val resp = runCatching {
-            http.get(normalizedBase + "/Sessions") { header("X-Emby-Token", token) }.bodyAsText()
+            http.get(JellyfinApi.sessionsUrl(normalizedBase, userId)) {
+                header("X-Emby-Token", token)
+            }.bodyAsText()
         }.getOrNull() ?: return emptyList()
         val out = mutableListOf<JellyfinSession>()
-        for (m in Regex("""\{[^{}]*?"Id":"([^"]+)"[^{}]*?"DeviceName":"([^"]+)"[^{}]*?"Client":"([^"]+)"[^{}]*?}""").findAll(resp)) {
-            out += JellyfinSession(m.groupValues[1], m.groupValues[2], m.groupValues[3], normalizedBase)
-        }
+        JsonObjectReader(
+            source = resp,
+            onObjectAtPath = { path, fields ->
+                if (path.size != 1) return@JsonObjectReader
+                val id = fields["Id"] ?: return@JsonObjectReader
+                val deviceName = fields["DeviceName"] ?: return@JsonObjectReader
+                val client = fields["Client"] ?: return@JsonObjectReader
+                val supportsMediaControl = fields["SupportsMediaControl"]
+                    ?.let { it.equals("true", ignoreCase = true) }
+                    ?: fields["SupportsRemoteControl"]
+                        ?.let { it.equals("true", ignoreCase = true) }
+                if (supportsMediaControl == false) return@JsonObjectReader
+                out += JellyfinSession(id, deviceName, client, normalizedBase, supportsMediaControl)
+            },
+        ).parseObjectsWithPaths()
         return out
     }
     /** Cast a library item to a logged-in Jellyfin client session. */
     suspend fun playToSession(base: String, token: String, sessionId: String, itemIds: List<String>): Boolean {
         val resp = runCatching {
-            http.post(base.trimEnd('/') + "/Sessions/$sessionId/Playing") {
+            http.post(JellyfinApi.playUrl(base, sessionId, itemIds)) {
                 header("X-Emby-Token", token)
-                contentType(ContentType.Application.Json)
-                setBody(JellyfinApi.playCommand(itemIds))
             }.status.value
         }.getOrNull()
         return resp != null && resp in 200..299

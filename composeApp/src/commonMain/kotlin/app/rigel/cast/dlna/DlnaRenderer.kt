@@ -12,6 +12,7 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.userAgent
+import io.ktor.http.Url
 
 /**
  * Device-description parsing (no SCRD fetch per plan): extracts friendlyName,
@@ -85,6 +86,14 @@ object DlnaDeviceDescription {
             location.substringBeforeLast('/', location) + "/" + controlUrl
         }
     }
+
+    internal fun sameOrigin(first: String, second: String): Boolean {
+        val firstUrl = runCatching { Url(first) }.getOrNull() ?: return false
+        val secondUrl = runCatching { Url(second) }.getOrNull() ?: return false
+        return firstUrl.protocol.name.equals(secondUrl.protocol.name, ignoreCase = true) &&
+            firstUrl.host.equals(secondUrl.host, ignoreCase = true) &&
+            firstUrl.port == secondUrl.port
+    }
 }
 
 /** DLNA renderer control over UPnP AVTransport (playback) and RenderingControl (volume) SOAP. */
@@ -98,6 +107,7 @@ class DlnaRenderer(private val client: HttpClient) {
 
     suspend fun sinkProtocolInfo(device: DlnaDevice): String? {
         val url = device.connectionManagerUrl ?: return null
+        if (!DlnaDeviceDescription.sameOrigin(device.location, url)) return null
         val xml = postForBody(
             url,
             DlnaSoap.CONNECTION_MANAGER_TYPE,

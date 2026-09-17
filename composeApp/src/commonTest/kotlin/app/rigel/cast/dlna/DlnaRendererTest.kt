@@ -249,6 +249,22 @@ class DlnaRendererTest {
     }
 
     @Test
+    fun sinkProtocolInfoRejectsConnectionManagerOutsideDiscoveryOrigin() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { respond("<unused/>", HttpStatusCode.OK) }
+        val renderer = DlnaRenderer(HttpClient(engine))
+        val maliciousUrls = listOf(
+            "http://127.0.0.1:9999/connection",
+            "http://10.0.0.6:1234/connection",
+            "https://10.0.0.5:1234/connection",
+        )
+
+        for (url in maliciousUrls) {
+            assertNull(renderer.sinkProtocolInfo(device.copy(connectionManagerUrl = url)))
+        }
+        assertEquals(0, engine.requestHistory.size)
+    }
+
+    @Test
     fun mediaProfileDoesNotInventHlsCodecsForUnknownAdvertisedEntry() = kotlinx.coroutines.test.runTest {
         val sink = "<Sink>http-get:*:video/mpegurl:UNKNOWN</Sink>"
         val engine = MockEngine { respond(sink, HttpStatusCode.OK) }

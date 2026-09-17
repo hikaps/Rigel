@@ -77,8 +77,9 @@ class DevicesRepository(
         if (jellyfin != null) {
             val base = settings.jellyfinServer().trim().trimEnd('/')
             val token = settings.jellyfinToken()
-            if (base.isNotEmpty() && token.isNotEmpty()) {
-                runCatching { jellyfin.sessions(base, token) }
+            val userId = settings.jellyfinUserId()
+            if (base.isNotEmpty() && token.isNotEmpty() && userId.isNotEmpty()) {
+                runCatching { jellyfin.sessions(base, token, userId) }
                     .getOrDefault(emptyList())
                     .forEach { found += DiscoveredDevice(CastTarget.JellyfinSessionTarget(it), "jellyfin") }
             }
