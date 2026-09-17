@@ -87,6 +87,11 @@ object OutputMediaProfiles {
         detail = name,
     )
 
+    fun airPlay(name: String) = optimisticHttp(name.ifBlank { "AirPlay" }).copy(
+        directSchemes = setOf("http", "https", "file"),
+        detail = name.ifBlank { "AirPlay" },
+    )
+
     fun familyDefault(target: CastTarget): OutputMediaProfile = when (target) {
         is CastTarget.Dlna -> conservativeReceiver(target.name, "DLNA compatibility profile")
         is CastTarget.Roku -> conservativeReceiver(target.name, "Roku compatibility profile")

@@ -908,4 +908,84 @@ class PlayerControllerTest {
             CastDispatcher.install(null, null)
         }
     }
+
+    @Test
+    fun airPlayDirectFailureFallsBackToRemuxForH264Aac() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult("matroska", "h264", listOf("aac"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        val c = controller()
+        c.loadRequest(
+            request.copy(sourceUrl = "http://h/movie.mkv"),
+            PlaybackDestination.AirPlay("air-1", "Living Room"),
+        )
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertTrue(hlsModes.isEmpty())
+
+        c.reportError("AirPlay decoder failure")
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals(listOf("remux"), hlsModes)
+    }
+
+    @Test
+    fun airPlayDirectFailureFallsBackToTranscodeForUnsupportedVideo() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult("webm", "vp9", listOf("opus"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        val c = controller()
+        c.loadRequest(
+            request.copy(sourceUrl = "http://h/movie.webm"),
+            PlaybackDestination.AirPlay("air-1", "Living Room"),
+        )
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.reportError("AirPlay unsupported video")
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertEquals(listOf("transcode"), hlsModes)
+    }
+
+    @Test
+    fun airPlayAlwaysProxySkipsDirectAttempt() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        c.loadRequest(
+            request.copy(sourceUrl = "http://h/movie.mp4"),
+            PlaybackDestination.AirPlay("air-1", "Living Room"),
+        )
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals(listOf("remux"), hlsModes)
+    }
+
+    @Test
+    fun localRoutingRemainsConservativeForUnsupportedVideo() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult("webm", "vp9", listOf("opus"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        val c = controller()
+        c.loadRequest(request.copy(sourceUrl = "http://h/movie.webm"), PlaybackDestination.Local)
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertEquals(listOf("transcode"), hlsModes)
+    }
 }

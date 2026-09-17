@@ -89,5 +89,35 @@ class OutputRoutingTest {
         assertEquals(first, third)
         repository.invalidate(target)
         assertEquals(first, repository.profileFor(target))
+
+    }
+    @Test
+    fun airPlayTriesDirectBeforeProxyForUnknownReceiverCodec() {
+        val airPlayDirect = FormatRouter.decide(
+            probe = probe("webm", video = "vp9"),
+            profile = OutputMediaProfiles.airPlay("Living Room"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.DIRECT, airPlayDirect.route)
+
+        val airPlayProxy = FormatRouter.decide(
+            probe = probe("webm", video = "vp9"),
+            profile = OutputMediaProfiles.airPlay("Living Room"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.ALWAYS_PROXY,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.TRANSCODE, airPlayProxy.route)
+
+        val local = FormatRouter.decide(
+            probe = probe("webm", video = "vp9"),
+            profile = OutputMediaProfiles.local,
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.TRANSCODE, local.route)
     }
 }

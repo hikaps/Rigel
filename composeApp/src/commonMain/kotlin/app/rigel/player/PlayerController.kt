@@ -465,7 +465,8 @@ class PlayerController(
             return
         }
         val profile = when (destination) {
-            PlaybackDestination.Local, is PlaybackDestination.AirPlay -> OutputMediaProfiles.local
+            PlaybackDestination.Local -> OutputMediaProfiles.local
+            is PlaybackDestination.AirPlay -> OutputMediaProfiles.airPlay(destination.displayName)
             is PlaybackDestination.Receiver -> capabilityResolver.profileFor(destination.target)
         }
         val remoteTarget = (destination as? PlaybackDestination.Receiver)?.target
@@ -807,6 +808,16 @@ class PlayerController(
         _uiState.value = PlayerUiState()
     }
 
+    private fun airPlayFallbackDecision(probe: ProbeResult): RouteDecision.Playable? =
+        FormatRouter.decide(
+            probe = probe,
+            profile = OutputMediaProfiles.local.copy(detail = currentDestination.displayName),
+            hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
+            preference = RouteOverride.ALWAYS_PROXY,
+            sourceIsRemotelyReachable = true,
+        ) as? RouteDecision.Playable
+
+
     /**
      * Native playback failure seam. A DIRECT decoder failure gets exactly one
      * automatic demotion to the TRANSCODE proxy. REMUX would preserve the
@@ -821,6 +832,37 @@ class PlayerController(
             current.phase == PlayerPhase.PROBING ||
             current.phase == PlayerPhase.BUFFERING
         ) return
+        val airPlayProbe = current.probe
+        if (currentDestination is PlaybackDestination.AirPlay &&
+            !directFallbackUsed &&
+            current.phase == PlayerPhase.PLAYING &&
+            current.route == PlaybackRoute.DIRECT &&
+            current.proxyUrl == null &&
+            airPlayProbe != null
+        ) {
+            directFallbackUsed = true
+            val fallback = airPlayFallbackDecision(airPlayProbe)
+            if (fallback == null) {
+                _uiState.value = current.copy(
+                    phase = PlayerPhase.ERROR,
+                    error = "AirPlay fallback route unavailable",
+                )
+                return
+            }
+            currentPassthroughAudioCodecs = fallback.passthroughAudioCodecs
+            val generation = loadGeneration
+            _uiState.value = current.copy(
+                phase = PlayerPhase.PREPARING_PROXY,
+                route = fallback.route,
+                proxyUrl = null,
+                error = null,
+                planDetail = fallback.detail,
+            )
+            pendingJob = scope.launch {
+                prepareProxy(airPlayProbe, fallback.route, generation, fallback.passthroughAudioCodecs)
+            }
+            return
+        }
         if (!directFallbackUsed && current.phase == PlayerPhase.PLAYING &&
             current.route == PlaybackRoute.DIRECT && current.proxyUrl == null && current.probe != null
         ) {
