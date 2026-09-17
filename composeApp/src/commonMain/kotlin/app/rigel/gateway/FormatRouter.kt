@@ -179,10 +179,14 @@ object FormatRouter {
         return true
     }
 
-    private fun dimensionsFitTranscode(probe: ProbeResult, profile: OutputMediaProfile): Boolean =
-        profile.maxWidth == null || profile.maxHeight == null ||
+    private fun dimensionsFitTranscode(probe: ProbeResult, profile: OutputMediaProfile): Boolean {
+        if (probe.videoCodec == null) return true
+        if (profile.maxFrameRate != null &&
+            (probe.frameRate == null || probe.frameRate > profile.maxFrameRate)
+        ) return false
+        return profile.maxWidth == null || profile.maxHeight == null ||
             (probe.width <= 0 || probe.height <= 0 || profile.maxWidth >= 1920 && profile.maxHeight >= 1080)
-
+    }
     private fun detailFor(route: PlaybackRoute, destination: String): String = when (route) {
         PlaybackRoute.DIRECT -> "Direct play on $destination"
         PlaybackRoute.REMUX -> "Remuxing for $destination"

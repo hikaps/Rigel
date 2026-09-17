@@ -23,6 +23,7 @@ class OutputRoutingTest {
         width: Int = 1280,
         height: Int = 720,
         pixFmt: String? = "yuv420p",
+        frameRate: Double? = 24.0,
     ) = ProbeResult(
         container = container,
         videoCodec = video,
@@ -34,7 +35,7 @@ class OutputRoutingTest {
         width = width,
         height = height,
         videoLevel = 40,
-        frameRate = 24.0
+        frameRate = frameRate
     )
 
     @Test
@@ -146,5 +147,19 @@ class OutputRoutingTest {
         ) as RouteDecision.Playable
 
         assertEquals(PlaybackRoute.REMUX, decision.route)
+    }
+
+    @Test
+    fun transcodeFallbackRejectsFrameRateAboveReceiverLimit() {
+        val profile = OutputMediaProfiles.conservativeReceiver("TV").copy(maxFrameRate = 30.0)
+        val decision = FormatRouter.decide(
+            probe = probe("matroska", frameRate = 60.0),
+            profile = profile,
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        )
+
+        assertTrue(decision is RouteDecision.Unsupported)
     }
 }

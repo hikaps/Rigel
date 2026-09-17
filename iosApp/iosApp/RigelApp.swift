@@ -27,13 +27,28 @@ final class AirPlayRouteMonitor: NSObject {
     func sync() {
         let airPlay = session.currentRoute.outputs.first { $0.portType == .airPlay }
         let selection = SwiftOutputSelection.shared.snapshot()
+        let playerState = SwiftPlayer.shared.snapshot()
+        let activePlayback = playerState.phase != .idle &&
+            playerState.phase != .error &&
+            playerState.sourceUrl != nil
         if let airPlay {
             SwiftOutputSelection.shared.selectAirPlay(
                 routeId: airPlay.uid,
                 name: airPlay.portName
             )
+            if activePlayback {
+                SwiftPlayer.shared.selectAirPlay(
+                    routeId: airPlay.uid,
+                    name: airPlay.portName,
+                    positionMs: playerState.startPositionMs
+                )
+            }
         } else if selection.kind == .airplay {
-            SwiftOutputSelection.shared.selectLocal()
+            if activePlayback {
+                SwiftPlayer.shared.selectLocal(positionMs: playerState.startPositionMs)
+            } else {
+                SwiftOutputSelection.shared.selectLocal()
+            }
         }
     }
 }

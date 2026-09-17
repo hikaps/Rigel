@@ -697,6 +697,19 @@ class PlayerControllerTest {
 
     @Test
     fun proxyRebuildDuringCastKeepsRemoteTarget() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
         val posted = mutableListOf<Pair<String, String?>>()
         val engineDispatcher = dispatcher
         val client = HttpClient(MockEngine) {
@@ -718,7 +731,7 @@ class PlayerControllerTest {
             )
             c.loadRequest(request, PlaybackDestination.Receiver(target))
             advanceUntilIdle()
-            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase, "state=${c.uiState.value} hls=${hlsModes} posted=${posted}")
             assertTrue(c.uiState.value.remotePlayback)
             val castsAfterLoad = posted.count { it.first.contains("/control") }
 
@@ -862,6 +875,19 @@ class PlayerControllerTest {
 
     @Test
     fun stopPlaybackRetainsReceiverStopBeforeReplacementCast() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
         val source = "http://192.168.1.20/movie.mp4"
         val actions = mutableListOf<String>()
         val firstStopGate = CompletableDeferred<Unit>()
@@ -892,7 +918,7 @@ class PlayerControllerTest {
             c.loadRequest(request.copy(sourceUrl = source), PlaybackDestination.Receiver(target))
             advanceUntilIdle()
             val initialCasts = actions.count { it.contains("#SetAVTransportURI") }
-            assertEquals(1, initialCasts)
+            assertEquals(1, initialCasts, "state=${c.uiState.value} hls=${hlsModes} actions=${actions}")
 
             c.stopPlayback()
             advanceUntilIdle()
@@ -995,6 +1021,19 @@ class PlayerControllerTest {
     @Test
     fun airPlayProxyRequiresLanBase() = runTest(dispatcher.scheduler) {
         val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
         val c = controller(settings)
         c.loadRequest(
             request.copy(sourceUrl = "http://h/movie.mp4"),
@@ -1003,7 +1042,7 @@ class PlayerControllerTest {
         advanceUntilIdle()
 
         assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
-        assertTrue(c.uiState.value.error!!.contains("No local network address"))
+        assertTrue(c.uiState.value.error!!.contains("No local network address"), "error=${c.uiState.value.error}")
     }
 
     @Test

@@ -106,6 +106,7 @@ class PlayerController(
     private var currentDestination: PlaybackDestination = PlaybackDestination.Local
     private var currentRequest: IntakeRequest? = null
     private var currentPassthroughAudioCodecs: Set<String> = OutputMediaProfiles.local.directAudioCodecs
+    private var currentOutputProfile: OutputMediaProfile? = null
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
@@ -160,6 +161,7 @@ class PlayerController(
         currentRequest = request
         currentDestination = destinationOverride ?: outputSelection.snapshot().destination
         currentPassthroughAudioCodecs = OutputMediaProfiles.local.directAudioCodecs
+        currentOutputProfile = null
         val generation = loadGeneration
         _uiState.value = PlayerUiState(
             phase = PlayerPhase.PROBING,
@@ -216,6 +218,7 @@ class PlayerController(
             ?.let(::stopDetachedReceiver)
         val pendingReceiverStop = invalidatePendingWork()
         currentDestination = destination
+        currentOutputProfile = null
         val duration = probe?.durationMs
         val resume = if (duration != null && duration > 0) positionMs.coerceIn(0, duration) else positionMs.coerceAtLeast(0)
         val generation = loadGeneration
@@ -325,12 +328,21 @@ class PlayerController(
             return
         }
 
-        val route = (FormatRouter.decide(
+        val routeDecision = FormatRouter.decide(
             probe = probe,
-            profile = profileForCurrentDestination(),
+            profile = currentOutputProfile ?: profileForCurrentDestination(),
             hasSelectedExternalSubtitle = true,
             preference = settings.routeOverride(),
-        ) as? RouteDecision.Playable)?.route ?: PlaybackRoute.TRANSCODE
+        )
+        val playable = routeDecision as? RouteDecision.Playable ?: run {
+            _uiState.value = selected.copy(
+                phase = PlayerPhase.ERROR,
+                error = (routeDecision as RouteDecision.Unsupported).message,
+            )
+            return
+        }
+        currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
+        val route = playable.route
         if (route == PlaybackRoute.DIRECT) {
             _uiState.value = selected
             return
@@ -516,6 +528,7 @@ class PlayerController(
             is PlaybackDestination.AirPlay -> OutputMediaProfiles.airPlay(destination.displayName)
             is PlaybackDestination.Receiver -> capabilityResolver.profileFor(destination.target)
         }
+        currentOutputProfile = profile
         val remoteTarget = (destination as? PlaybackDestination.Receiver)?.target
         val remoteReachable = remoteTarget == null || RemoteUrlPolicy.isReceiverFetchable(request.sourceUrl, profile)
         val hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null
