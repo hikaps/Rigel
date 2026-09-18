@@ -67,6 +67,83 @@ final class ProbeTest: XCTestCase {
         )
     }
 
+    func testRemuxTimestampsRepairMissingSourceTimes() {
+        let first = RigelHlsExporter.repairedRemuxTimestamps(
+            pts: Int64.min,
+            dts: Int64.min,
+            duration: 0,
+            nextTimestamp: nil,
+            frameDuration: 40
+        )
+        XCTAssertEqual(first.pts, 0)
+        XCTAssertEqual(first.dts, 0)
+        XCTAssertEqual(first.nextTimestamp, 40)
+
+        let second = RigelHlsExporter.repairedRemuxTimestamps(
+            pts: Int64.min,
+            dts: Int64.min,
+            duration: 0,
+            nextTimestamp: first.nextTimestamp,
+            frameDuration: 40
+        )
+        XCTAssertEqual(second.pts, 40)
+        XCTAssertEqual(second.dts, 40)
+        XCTAssertEqual(second.nextTimestamp, 80)
+    }
+
+    func testRemuxTimestampsPassthroughUntouched() {
+        // Well-timestamped sources must pass through byte-identical;
+        // only the synthesized next marker advances from the valid tail.
+        let passthrough = RigelHlsExporter.repairedRemuxTimestamps(
+            pts: 1_000,
+            dts: 960,
+            duration: 40,
+            nextTimestamp: nil,
+            frameDuration: 40
+        )
+        XCTAssertEqual(passthrough.pts, 1_000)
+        XCTAssertEqual(passthrough.dts, 960)
+        XCTAssertEqual(passthrough.nextTimestamp, 1_040)
+    }
+
+    func testRemuxTimestampsSingleSideFallbacks() {
+        // Missing PTS falls back to DTS (pts=dts), matching libavformat.
+        let ptsMissing = RigelHlsExporter.repairedRemuxTimestamps(
+            pts: Int64.min,
+            dts: 960,
+            duration: 40,
+            nextTimestamp: nil,
+            frameDuration: 40
+        )
+        XCTAssertEqual(ptsMissing.pts, 960)
+        XCTAssertEqual(ptsMissing.dts, 960)
+        XCTAssertEqual(ptsMissing.nextTimestamp, 1_000)
+
+        // Missing DTS mirrors PTS.
+        let dtsMissing = RigelHlsExporter.repairedRemuxTimestamps(
+            pts: 1_000,
+            dts: Int64.min,
+            duration: 40,
+            nextTimestamp: nil,
+            frameDuration: 40
+        )
+        XCTAssertEqual(dtsMissing.pts, 1_000)
+        XCTAssertEqual(dtsMissing.dts, 1_000)
+        XCTAssertEqual(dtsMissing.nextTimestamp, 1_040)
+
+        // A real packet duration prefers itself over the frame-rate step.
+        let longDuration = RigelHlsExporter.repairedRemuxTimestamps(
+            pts: Int64.min,
+            dts: Int64.min,
+            duration: 80,
+            nextTimestamp: nil,
+            frameDuration: 40
+        )
+        XCTAssertEqual(longDuration.pts, 0)
+        XCTAssertEqual(longDuration.dts, 0)
+        XCTAssertEqual(longDuration.nextTimestamp, 80)
+    }
+
     func testHardwareFramesContextUsesBufferData() {
         let size = MemoryLayout<AVHWFramesContext>.size
         guard let frames = av_buffer_alloc(size) else {

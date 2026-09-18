@@ -160,6 +160,41 @@ extension RigelHlsExporter {
         }
     }
 
+    /// Supplies timestamps for remux packets whose source has no usable PTS/DTS.
+    /// MPEG-TS/HLS cannot segment such packets reliably; keep the repair in the
+    /// source stream time base before writeRemuxPacket rescales it.
+    static func remuxFrameDuration(inputStream: UnsafeMutablePointer<AVStream>) -> Int64 {
+        for rate in [inputStream.pointee.avg_frame_rate, inputStream.pointee.r_frame_rate]
+            where rate.num > 0 && rate.den > 0 {
+            let duration = av_rescale_q(
+                1,
+                AVRational(num: rate.den, den: rate.num),
+                inputStream.pointee.time_base
+            )
+            if duration > 0 { return duration }
+        }
+        return 1
+    }
+
+    static func repairedRemuxTimestamps(
+        pts: Int64,
+        dts: Int64,
+        duration: Int64,
+        nextTimestamp: Int64?,
+        frameDuration: Int64
+    ) -> (pts: Int64, dts: Int64, nextTimestamp: Int64) {
+        let step = max(duration, max(frameDuration, 1))
+        let normalizedPTS = pts != Int64.min
+            ? pts
+            : (dts != Int64.min ? dts : (nextTimestamp ?? 0))
+        let normalizedDTS = dts != Int64.min ? dts : normalizedPTS
+        return (
+            pts: normalizedPTS,
+            dts: normalizedDTS,
+            nextTimestamp: max(normalizedPTS, normalizedDTS) + step
+        )
+    }
+
     static func writeRemuxPacket(
         _ pkt: UnsafeMutablePointer<AVPacket>,
         inStream: UnsafeMutablePointer<AVStream>,
