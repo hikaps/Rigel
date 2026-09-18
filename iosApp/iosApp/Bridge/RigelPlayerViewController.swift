@@ -23,8 +23,9 @@ final class RigelPlayerViewController: UIViewController {
     /// Called with an absolute media position for remote seek forwarding or
     /// proxy session restart.
     var onSeekRequested: ((Double) -> Void)?
-    /// Called when the active subtitle selection changes. A non-nil track is
-    /// rebuilt through the Kotlin-owned proxy so an AirPlay receiver can fetch it.
+    /// Called when the active subtitle selection changes. Direct playback keeps
+    /// its source URL; an existing proxy session is rebuilt so its HLS rendition
+    /// carries the selected sidecar for outputs that require proxy delivery.
     var onExternalSubtitleSelected: ((SubtitleTrack?, Double) -> Void)?
     /// Reports whether AVPlayer is waiting for its next frame; the host
     /// keeps the buffering spinner up until this clears.

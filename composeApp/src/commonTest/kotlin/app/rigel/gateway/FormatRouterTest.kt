@@ -111,8 +111,8 @@ class FormatRouterTest {
     }
 
     @Test
-    fun externalSubtitleTracksForceRemuxForFileMedia() {
-        assertEquals(PlaybackRoute.REMUX, route(probe("mp4", "h264", listOf("aac")), true))
+    fun externalSubtitlesDoNotDemoteDirectFileMedia() {
+        assertEquals(PlaybackRoute.DIRECT, route(probe("mp4", "h264", listOf("aac")), true))
     }
 
     @Test
@@ -121,13 +121,13 @@ class FormatRouterTest {
     }
 
     @Test
-    fun externalSubtitlesForceRemuxForHls() {
-        assertEquals(PlaybackRoute.REMUX, route(probe("m3u8", "h264", listOf("aac")), true))
+    fun externalSubtitlesDoNotDemoteDirectHls() {
+        assertEquals(PlaybackRoute.DIRECT, route(probe("m3u8", "h264", listOf("aac")), true))
     }
 
     @Test
-    fun externalSubtitlesForceRemuxForLiveVideo() {
-        assertEquals(PlaybackRoute.REMUX, route(probe("mpegts", "h264", listOf("aac"), isLive = true), true))
+    fun externalSubtitlesDoNotDemoteDirectLiveVideo() {
+        assertEquals(PlaybackRoute.DIRECT, route(probe("mpegts", "h264", listOf("aac"), isLive = true), true))
     }
 
     @Test

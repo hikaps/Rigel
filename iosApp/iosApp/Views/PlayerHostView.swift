@@ -286,8 +286,8 @@ struct PlayerHostView: View {
 /// Hosts RigelPlayerViewController (AVPlayerViewController + transparent overlay controls).
 /// Load is called when the media URL or playback configuration changes.
 /// Subtitle downloads and selection changes update the native sidecar immediately
-/// and Kotlin state. A selected sidecar also rebuilds the proxy so the receiver
-/// receives a real HLS subtitle rendition.
+/// and Kotlin state. HLS is rebuilt only when playback already requires a proxy,
+/// so direct-compatible media keeps its original source.
 struct PlayerView: UIViewControllerRepresentable {
     let url: String
     let title: String?

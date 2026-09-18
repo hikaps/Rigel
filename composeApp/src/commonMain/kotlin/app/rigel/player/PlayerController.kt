@@ -268,19 +268,15 @@ class PlayerController(
     }
 
     /**
-     * Selects an external text subtitle. Video playback is rebuilt through the
-     * LAN HLS proxy so AVPlayer and AirPlay can select the generated rendition.
+     * Selects an external text subtitle without changing a compatible direct
+     * playback route. Existing proxy playback is rebuilt so its HLS session
+     * carries the selected sidecar rendition.
      */
     fun selectExternalSubtitle(track: SubtitleTrack?, positionMs: Long) {
         val current = _uiState.value
         if (current.phase == PlayerPhase.IDLE) return
         if (track == null) {
             val cleared = current.copy(selectedExternalSubtitleUrl = null)
-            // The live playlist may still mark the sidecar DEFAULT=YES: a
-            // local Off never rebuilt it, and a remote renderer fetches that
-            // same master and keeps its own subtitle selection. Rebuild
-            // without the sidecar whenever the running session includes it,
-            // local or cast, so no receiver inherits disabled captions.
             if (proxySessionSubtitleUrl == null || current.proxyUrl == null) {
                 _uiState.value = cleared
                 return
@@ -289,7 +285,16 @@ class PlayerController(
                 _uiState.value = cleared
                 return
             }
-            val route = current.route ?: PlaybackRoute.REMUX
+            val route = when (current.route) {
+                PlaybackRoute.REMUX, PlaybackRoute.TRANSCODE -> current.route
+                PlaybackRoute.DIRECT, null -> {
+                    _uiState.value = cleared.copy(
+                        phase = PlayerPhase.ERROR,
+                        error = "Active proxy has no proxy route",
+                    )
+                    return
+                }
+            }
             val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
                 ?: positionMs.coerceAtLeast(0)
             val pendingReceiverStop = invalidatePendingWork()
@@ -328,25 +333,58 @@ class PlayerController(
             return
         }
 
-        val routeDecision = FormatRouter.decide(
-            probe = probe,
-            profile = currentOutputProfile ?: profileForCurrentDestination(),
-            hasSelectedExternalSubtitle = true,
-            preference = settings.routeOverride(),
-        )
-        val playable = routeDecision as? RouteDecision.Playable ?: run {
-            _uiState.value = selected.copy(
-                phase = PlayerPhase.ERROR,
-                error = (routeDecision as RouteDecision.Unsupported).message,
+        val activeProxyRoute = if (current.proxyUrl != null) {
+            when (current.route) {
+                PlaybackRoute.REMUX, PlaybackRoute.TRANSCODE -> current.route
+                PlaybackRoute.DIRECT, null -> {
+                    _uiState.value = selected.copy(
+                        phase = PlayerPhase.ERROR,
+                        error = "Active proxy has no proxy route",
+                    )
+                    return
+                }
+            }
+        } else {
+            null
+        }
+        val route: PlaybackRoute
+        if (activeProxyRoute != null) {
+            val proxyDecision = FormatRouter.decide(
+                probe = probe,
+                profile = currentOutputProfile ?: profileForCurrentDestination(),
+                hasSelectedExternalSubtitle = true,
+                preference = RouteOverride.ALWAYS_PROXY,
             )
-            return
+            if (proxyDecision is RouteDecision.Unsupported) {
+                _uiState.value = selected.copy(
+                    phase = PlayerPhase.ERROR,
+                    error = proxyDecision.message,
+                )
+                return
+            }
+            route = activeProxyRoute
+        } else {
+            val routeDecision = FormatRouter.decide(
+                probe = probe,
+                profile = currentOutputProfile ?: profileForCurrentDestination(),
+                hasSelectedExternalSubtitle = true,
+                preference = settings.routeOverride(),
+            )
+            val playable = routeDecision as? RouteDecision.Playable ?: run {
+                _uiState.value = selected.copy(
+                    phase = PlayerPhase.ERROR,
+                    error = (routeDecision as RouteDecision.Unsupported).message,
+                )
+                return
+            }
+            currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
+            route = playable.route
+            if (route == PlaybackRoute.DIRECT) {
+                _uiState.value = selected
+                return
+            }
         }
-        currentPassthroughAudioCodecs = playable.passthroughAudioCodecs
-        val route = playable.route
-        if (route == PlaybackRoute.DIRECT) {
-            _uiState.value = selected
-            return
-        }
+
         val target = probe.durationMs?.let { positionMs.coerceIn(0, it) }
             ?: positionMs.coerceAtLeast(0)
         val pendingReceiverStop = invalidatePendingWork()
