@@ -105,11 +105,11 @@ class OutputRoutingTest {
 
     }
     @Test
-    fun airPlayTriesDirectBeforeProxyForUnknownReceiverCodec() {
+    fun airPlayTriesDirectBeforeProxyWithExternalSubtitle() {
         val airPlayDirect = FormatRouter.decide(
             probe = probe("webm", video = "vp9"),
             profile = OutputMediaProfiles.airPlay("Living Room"),
-            hasSelectedExternalSubtitle = false,
+            hasSelectedExternalSubtitle = true,
             preference = RouteOverride.AUTO,
             sourceIsRemotelyReachable = true,
         ) as RouteDecision.Playable
@@ -132,6 +132,31 @@ class OutputRoutingTest {
             sourceIsRemotelyReachable = true,
         ) as RouteDecision.Playable
         assertEquals(PlaybackRoute.TRANSCODE, local.route)
+    }
+    @Test
+    fun compatibleReceiverKeepsDirectPlaybackWithExternalSubtitle() {
+        val decision = FormatRouter.decide(
+            probe = probe("mp4"),
+            profile = OutputMediaProfiles.conservativeReceiver("Roku"),
+            hasSelectedExternalSubtitle = true,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+
+        assertEquals(PlaybackRoute.DIRECT, decision.route)
+    }
+
+    @Test
+    fun unreachableReceiverWithExternalSubtitleUsesProxyFallback() {
+        val decision = FormatRouter.decide(
+            probe = probe("mp4"),
+            profile = OutputMediaProfiles.conservativeReceiver("Roku"),
+            hasSelectedExternalSubtitle = true,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = false,
+        ) as RouteDecision.Playable
+
+        assertEquals(PlaybackRoute.REMUX, decision.route)
     }
 
     @Test

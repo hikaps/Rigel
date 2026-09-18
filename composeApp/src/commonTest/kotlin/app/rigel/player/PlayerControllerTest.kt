@@ -216,7 +216,7 @@ class PlayerControllerTest {
     }
 
     @Test
-    fun selectingSubtitleOnDirectVideoStartsProxyAtRequestedPosition() = runTest(dispatcher.scheduler) {
+    fun selectingSubtitleOnDirectVideoKeepsDirectPlayback() = runTest(dispatcher.scheduler) {
         val c = controller()
         c.loadRequest(request)
         advanceUntilIdle()
@@ -227,13 +227,43 @@ class PlayerControllerTest {
         advanceUntilIdle()
 
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
-        assertEquals(60_000, hlsOffsets.last())
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertNull(c.uiState.value.proxyUrl)
+        assertEquals(listOf(track), c.uiState.value.subtitleTracks)
+        assertEquals(track.url, c.uiState.value.selectedExternalSubtitleUrl)
+        assertTrue(hlsSessionIds.isEmpty())
+        assertTrue(hlsModes.isEmpty())
+
+        c.selectExternalSubtitle(null, positionMs = 30_000)
+        c.selectExternalSubtitle(track, positionMs = 45_000)
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertEquals(track.url, c.uiState.value.selectedExternalSubtitleUrl)
+        assertTrue(hlsSessionIds.isEmpty())
+    }
+    @Test
+    fun selectedSubtitleSurvivesDirectFailureFallback() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request)
+        advanceUntilIdle()
+
+        val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
+        c.selectExternalSubtitle(track, positionMs = 15_000)
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertTrue(hlsSessionIds.isEmpty())
+
+        c.reportError("decoder failure")
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
         assertEquals(listOf(track), hlsSubtitleTracks.last())
+        assertEquals(listOf("transcode"), hlsModes)
     }
 
     @Test
-    fun selectedSubtitleOverridesDirectRoutePreference() = runTest(dispatcher.scheduler) {
+    fun selectedSubtitleDoesNotOverrideDirectRoutePreference() = runTest(dispatcher.scheduler) {
         val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "DIRECT")))
         val c = controller(settings)
         val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
@@ -246,7 +276,8 @@ class PlayerControllerTest {
 
     @Test
     fun clearingSelectedSubtitleLocallyRebuildsWithoutSidecar() = runTest(dispatcher.scheduler) {
-        val c = controller()
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
         c.loadRequest(request)
         advanceUntilIdle()
         val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
@@ -290,7 +321,8 @@ class PlayerControllerTest {
 
     @Test
     fun clearingSelectedSubtitleDuringCastRebuildsWithoutSidecar() = runTest(dispatcher.scheduler) {
-        val c = controller()
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
         c.loadRequest(request)
         advanceUntilIdle()
         val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
@@ -311,7 +343,8 @@ class PlayerControllerTest {
 
     @Test
     fun selectingSameExternalSubtitleRebuildsWithoutDuplicatingTrack() = runTest(dispatcher.scheduler) {
-        val c = controller()
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
         c.loadRequest(request)
         advanceUntilIdle()
         val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
@@ -576,27 +609,21 @@ class PlayerControllerTest {
     }
 
     @Test
-    fun externalSubtitleTracksForceRemux() = runTest(dispatcher.scheduler) {
+    fun initialExternalSubtitleKeepsDirectPlayback() = runTest(dispatcher.scheduler) {
+        val track = SubtitleTrack("https://cdn.h/subs.ass")
         val c = controller()
-        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/subs.ass"))))
+        c.loadRequest(request.copy(subtitleTracks = listOf(track)))
         advanceUntilIdle()
+
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
-        assertEquals(
-            listOf(listOf(SubtitleTrack("https://cdn.h/subs.ass"))),
-            hlsSubtitleTracks,
-        )
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
-        assertNotNull(c.uiState.value.proxyUrl)
-        assertEquals(listOf("remux"), hlsModes)
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertNull(c.uiState.value.proxyUrl)
+        assertEquals(listOf(track), c.uiState.value.subtitleTracks)
+        assertEquals(track.url, c.uiState.value.selectedExternalSubtitleUrl)
+        assertTrue(hlsSessionIds.isEmpty())
+        assertTrue(hlsModes.isEmpty())
     }
 
-    @Test
-    fun externalSubtitleWithQueryAndFragmentForcesRemux() = runTest(dispatcher.scheduler) {
-        val c = controller()
-        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/subs.ass?token=abc#track1"))))
-        advanceUntilIdle()
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
-    }
     @Test
     fun stoppingDuringProxyPreparationInvalidatesLateCallback() = runTest(dispatcher.scheduler) {
         pendingReady = { _, _ -> }
@@ -645,31 +672,7 @@ class PlayerControllerTest {
     }
 
     @Test
-    fun percentEncodedExternalSubtitleForcesRemux() = runTest(dispatcher.scheduler) {
-        val c = controller()
-        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/sub%2Eass"))))
-        advanceUntilIdle()
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
-    }
 
-    @Test
-    fun mixedCaseExternalSubtitleForcesRemux() = runTest(dispatcher.scheduler) {
-        val c = controller()
-        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/SUBS.ASS"))))
-        advanceUntilIdle()
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
-    }
-
-    @Test
-    fun externalSrtSubtitleForcesRemux() = runTest(dispatcher.scheduler) {
-        val c = controller()
-        c.loadRequest(request.copy(subtitleTracks = listOf(SubtitleTrack("https://cdn.h/assets/subtitles.srt"))))
-        advanceUntilIdle()
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
-        assertNotNull(c.uiState.value.proxyUrl)
-    }
-
-    @Test
     fun errorDuringProxyPrepIsSwallowed() = runTest(dispatcher.scheduler) {
         pendingReady = { _, _ -> }
         val c = controller()
@@ -875,6 +878,60 @@ class PlayerControllerTest {
     }
 
     @Test
+    fun receiverSelectionWithExternalSubtitleCastsOriginalSourceDirectly() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        val source = "http://192.168.1.20/movie.mp4"
+        val posted = mutableListOf<String>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    if (url.endsWith("/query/apps")) {
+                        respond("""<apps><app id="15985">Play on Roku</app></apps>""", HttpStatusCode.OK)
+                    } else {
+                        posted += url
+                        respond("", HttpStatusCode.OK)
+                    }
+                }
+            }
+        }
+        val c = controller()
+        val target = CastTarget.Roku(RokuDevice("subtitle-r1", "http://192.168.1.9:8060/", "Roku"))
+        val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(
+                request.copy(sourceUrl = source, subtitleTracks = listOf(track)),
+                PlaybackDestination.Receiver(target),
+            )
+            advanceUntilIdle()
+
+            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+            assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+            assertTrue(c.uiState.value.remotePlayback)
+            assertTrue(hlsSessionIds.isEmpty())
+            assertTrue(posted.any { it.contains("movie.mp4") }, "posted=$posted")
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
     fun stopPlaybackRetainsReceiverStopBeforeReplacementCast() = runTest(dispatcher.scheduler) {
         probeResult = ProbeResult(
             "mp4",
@@ -1047,7 +1104,7 @@ class PlayerControllerTest {
     }
 
     @Test
-    fun airPlaySubtitleChangeUsesAirPlayProxyProfileUnderDirectOverride() = runTest(dispatcher.scheduler) {
+    fun airPlaySubtitleSelectionKeepsDirectPlayback() = runTest(dispatcher.scheduler) {
         val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "DIRECT")))
         probeResult = ProbeResult(
             "mp4",
@@ -1076,8 +1133,10 @@ class PlayerControllerTest {
         advanceUntilIdle()
 
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
-        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
-        assertEquals(listOf(track), hlsSubtitleTracks.last())
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertNull(c.uiState.value.proxyUrl)
+        assertEquals(track.url, c.uiState.value.selectedExternalSubtitleUrl)
+        assertTrue(hlsSessionIds.isEmpty())
     }
 
     @Test

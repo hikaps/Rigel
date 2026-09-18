@@ -37,10 +37,10 @@ object FormatRouter {
         if (profile.detail == "This iPhone" || profile.mode == ReceiverCompatibilityMode.CONSERVATIVE &&
             profile.directSchemes.contains("file")
         ) {
-            return localDecision(probe, hasSelectedExternalSubtitle, preference, profile.detail)
+            return localDecision(probe, preference, profile.detail)
         }
 
-        val direct = directFeasible(probe, profile, hasSelectedExternalSubtitle, sourceIsRemotelyReachable)
+        val direct = directFeasible(probe, profile, sourceIsRemotelyReachable)
         val remux = remuxFeasible(probe, profile, hasSelectedExternalSubtitle)
         val transcode = transcodeFeasible(profile, probe, hasSelectedExternalSubtitle)
 
@@ -62,11 +62,10 @@ object FormatRouter {
 
     private fun localDecision(
         probe: ProbeResult,
-        hasSelectedExternalSubtitle: Boolean,
         preference: RouteOverride,
         detail: String,
     ): RouteDecision {
-        val route = localRoute(probe, hasSelectedExternalSubtitle)
+        val route = localRoute(probe)
         val selected = when (preference) {
             RouteOverride.DIRECT -> PlaybackRoute.DIRECT
             RouteOverride.ALWAYS_PROXY -> if (route == PlaybackRoute.DIRECT) PlaybackRoute.REMUX else route
@@ -79,20 +78,13 @@ object FormatRouter {
         )
     }
 
-    private fun localRoute(probe: ProbeResult, hasSelectedExternalSubtitle: Boolean): PlaybackRoute {
+    private fun localRoute(probe: ProbeResult): PlaybackRoute {
         val container = probe.container.lowercase()
         val video = probe.videoCodec?.lowercase()
         val audio = probe.audioCodecs.map { it.lowercase() }.toSet()
         val hevcMain10 = video == "hevc" && probe.pixFmt?.lowercase() == "yuv420p10le"
         if (video in directVideo && !hevcMain10 && !directPlayablePixelFormat(probe.pixFmt)) {
             return PlaybackRoute.TRANSCODE
-        }
-        if (hasSelectedExternalSubtitle && video != null) {
-            return if (video == "h264" && directPlayablePixelFormat(probe.pixFmt)) {
-                PlaybackRoute.REMUX
-            } else {
-                PlaybackRoute.TRANSCODE
-            }
         }
         if (probe.isLive) return PlaybackRoute.DIRECT
         if (container in hlsContainers) return PlaybackRoute.DIRECT
@@ -108,10 +100,9 @@ object FormatRouter {
     private fun directFeasible(
         probe: ProbeResult,
         profile: OutputMediaProfile,
-        hasSelectedExternalSubtitle: Boolean,
         sourceReachable: Boolean,
     ): RouteDecision.Playable? {
-        if (!sourceReachable || hasSelectedExternalSubtitle) return null
+        if (!sourceReachable) return null
         if (profile.mode != ReceiverCompatibilityMode.OPTIMISTIC_HTTP &&
             (probe.container.lowercase() !in profile.directContainers ||
                 probe.videoCodec?.lowercase()?.let { it !in profile.directVideoCodecs } == true ||
