@@ -603,7 +603,8 @@ extension RigelHlsExporter {
             // Warmup waits until the main and subtitle playlists reference
             // files that already exist; the public master is then immutable
             // until the final trailer pass.
-            if !notified {
+            // Finite AirPlay playback waits for the final VOD playlist instead of exposing EVENT media.
+            if !notified && !session.waitForCompletion {
                 let now = DispatchTime.now()
                 if now.uptimeNanoseconds - lastReadinessCheck.uptimeNanoseconds >= 100_000_000 {
                     lastReadinessCheck = now
@@ -687,20 +688,30 @@ extension RigelHlsExporter {
             )
         }
         if finalReady {
-            let published = !hasMasterPlaylist || publishMasterPlaylist(
-                baseMasterURL: URL(fileURLWithPath: baseMasterPath),
-                publicMasterURL: URL(fileURLWithPath: legacyPlaylistPath),
+            let vodFinalized = !session.waitForCompletion || finalizePresentationAsVOD(
+                baseMasterURL: hasMasterPlaylist ? URL(fileURLWithPath: baseMasterPath) : nil,
+                playlistURL: hasMasterPlaylist ? nil : URL(fileURLWithPath: playlistPath),
+                outDir: outDir,
                 subtitles: subtitleRenditions
             )
-            if !published {
-                reportFailure("failed to publish HLS master playlist")
-            } else if !notified {
-                notified = publishReady(
-                    session: session,
-                    sessionId: sessionId,
-                    path: "\(sessionId)/index.m3u8",
-                    onReady: onReady
+            if session.waitForCompletion && !vodFinalized {
+                reportFailure("HLS VOD playlist could not be finalized")
+            } else {
+                let published = !hasMasterPlaylist || publishMasterPlaylist(
+                    baseMasterURL: URL(fileURLWithPath: baseMasterPath),
+                    publicMasterURL: URL(fileURLWithPath: legacyPlaylistPath),
+                    subtitles: subtitleRenditions
                 )
+                if !published {
+                    reportFailure("failed to publish HLS master playlist")
+                } else if !notified {
+                    notified = publishReady(
+                        session: session,
+                        sessionId: sessionId,
+                        path: "\(sessionId)/index.m3u8",
+                        onReady: onReady
+                    )
+                }
             }
         } else if !notified {
             reportFailure("HLS presentation was not ready")

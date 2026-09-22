@@ -44,6 +44,7 @@ object Bridges {
         passthroughAudioCodecs: List<String>,
         startOffsetMs: Long,
         subtitleTracks: List<SubtitleTrack>,
+        waitForCompletion: Boolean = false,
         onError: (String) -> Unit,
     ): Pair<String?, String?> {
         val bridge = requireBridge("Transcode", RigelBridgeFactory.transcode)
@@ -56,6 +57,7 @@ object Bridges {
                 passthroughAudioCodecs,
                 startOffsetMs,
                 subtitleTracks,
+                waitForCompletion,
                 onReady = { path, error ->
                     if (cont.isActive) cont.resume(path to error)
                 },
