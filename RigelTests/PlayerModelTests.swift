@@ -515,6 +515,239 @@ final class PlayerModelTests: XCTestCase {
         )
     }
 
+    func testAirPlayStartupWatchdogTimesOutWithoutExternalProgress() {
+        var watchdog = AirPlayStartupWatchdog()
+
+        XCTAssertFalse(watchdog.update(
+            now: 0, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        for tick in 1...59 {
+            XCTAssertFalse(watchdog.update(
+                now: Double(tick) * 0.25,
+                eligible: true,
+                paused: false,
+                externalPlaying: false,
+                positionSeconds: 0,
+                rate: 1
+            ))
+        }
+        XCTAssertTrue(watchdog.update(
+            now: 15, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 15.25, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+
+        watchdog.reset()
+        XCTAssertFalse(watchdog.update(
+            now: 0, eligible: true, paused: false, externalPlaying: true, positionSeconds: 0, rate: 1
+        ))
+        for tick in 1...59 {
+            XCTAssertFalse(watchdog.update(
+                now: Double(tick) * 0.25,
+                eligible: true,
+                paused: false,
+                externalPlaying: true,
+                positionSeconds: 0,
+                rate: 1
+            ))
+        }
+        XCTAssertTrue(watchdog.update(
+            now: 15, eligible: true, paused: false, externalPlaying: true, positionSeconds: 0, rate: 1
+        ))
+    }
+
+    func testAirPlayStartupWatchdogAcceptsAdvancingExternalPlayback() {
+        var watchdog = AirPlayStartupWatchdog()
+
+        XCTAssertFalse(watchdog.update(
+            now: 0, eligible: true, paused: false, externalPlaying: true, positionSeconds: 0, rate: 1
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 0.25, eligible: true, paused: false, externalPlaying: true, positionSeconds: 0.25, rate: 1
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 16, eligible: true, paused: false, externalPlaying: true, positionSeconds: 16, rate: 1
+        ))
+
+        var localOnly = AirPlayStartupWatchdog()
+        XCTAssertFalse(localOnly.update(
+            now: 0, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        for tick in 1...59 {
+            XCTAssertFalse(localOnly.update(
+                now: Double(tick) * 0.25,
+                eligible: true,
+                paused: false,
+                externalPlaying: false,
+                positionSeconds: Double(tick) * 0.25,
+                rate: 1
+            ))
+        }
+        XCTAssertTrue(localOnly.update(
+            now: 15, eligible: true, paused: false, externalPlaying: false, positionSeconds: 15, rate: 1
+        ))
+    }
+
+    func testAirPlayStartupWatchdogPausingStartsFreshWindow() {
+        var watchdog = AirPlayStartupWatchdog()
+
+        XCTAssertFalse(watchdog.update(
+            now: 0, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        for tick in 1...39 {
+            XCTAssertFalse(watchdog.update(
+                now: Double(tick) * 0.25,
+                eligible: true,
+                paused: false,
+                externalPlaying: false,
+                positionSeconds: 0,
+                rate: 1
+            ))
+        }
+        XCTAssertFalse(watchdog.update(
+            now: 10, eligible: true, paused: true, externalPlaying: false, positionSeconds: 0, rate: 0
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 30, eligible: true, paused: true, externalPlaying: false, positionSeconds: 0, rate: 0
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 30, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        for tick in 1...59 {
+            XCTAssertFalse(watchdog.update(
+                now: 30 + Double(tick) * 0.25,
+                eligible: true,
+                paused: false,
+                externalPlaying: false,
+                positionSeconds: 0,
+                rate: 1
+            ))
+        }
+        XCTAssertTrue(watchdog.update(
+            now: 45, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+    }
+
+    func testAirPlayStartupWatchdogIgnoresIneligibleLoadsAndSeekJump() {
+        var watchdog = AirPlayStartupWatchdog()
+
+        XCTAssertFalse(watchdog.update(
+            now: 0, eligible: false, paused: false, externalPlaying: true, positionSeconds: 0, rate: 1
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 0, eligible: true, paused: false, externalPlaying: true, positionSeconds: 0, rate: 1
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 0.25, eligible: true, paused: false, externalPlaying: true, positionSeconds: 120, rate: 1
+        ))
+        for tick in 2...59 {
+            XCTAssertFalse(watchdog.update(
+                now: Double(tick) * 0.25,
+                eligible: true,
+                paused: false,
+                externalPlaying: true,
+                positionSeconds: 120,
+                rate: 1
+            ))
+        }
+        XCTAssertTrue(watchdog.update(
+            now: 15, eligible: true, paused: false, externalPlaying: true, positionSeconds: 120, rate: 1
+        ))
+
+        var progressingAfterJump = AirPlayStartupWatchdog()
+        XCTAssertFalse(progressingAfterJump.update(
+            now: 0, eligible: true, paused: false, externalPlaying: true, positionSeconds: 0, rate: 1
+        ))
+        XCTAssertFalse(progressingAfterJump.update(
+            now: 0.25, eligible: true, paused: false, externalPlaying: true, positionSeconds: 120, rate: 1
+        ))
+        XCTAssertFalse(progressingAfterJump.update(
+            now: 0.5, eligible: true, paused: false, externalPlaying: true, positionSeconds: 120.25, rate: 1
+        ))
+        XCTAssertFalse(progressingAfterJump.update(
+            now: 15, eligible: true, paused: false, externalPlaying: true, positionSeconds: 120.25, rate: 1
+        ))
+
+        var nanPosition = AirPlayStartupWatchdog()
+        XCTAssertFalse(nanPosition.update(
+            now: 0, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        for tick in 1...59 {
+            XCTAssertFalse(nanPosition.update(
+                now: Double(tick) * 0.25,
+                eligible: true,
+                paused: false,
+                externalPlaying: false,
+                positionSeconds: .nan,
+                rate: 1
+            ))
+        }
+        XCTAssertTrue(nanPosition.update(
+            now: 15, eligible: true, paused: false, externalPlaying: false, positionSeconds: .nan, rate: 1
+        ))
+    }
+
+    func testAirPlayStartupWatchdogResetsAfterSuccessfulStartup() {
+        var watchdog = AirPlayStartupWatchdog()
+
+        XCTAssertFalse(watchdog.update(
+            now: 0, eligible: true, paused: false, externalPlaying: true, positionSeconds: 0, rate: 1
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 0.25, eligible: true, paused: false, externalPlaying: true, positionSeconds: 0.25, rate: 1
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 30, eligible: true, paused: false, externalPlaying: true, positionSeconds: 30, rate: 1
+        ))
+
+        watchdog.reset()
+        XCTAssertFalse(watchdog.update(
+            now: 0, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        for tick in 1...59 {
+            XCTAssertFalse(watchdog.update(
+                now: Double(tick) * 0.25,
+                eligible: true,
+                paused: false,
+                externalPlaying: false,
+                positionSeconds: 0,
+                rate: 1
+            ))
+        }
+        XCTAssertTrue(watchdog.update(
+            now: 15, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+    }
+
+    func testAirPlayStartupWatchdogRestartsAfterLongSamplingGap() {
+        var watchdog = AirPlayStartupWatchdog()
+
+        XCTAssertFalse(watchdog.update(
+            now: 0, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        XCTAssertFalse(watchdog.update(
+            now: 3, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        for tick in 1...55 {
+            XCTAssertFalse(watchdog.update(
+                now: 3 + Double(tick) * 0.25,
+                eligible: true,
+                paused: false,
+                externalPlaying: false,
+                positionSeconds: 0,
+                rate: 1
+            ))
+        }
+        XCTAssertFalse(watchdog.update(
+            now: 17, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+        XCTAssertTrue(watchdog.update(
+            now: 18, eligible: true, paused: false, externalPlaying: false, positionSeconds: 0, rate: 1
+        ))
+    }
+
+
     func testProxySessionIdExtraction() {
         XCTAssertEqual(
             RigelPlayerViewController.proxySessionId(from: "http://10.0.0.2:49152/session-abc123/index.m3u8"),
@@ -523,6 +756,7 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertNil(RigelPlayerViewController.proxySessionId(from: nil))
         XCTAssertNil(RigelPlayerViewController.proxySessionId(from: "http://10.0.0.2/video.mp4"))
     }
+
 
     private func probe(
         container: String = "mp4",
