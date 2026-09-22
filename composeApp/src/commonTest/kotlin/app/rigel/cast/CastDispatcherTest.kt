@@ -46,6 +46,7 @@ private class FakeBridges(private val lan: String?) :
         passthroughAudioCodecs: List<String>,
         startOffsetMs: Long,
         subtitleTracks: List<app.rigel.bridge.SubtitleTrack>,
+        waitForCompletion: Boolean,
         onReady: (String?, String?) -> Unit,
         onError: (String) -> Unit,
     ) = Unit

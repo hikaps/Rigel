@@ -53,6 +53,7 @@ interface TranscodeBridge {
         passthroughAudioCodecs: List<String>,
         startOffsetMs: Long,
         subtitleTracks: List<SubtitleTrack>,
+        waitForCompletion: Boolean = false,
         onReady: (relativePlaylistPath: String?, errorMsg: String?) -> Unit,
         onError: (errorMsg: String) -> Unit,
     )

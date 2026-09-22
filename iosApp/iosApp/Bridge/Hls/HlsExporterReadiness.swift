@@ -11,6 +11,7 @@ extension RigelHlsExporter {
         session.finished = true
         let cancelled = session.cancel
         if sessions[sessionId] === session &&
+            !session.cleanupPending &&
             (cancelled || !session.readinessClaimed || session.readinessDelivered) {
             sessions.removeValue(forKey: sessionId)
         }
@@ -39,7 +40,7 @@ extension RigelHlsExporter {
             if deliver {
                 session.readinessDelivered = true
             }
-            if session.finished && sessions[sessionId] === session {
+            if session.finished && !session.cleanupPending && sessions[sessionId] === session {
                 sessions.removeValue(forKey: sessionId)
             }
             lock.unlock()

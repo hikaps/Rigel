@@ -196,10 +196,177 @@ final class ProbeTest: XCTestCase {
             }
         )
         wait(for: [finished], timeout: 10)
-        RigelHlsExporter.stopSession(sessionId: sessionId)
 
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        let completed = expectation(description: "local proxy reaches ENDLIST")
+        DispatchQueue.global().async {
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                let media = (try? FileManager.default.contentsOfDirectory(
+                    at: outputDir,
+                    includingPropertiesForKeys: nil
+                ))?
+                    .filter { $0.pathExtension == "m3u8" }
+                    .compactMap { try? String(contentsOf: $0, encoding: .utf8) }
+                    .filter { $0.contains("#EXTINF") } ?? []
+                if !media.isEmpty, media.allSatisfy({ $0.contains("#EXT-X-ENDLIST") }) {
+                    completed.fulfill()
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        wait(for: [completed], timeout: 10)
+
+        let mediaPlaylists = try FileManager.default.contentsOfDirectory(
+            at: outputDir,
+            includingPropertiesForKeys: nil
+        )
+            .filter { $0.pathExtension == "m3u8" }
+            .compactMap { try? String(contentsOf: $0, encoding: .utf8) }
+            .filter { $0.contains("#EXTINF") }
+        XCTAssertFalse(mediaPlaylists.isEmpty)
+        XCTAssertTrue(mediaPlaylists.allSatisfy { $0.contains("#EXT-X-PLAYLIST-TYPE:EVENT") })
+        XCTAssertTrue(mediaPlaylists.allSatisfy { !$0.contains("#EXT-X-PLAYLIST-TYPE:VOD") })
+
+        RigelHlsExporter.stopSession(sessionId: sessionId)
         XCTAssertNotNil(readyPath, error ?? "transcode session did not produce a playlist")
         XCTAssertNil(error)
+    }
+    func testHlsSessionIdsRejectPathTraversal() {
+        XCTAssertTrue(RigelHlsExporter.isValidSessionId("session-abc_123"))
+        XCTAssertFalse(RigelHlsExporter.isValidSessionId("../escape"))
+        XCTAssertFalse(RigelHlsExporter.isValidSessionId("nested/path"))
+        XCTAssertFalse(RigelHlsExporter.isValidSessionId("session%2Fescape"))
+    }
+
+    func testDuplicateHlsSessionIdIsRejected() throws {
+        let sessionId = "test-duplicate-\(UUID().uuidString)"
+        let queue = DispatchQueue(label: "rigel-test-existing-session")
+        let existing = RigelHlsExporter.Session(
+            queue: queue,
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: false
+        )
+        RigelHlsExporter.lock.lock()
+        RigelHlsExporter.sessions[sessionId] = existing
+        RigelHlsExporter.lock.unlock()
+        defer {
+            RigelHlsExporter.lock.lock()
+            RigelHlsExporter.sessions.removeValue(forKey: sessionId)
+            RigelHlsExporter.lock.unlock()
+        }
+
+        let rejected = expectation(description: "duplicate HLS session is rejected")
+        var readyPath: String?
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId.uppercased(),
+            sourceUrl: "file:///does-not-run",
+            headers: [:],
+            mode: "transcode",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                rejected.fulfill()
+            },
+            onError: { message in
+                error = message
+                rejected.fulfill()
+            }
+        )
+        wait(for: [rejected], timeout: 2)
+
+        XCTAssertNil(readyPath)
+        XCTAssertEqual(error, "HLS session is already active")
+    }
+    func testStoppingSessionReservesIdUntilCleanup() {
+        let sessionId = "test-cleanup-reservation-\(UUID().uuidString)"
+        let queue = DispatchQueue(label: "rigel-test-cleanup-reservation")
+        queue.suspend()
+        let existing = RigelHlsExporter.Session(
+            queue: queue,
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: false
+        )
+        RigelHlsExporter.lock.lock()
+        RigelHlsExporter.sessions[sessionId] = existing
+        RigelHlsExporter.lock.unlock()
+
+        RigelHlsExporter.stopSession(sessionId: sessionId)
+        let rejected = expectation(description: "cleanup-pending HLS session is reserved")
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId.uppercased(),
+            sourceUrl: "file:///does-not-run",
+            headers: [:],
+            mode: "transcode",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            onReady: { path, message in
+                XCTAssertNil(path)
+                error = message
+                rejected.fulfill()
+            },
+            onError: { message in
+                error = message
+                rejected.fulfill()
+            }
+        )
+        wait(for: [rejected], timeout: 2)
+        XCTAssertEqual(error, "HLS session is already active")
+
+        queue.resume()
+        queue.sync {}
+    }
+    func testAirPlayProxyPublishesFiniteVODPlaylist() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let sessionId = "test-airplay-vod-\(UUID().uuidString)"
+        let finished = expectation(description: "AirPlay VOD session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "transcode",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: true,
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+
+        wait(for: [finished], timeout: 10)
+        defer { RigelHlsExporter.stopSession(sessionId: sessionId) }
+
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "AirPlay VOD session did not produce a playlist")
+        XCTAssertNil(error)
+
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        let playlists = try FileManager.default.contentsOfDirectory(at: outputDir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "m3u8" }
+        let mediaPlaylists = try playlists.map { try String(contentsOf: $0, encoding: .utf8) }
+            .filter { $0.contains("#EXTINF") }
+
+        XCTAssertFalse(mediaPlaylists.isEmpty)
+        for playlist in mediaPlaylists {
+            XCTAssertTrue(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"), playlist)
+            XCTAssertTrue(playlist.contains("#EXT-X-ENDLIST"), playlist)
+            XCTAssertFalse(playlist.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), playlist)
+        }
     }
 
     func testStopSessionDeletesSessionDirectory() throws {

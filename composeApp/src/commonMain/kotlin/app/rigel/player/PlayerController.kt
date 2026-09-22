@@ -662,6 +662,8 @@ class PlayerController(
             passthroughAudioCodecs = passthroughAudioCodecs.toList(),
             startOffsetMs = startOffsetMs,
             subtitleTracks = subtitleTracks,
+            // AirPlay receivers need a completed VOD playlist; local playback keeps streaming as EVENT.
+            waitForCompletion = currentDestination is PlaybackDestination.AirPlay && !probe.isLive,
             onError = { message ->
                 val error = if (selectedSubtitle) "Could not prepare the selected subtitle" else message
                 scope.launch { failProxySession(sessionId, generation, error) }

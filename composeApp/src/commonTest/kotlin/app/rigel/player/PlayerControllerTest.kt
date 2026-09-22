@@ -87,6 +87,7 @@ class PlayerControllerTest {
                     passthroughAudioCodecs: List<String>,
                     startOffsetMs: Long,
                     subtitleTracks: List<SubtitleTrack>,
+                    waitForCompletion: Boolean,
                     onReady: (String?, String?) -> Unit,
                     onError: (String) -> Unit,
                 ) {

@@ -27,6 +27,7 @@ final class RigelTranscodeBridge: NSObject, TranscodeBridge {
         passthroughAudioCodecs: [String],
         startOffsetMs: Int64,
         subtitleTracks: [SubtitleTrack],
+        waitForCompletion: Bool,
         onReady: @escaping (String?, String?) -> Void,
         onError: @escaping (String) -> Void
     ) {
@@ -38,6 +39,7 @@ final class RigelTranscodeBridge: NSObject, TranscodeBridge {
             passthroughAudioCodecs: passthroughAudioCodecs,
             startOffsetMs: startOffsetMs,
             subtitleTracks: subtitleTracks,
+            waitForCompletion: waitForCompletion,
             onReady: onReady,
             onError: onError
         )

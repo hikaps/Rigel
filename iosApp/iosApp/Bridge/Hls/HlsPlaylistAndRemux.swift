@@ -45,6 +45,63 @@ extension RigelHlsExporter {
         return atomicallyWrite(contents + "\n", to: publicMasterURL)
     }
 
+    static func finalizePresentationAsVOD(
+        baseMasterURL: URL?,
+        playlistURL: URL?,
+        outDir: URL,
+        subtitles: [SubtitleRendition]
+    ) -> Bool {
+        var playlistURLs: [URL] = []
+        if let baseMasterURL {
+            guard let master = try? String(contentsOf: baseMasterURL, encoding: .utf8) else {
+                return false
+            }
+            let references = playlistReferences(in: master)
+            guard !references.isEmpty else { return false }
+            for reference in references {
+                guard let url = safeChildURL(named: reference, in: outDir) else {
+                    return false
+                }
+                playlistURLs.append(url)
+            }
+        }
+        if let playlistURL {
+            playlistURLs.append(playlistURL)
+        }
+        for subtitle in subtitles {
+            guard let url = safeChildURL(named: subtitle.playlistName, in: outDir) else {
+                return false
+            }
+            playlistURLs.append(url)
+        }
+
+        var seen = Set<String>()
+        for url in playlistURLs where seen.insert(url.path).inserted {
+            guard let playlist = try? String(contentsOf: url, encoding: .utf8),
+                  let finalized = finalizedVODPlaylist(playlist),
+                  atomicallyWrite(finalized, to: url) else {
+                return false
+            }
+        }
+        return !playlistURLs.isEmpty
+    }
+
+    static func finalizedVODPlaylist(_ playlist: String) -> String? {
+        guard playlist.contains("#EXTM3U"),
+              playlist.contains("#EXT-X-ENDLIST") else {
+            return nil
+        }
+        if playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD") {
+            return playlist
+        }
+        guard playlist.contains("#EXT-X-PLAYLIST-TYPE:EVENT") else {
+            return nil
+        }
+        return playlist.replacingOccurrences(
+            of: "#EXT-X-PLAYLIST-TYPE:EVENT",
+            with: "#EXT-X-PLAYLIST-TYPE:VOD"
+        )
+    }
     static func presentationReady(
         baseMasterURL: URL,
         outDir: URL,
@@ -125,13 +182,30 @@ extension RigelHlsExporter {
     }
 
     private static func playlistReferences(in playlist: String) -> [String] {
-        playlist.components(separatedBy: .newlines).compactMap { rawLine in
+        let lines = playlist.components(separatedBy: .newlines)
+        let directReferences = lines.compactMap { rawLine -> String? in
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !line.isEmpty, !line.hasPrefix("#") else { return nil }
             return line.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: true)
                 .first
                 .map(String.init)
         }
+        let attributeReferences = lines.compactMap { rawLine -> String? in
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.hasPrefix("#EXT-X-MEDIA:"),
+                  let uriRange = line.range(of: "URI=\"") else {
+                return nil
+            }
+            let valueStart = uriRange.upperBound
+            guard let valueEnd = line[valueStart...].firstIndex(of: "\"") else {
+                return nil
+            }
+            return line[valueStart..<valueEnd]
+                .split(separator: "?", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init)
+        }
+        return directReferences + attributeReferences
     }
 
     private static func safeChildURL(named name: String, in directory: URL) -> URL? {
