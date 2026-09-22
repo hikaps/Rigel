@@ -339,6 +339,10 @@ final class ProbeTest: XCTestCase {
         XCTAssertTrue(master.contains("SUBTITLES=\"subs\""), master)
         XCTAssertTrue(master.contains("LANGUAGE=\"eng\""), master)
         XCTAssertTrue(master.contains("LANGUAGE=\"fra\""), master)
+        XCTAssertTrue(master.contains("DEFAULT=YES,AUTOSELECT=YES"), master)
+        XCTAssertTrue(master.contains("DEFAULT=NO,AUTOSELECT=NO"), master)
+        XCTAssertFalse(master.contains("DEFAULT:"), master)
+        XCTAssertFalse(master.contains("AUTOSELECT:"), master)
         let vttFiles = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
             .filter { $0.hasSuffix(".vtt") }
         let vttText = try vttFiles

@@ -18,7 +18,7 @@ extension RigelHlsExporter {
                 name = "RigelSelected__\(name)"
             }
             var line = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"\(name)\""
-            line += ",DEFAULT:\(isSelected ? "YES" : "NO"),AUTOSELECT:\(isSelected ? "YES" : "NO"),FORCED=NO"
+            line += ",DEFAULT=\(isSelected ? "YES" : "NO"),AUTOSELECT=\(isSelected ? "YES" : "NO"),FORCED=NO"
             if let language = hlsLanguageValue(rendition.language) {
                 line += ",LANGUAGE=\"\(language)\""
             }
