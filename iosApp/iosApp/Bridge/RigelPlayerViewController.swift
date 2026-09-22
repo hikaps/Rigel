@@ -15,6 +15,73 @@ import Combine
 /// Direct VOD media keeps AVPlayer's controls. AirPlay video handoff and PiP
 /// come from AVPlayerViewController.
 /// Events fire on the main thread.
+struct AirPlayStartupWatchdog {
+    private static let timeout: TimeInterval = 15
+    private static let maxSamplingGap: TimeInterval = 2
+
+    private var startedAt: TimeInterval?
+    private var previousSample: (time: TimeInterval, position: Double, externalPlaying: Bool)?
+    private var didComplete = false
+
+    mutating func reset() {
+        startedAt = nil
+        previousSample = nil
+        didComplete = false
+    }
+
+    mutating func update(
+        now: TimeInterval,
+        eligible: Bool,
+        paused: Bool,
+        externalPlaying: Bool,
+        positionSeconds: Double,
+        rate: Float
+    ) -> Bool {
+        guard eligible else {
+            reset()
+            return false
+        }
+        guard !didComplete else { return false }
+        guard !paused else {
+            startedAt = nil
+            previousSample = nil
+            return false
+        }
+        guard now.isFinite else { return false }
+
+        guard let startedAt, let previousSample else {
+            self.startedAt = now
+            self.previousSample = (now, positionSeconds, externalPlaying)
+            return false
+        }
+
+        let sampleElapsed = now - previousSample.time
+        guard sampleElapsed > 0, sampleElapsed <= Self.maxSamplingGap else {
+            self.startedAt = now
+            self.previousSample = (now, positionSeconds, externalPlaying)
+            return false
+        }
+
+        let positionDelta = positionSeconds - previousSample.position
+        let currentRate = Double(rate)
+        let hasAdvanced = previousSample.externalPlaying && externalPlaying &&
+            positionSeconds.isFinite && positionSeconds >= 0 &&
+            previousSample.position.isFinite && previousSample.position >= 0 &&
+            currentRate.isFinite && currentRate > 0 &&
+            positionDelta > 0 &&
+            positionDelta <= sampleElapsed * currentRate + 0.25
+        self.previousSample = (now, positionSeconds, externalPlaying)
+        if hasAdvanced {
+            didComplete = true
+            return false
+        }
+
+        guard now >= startedAt, now - startedAt >= Self.timeout else { return false }
+        didComplete = true
+        return true
+    }
+}
+
 final class RigelPlayerViewController: UIViewController {
     private let events: PlayerEvents
     /// Assigned by the SwiftUI host so the native control can present the
@@ -50,6 +117,8 @@ final class RigelPlayerViewController: UIViewController {
     /// instead of playing a stale item whose session is being torn down.
     private var phaseBufferingRequested = false
     private var lastReportedNativeBuffering = false
+    private var airPlayStartupWatchdog = AirPlayStartupWatchdog()
+    private var isAirPlayDirectAttempt = false
     /// True while a remote cast session owns playback: proxy seeks must then
     /// rebuild the session for the renderer instead of seeking the local item.
     var isCastPlayback = false
@@ -1064,6 +1133,18 @@ final class RigelPlayerViewController: UIViewController {
         subtitleLabel.isHidden = cue == nil
     }
 
+    private func isCurrentAirPlayDirectPlayback(for url: String?) -> Bool {
+        let state = SwiftPlayer.shared.snapshot()
+        guard !isProxyPlayback,
+              state.phase == .playing,
+              state.destinationKind == .airplay,
+              state.route == .direct,
+              state.proxyUrl == nil else {
+            return false
+        }
+        return url == nil || state.sourceUrl == url
+    }
+
     func load(
         url: String,
         title: String?,
@@ -1110,6 +1191,8 @@ final class RigelPlayerViewController: UIViewController {
         knownDurationSeconds = durationSeconds
         self.startOffsetSeconds = max(0, startOffsetSeconds.isFinite ? startOffsetSeconds : 0)
         isProxyPlayback = isProxy
+        airPlayStartupWatchdog.reset()
+        isAirPlayDirectAttempt = !isProxy && isCurrentAirPlayDirectPlayback(for: url)
         resumeSeekApplied = false
         self.selectedExternalSubtitleUrl = selectedExternalSubtitleUrl
         proxyExternalSubtitleUrl = isProxy ? selectedExternalSubtitleUrl : nil
@@ -1455,6 +1538,8 @@ final class RigelPlayerViewController: UIViewController {
         knownDurationSeconds = nil
         startOffsetSeconds = 0
         isProxyPlayback = false
+        airPlayStartupWatchdog.reset()
+        isAirPlayDirectAttempt = false
         resumeSeekApplied = false
         phaseBufferingRequested = false
         lastReportedNativeBuffering = false
@@ -1542,6 +1627,7 @@ final class RigelPlayerViewController: UIViewController {
             pollTimer?.invalidate()
             pollTimer = nil
             events.onError(message: detail)
+            return
         case .readyToPlay:
             if !isProxyPlayback && !resumeSeekApplied && startOffsetSeconds > 0 {
                 resumeSeekApplied = true
@@ -1556,5 +1642,42 @@ final class RigelPlayerViewController: UIViewController {
         default:
             break
         }
+        let currentAirPlayDirectPlayback = isCurrentAirPlayDirectPlayback(for: loadedURL)
+        if !currentAirPlayDirectPlayback {
+            airPlayStartupWatchdog.reset()
+            isAirPlayDirectAttempt = false
+            return
+        }
+        if !isAirPlayDirectAttempt {
+            airPlayStartupWatchdog.reset()
+            isAirPlayDirectAttempt = true
+        }
+
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+        let paused = player.timeControlStatus == .paused ||
+            phaseBufferingRequested ||
+            isScrubbing ||
+            UIApplication.shared.applicationState != .active
+        let externalPlaying = item.status == .readyToPlay &&
+            player.timeControlStatus == .playing &&
+            player.isExternalPlaybackActive
+        let timedOut = airPlayStartupWatchdog.update(
+            now: now,
+            eligible: isAirPlayDirectAttempt,
+            paused: paused,
+            externalPlaying: externalPlaying,
+            positionSeconds: player.currentTime().seconds,
+            rate: player.rate
+        )
+        guard timedOut else { return }
+
+        guard isCurrentAirPlayDirectPlayback(for: loadedURL) else {
+            airPlayStartupWatchdog.reset()
+            isAirPlayDirectAttempt = false
+            return
+        }
+        pollTimer?.invalidate()
+        pollTimer = nil
+        events.onError(message: "AirPlay playback did not start within 15 seconds")
     }
 }
