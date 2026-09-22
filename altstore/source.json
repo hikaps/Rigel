@@ -64,12 +64,12 @@
       },
       "versions": [
         {
-          "version": "1.0.60",
-          "buildVersion": "60",
-          "date": "2026-09-22T00:44:20Z",
-          "downloadURL": "https://github.com/hikaps/Rigel/releases/download/beta/Rigel-beta-14725cd.ipa",
-          "localizedDescription": "Rolling beta build 60. This IPA is ad-hoc signed and will be re-signed by AltStore or SideStore.",
-          "size": 10153380,
+          "version": "1.0.61",
+          "buildVersion": "61",
+          "date": "2026-09-22T17:21:43Z",
+          "downloadURL": "https://github.com/hikaps/Rigel/releases/download/beta/Rigel-beta-11f1d85.ipa",
+          "localizedDescription": "Rolling beta build 61. This IPA is ad-hoc signed and will be re-signed by AltStore or SideStore.",
+          "size": 10155355,
           "minOSVersion": "16.0"
         }
       ]
