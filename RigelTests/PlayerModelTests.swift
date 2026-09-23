@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import SwiftUI
 import ComposeApp
 import AVFoundation
 @testable import Rigel
@@ -292,6 +293,259 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertEqual(duration?.text, "—")
     }
 
+
+    @MainActor
+    func testOpenSubtitlePickerRefreshesWhenSidecarArrives() {
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let controller = RigelPlayerViewController(events: events)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let fixture = Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4")!
+        var selectedTrack: SubtitleTrack?
+        var selectedPosition: Double?
+        controller.onExternalSubtitleSelected = { track, position in
+            selectedTrack = track
+            selectedPosition = position
+        }
+        let window = UIWindow(frame: controller.view.frame)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.load(
+            url: fixture.absoluteString,
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false
+        )
+        defer {
+            controller.stopPlayback()
+            window.isHidden = true
+        }
+
+        let subtitles = view(controller.view, withAccessibilityLabel: "Subtitles")
+        XCTAssertNotNil(subtitles)
+        (subtitles as? UIButton)?.sendActions(for: .touchUpInside)
+        let sheet = waitUntil("presented subtitle picker") { controller.presentedViewController as? UIHostingController<TrackPickerSheet> }
+        XCTAssertNotNil(sheet)
+
+        let track = SubtitleTrack(url: "file:///tmp/fixture_sidecar.vtt", language: nil, title: "Delayed English")
+        controller.installLoadedSidecar(
+            track: track,
+            order: 0,
+            cues: [.init(start: 0, end: 10, text: "Delayed English")]
+        )
+
+        let refreshed = waitUntil("refreshed picker options") {
+            sheet?.rootView.model.options.first { $0.title == "Delayed English" }
+        }
+        XCTAssertNotNil(refreshed, "already-open picker must gain the late sidecar row")
+
+        refreshed?.select()
+        XCTAssertEqual(selectedTrack, track)
+        let off = sheet?.rootView.model.options.first { $0.id == "subtitles-off" }
+        XCTAssertNotNil(off)
+        off?.select()
+        XCTAssertNil(selectedTrack)
+    }
+
+    /// Creates a controller whose native discovery results are captured for
+    /// manual delivery, plus a key window so sheets can present. The box is
+    /// a reference so completions appended later are visible to the test.
+    @MainActor
+    private final class CompletionBox {
+        var items: [RigelPlayerViewController.TrackGroupLoaderCompletion] = []
+    }
+
+    @MainActor
+    private func makeLoaderBackedController(
+        events: PlayerEvents
+    ) -> (RigelPlayerViewController, CompletionBox) {
+        let completions = CompletionBox()
+        let controller = RigelPlayerViewController(events: events) { _, completion in
+            completions.items.append(completion)
+        }
+        return (controller, completions)
+    }
+
+    @MainActor
+    func testOpenPickerSettlesToLoadedWithoutTracks() {
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let (controller, completionsBox) = makeLoaderBackedController(events: events)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let window = UIWindow(frame: controller.view.frame)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.load(
+            url: Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4")!.absoluteString,
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false
+        )
+        defer {
+            controller.stopPlayback()
+            window.isHidden = true
+        }
+
+        let audio = view(controller.view, withAccessibilityLabel: "Audio track") as? UIButton
+        XCTAssertEqual(audio?.accessibilityValue, "Loading audio tracks")
+
+        audio?.sendActions(for: .touchUpInside)
+        let sheet = waitUntil("presented audio picker") { controller.presentedViewController as? UIHostingController<TrackPickerSheet> }
+        XCTAssertEqual(sheet?.rootView.model.loadState, .loading)
+
+        XCTAssertEqual(completionsBox.items.count, 1, "discovery must start exactly once per load")
+        completionsBox.items[0](.success((nil, nil)))
+
+        let settled = waitUntil("picker settles to loaded") {
+            sheet?.rootView.model.loadState == .loaded  ? Optional(true) : nil
+        }
+        XCTAssertNotNil(settled, "already-open picker must settle when discovery succeeds")
+        XCTAssertEqual(sheet?.rootView.model.loadState, .loaded)
+        XCTAssertEqual(audio?.accessibilityValue, "No alternate audio tracks")
+    }
+
+    @MainActor
+    func testFailedDiscoveryShowsFailedAndKeepsSidecarsSelectable() {
+        var playbackError: String?
+        let failingEvents = PlayerEventsImpl(onReady: {}, onError: { playbackError = $0 }, onBack: {})
+        let (controller, completions) = makeLoaderBackedController(events: failingEvents)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let window = UIWindow(frame: controller.view.frame)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.load(
+            url: Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4")!.absoluteString,
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false
+        )
+        defer {
+            controller.stopPlayback()
+            window.isHidden = true
+        }
+
+        let subtitles = view(controller.view, withAccessibilityLabel: "Subtitles") as? UIButton
+        subtitles?.sendActions(for: .touchUpInside)
+        let sheet = waitUntil("presented subtitle picker") { controller.presentedViewController as? UIHostingController<TrackPickerSheet> }
+        XCTAssertNotNil(sheet)
+
+        completions.items[0](.failure(NSError(domain: "test", code: 7)))
+
+        let settled = waitUntil("picker settles to failed") {
+            sheet?.rootView.model.loadState == .failed  ? Optional(true) : nil
+        }
+        XCTAssertNotNil(settled, "already-open picker must show terminal failure")
+        XCTAssertNil(playbackError, "track metadata failure must not fail playback")
+
+        let track = SubtitleTrack(url: "file:///tmp/fixture_sidecar.vtt", language: nil, title: "Fallback English")
+        var selectedTrack: SubtitleTrack?
+        controller.onExternalSubtitleSelected = { track, _ in selectedTrack = track }
+        controller.installLoadedSidecar(
+            track: track,
+            order: 0,
+            cues: [.init(start: 0, end: 10, text: "Fallback English")]
+        )
+        XCTAssertEqual(sheet?.rootView.model.loadState, .failed)
+        let row = sheet?.rootView.model.options.first { $0.title == "Fallback English" }
+        XCTAssertNotNil(row, "sidecar must stay selectable after native discovery fails")
+        row?.select()
+        XCTAssertEqual(selectedTrack, track)
+    }
+
+    @MainActor
+    func testReplacementMediaIgnoresStaleDiscoveryAndOldRowActions() {
+        let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})
+        let (controller, completionsBox) = makeLoaderBackedController(events: events)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let window = UIWindow(frame: controller.view.frame)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.load(
+            url: Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4")!.absoluteString,
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false
+        )
+        defer {
+            controller.stopPlayback()
+            window.isHidden = true
+        }
+
+        XCTAssertEqual(completionsBox.items.count, 1)
+        let oldCompletion = completionsBox.items[0]
+
+        // Give item A a sidecar and capture its picker's Off action so we can
+        // invoke it after B replaces A.
+        let oldTrack = SubtitleTrack(url: "file:///tmp/old.vtt", language: nil, title: "Old Subtitles")
+        controller.installLoadedSidecar(track: oldTrack, order: 0, cues: [.init(start: 0, end: 1, text: "Old")])
+        var forwarded: SubtitleTrack?
+        controller.onExternalSubtitleSelected = { track, _ in forwarded = track }
+        let subtitlesA = view(controller.view, withAccessibilityLabel: "Subtitles") as? UIButton
+        subtitlesA?.sendActions(for: .touchUpInside)
+        let sheetA = waitUntil("presented picker for A") { controller.presentedViewController as? UIHostingController<TrackPickerSheet> }
+        XCTAssertNotNil(sheetA)
+        let oldOffAction = sheetA?.rootView.model.options.first { $0.id == "subtitles-off" }?.select
+        XCTAssertNotNil(oldOffAction)
+        // Close A's sheet so B's picker can present.
+        sheetA?.dismiss(animated: false)
+        waitUntil("sheet A dismissed") { controller.presentedViewController == nil ? true : nil }
+
+        controller.load(
+            url: Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4")!.absoluteString,
+            title: nil,
+            sender: nil,
+            longFormVideoAirPlayEligible: false
+        )
+        XCTAssertEqual(completionsBox.items.count, 2)
+
+        let subtitles = view(controller.view, withAccessibilityLabel: "Subtitles") as? UIButton
+        subtitles?.sendActions(for: .touchUpInside)
+        let sheet = waitUntil("presented replacement picker") { controller.presentedViewController as? UIHostingController<TrackPickerSheet> }
+        XCTAssertEqual(sheet?.rootView.model.loadState, .loading)
+
+        // Failing the replaced item A must not touch B's picker.
+        oldCompletion(.failure(NSError(domain: "test", code: 8)))
+        XCTAssertEqual(sheet?.rootView.model.loadState, .loading)
+
+        // Succeeding B settles the open picker.
+        completionsBox.items[1](.success((nil, nil)))
+        let settled = waitUntil("replacement picker settles") {
+            sheet?.rootView.model.loadState == .loaded  ? Optional(true) : nil
+        }
+        XCTAssertNotNil(settled)
+
+        // An action captured from A's sheet must not forward a selection
+        // once B is the current item.
+        forwarded = nil
+        oldOffAction?()
+        XCTAssertNil(forwarded, "stale row action must be rejected after replacement")
+
+        // A completion delivered after stopPlayback must not repopulate state.
+        controller.stopPlayback()
+        completionsBox.items[1](.success((nil, nil)))
+        let dismissed = waitUntil("picker dismissal") {
+            controller.presentedViewController == nil ? true : nil
+        }
+        XCTAssertNotNil(dismissed, "teardown must dismiss the open track picker")
+        XCTAssertEqual(
+            view(controller.view, withAccessibilityLabel: "Subtitles")?.accessibilityValue,
+            nil
+        )
+    }
+
+    /// Polls the main queue for up to two seconds until `check` returns a
+    /// non-nil value, draining async UI work without fixed sleeps.
+    @MainActor
+    private func waitUntil<T>(_ what: String, _ check: @MainActor () -> T?) -> T? {
+        let deadline = Date().addingTimeInterval(2)
+        var result: T?
+        repeat {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            result = check()
+        } while result == nil && Date() < deadline
+        if result == nil {
+            NSLog("waitUntil(%@) timed out", what as NSString)
+        }
+        return result
+    }
 
     private func view(_ root: UIView, withAccessibilityLabel label: String) -> UIView? {
         if root.accessibilityLabel == label { return root }
