@@ -8,22 +8,77 @@ struct TrackPickerOption: Identifiable {
     let select: () -> Void
 }
 
+@MainActor
+final class TrackPickerModel: ObservableObject {
+    enum Kind {
+        case audio
+        case subtitles
+    }
+
+    enum LoadState: Equatable {
+        case loading
+        case loaded
+        case failed
+    }
+
+    let kind: Kind
+    @Published var options: [TrackPickerOption]
+    @Published var loadState: LoadState
+    @Published var customizeEnabled: Bool
+
+    init(
+        kind: Kind,
+        options: [TrackPickerOption],
+        loadState: LoadState,
+        customizeEnabled: Bool = true
+    ) {
+        self.kind = kind
+        self.options = options
+        self.loadState = loadState
+        self.customizeEnabled = customizeEnabled
+    }
+
+    var title: String {
+        switch kind {
+        case .audio: return "Audio"
+        case .subtitles: return "Subtitles"
+        }
+    }
+
+    var emptyMessage: String {
+        // Usable options always win over state copy, so a late sidecar stays
+        // selectable even when native discovery failed.
+        if !options.isEmpty { return "" }
+        switch kind {
+        case .audio:
+            switch loadState {
+            case .loading: return "Audio tracks are still loading."
+            case .loaded: return "No alternate audio tracks are available."
+            case .failed: return "Unable to load audio tracks."
+            }
+        case .subtitles:
+            switch loadState {
+            case .loading: return "Subtitle tracks are still loading."
+            case .loaded: return "No subtitle tracks are available."
+            case .failed: return "Unable to load subtitle tracks."
+            }
+        }
+    }
+}
+
 struct TrackPickerSheet: View {
-    let title: String
-    let options: [TrackPickerOption]
-    let emptyMessage: String
+    @ObservedObject var model: TrackPickerModel
     let moreAction: (() -> Void)?
     let customizeAction: (() -> Void)?
-    let customizeEnabled: Bool
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Group {
-                if options.isEmpty {
+                if model.options.isEmpty {
                     VStack {
                         Spacer()
-                        Text(emptyMessage)
+                        Text(model.emptyMessage)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 24)
@@ -33,7 +88,7 @@ struct TrackPickerSheet: View {
                     .frame(maxWidth: .infinity)
                 } else {
                     List {
-                        ForEach(options) { option in
+                        ForEach(model.options) { option in
                             Button {
                                 option.select()
                                 dismiss()
@@ -57,7 +112,7 @@ struct TrackPickerSheet: View {
                     }
                 }
             }
-            .navigationTitle(title)
+            .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -82,10 +137,10 @@ struct TrackPickerSheet: View {
                 dismiss()
                 DispatchQueue.main.async { customizeAction() }
             }
-            .disabled(!customizeEnabled)
+            .disabled(!model.customizeEnabled)
             .accessibilityIdentifier("player.customizeSubtitles")
             .accessibilityHint(
-                customizeEnabled
+                model.customizeEnabled
                     ? "Adjust the selected sidecar subtitle"
                     : "Select a downloaded or sidecar subtitle to customize"
             )

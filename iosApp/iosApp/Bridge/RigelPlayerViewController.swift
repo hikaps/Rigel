@@ -164,7 +164,11 @@ final class RigelPlayerViewController: UIViewController {
     private let subtitleLabel = SubtitleInsetLabel()
     private var audioGroup: AVMediaSelectionGroup?
     private var subtitleGroup: AVMediaSelectionGroup?
-    private var trackGroupsLoadedFor: AVPlayerItem?
+    /// Terminal state of native media-selection discovery for the current
+    /// item; drives picker copy and accessibility values.
+    private var trackGroupLoadState: TrackPickerModel.LoadState = .loading
+    private weak var trackPickerModel: TrackPickerModel?
+    private weak var trackPickerHost: UIViewController?
     private struct SidecarSubtitle {
         let order: Int
         let track: SubtitleTrack
@@ -198,9 +202,43 @@ final class RigelPlayerViewController: UIViewController {
     private var controlsHideTimer: Timer?
     private var controlsVisible = true
 
-    init(events: PlayerEvents) {
+    typealias TrackGroupLoadResult = Result<(audio: AVMediaSelectionGroup?, subtitles: AVMediaSelectionGroup?), Error>
+    typealias TrackGroupLoaderCompletion = (TrackGroupLoadResult) -> Void
+    typealias TrackGroupLoader = (AVAsset, @escaping TrackGroupLoaderCompletion) -> Void
+
+    private let trackGroupLoader: TrackGroupLoader
+
+    init(events: PlayerEvents, trackGroupLoader: @escaping TrackGroupLoader = RigelPlayerViewController.loadNativeTrackGroups) {
         self.events = events
+        self.trackGroupLoader = trackGroupLoader
         super.init(nibName: nil, bundle: nil)
+    }
+
+    /// Loads media-selection metadata on the asset's own queue. Success
+    /// includes nil groups for media without alternate tracks; any other key
+    /// status is a terminal failure.
+    static func loadNativeTrackGroups(
+        asset: AVAsset,
+        completion: @escaping (TrackGroupLoadResult) -> Void
+    ) {
+        let key = "availableMediaCharacteristicsWithMediaSelectionOptions"
+        asset.loadValuesAsynchronously(forKeys: [key]) {
+            var error: NSError?
+            let status = asset.statusOfValue(forKey: key, error: &error)
+            guard status == .loaded else {
+                let failure = error
+                    ?? NSError(
+                        domain: "RigelPlayer.TrackDiscovery",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Media selection metadata could not be loaded."]
+                    )
+                completion(.failure(failure))
+                return
+            }
+            let audio = asset.mediaSelectionGroup(forMediaCharacteristic: .audible)
+            let subtitles = asset.mediaSelectionGroup(forMediaCharacteristic: .legible)
+            completion(.success((audio, subtitles)))
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -575,26 +613,18 @@ final class RigelPlayerViewController: UIViewController {
         }
     }
 
-    @objc private func audioTapped() {
-        showControls()
-        guard let group = audioGroup, !group.options.isEmpty else {
-            presentTrackPicker(
-                title: "Audio",
-                options: [],
-                emptyMessage: trackGroupsLoadedFor == nil
-                    ? "Audio tracks are still loading."
-                    : "No alternate audio tracks are available."
-            )
-            return
-        }
-        let selected = player?.currentItem?.currentMediaSelection.selectedMediaOption(in: group)
-        let options = group.options.enumerated().map { index, option in
+    private func audioPickerOptions(item: AVPlayerItem?) -> [TrackPickerOption] {
+        guard let group = audioGroup, !group.options.isEmpty else { return [] }
+        let selected = item?.currentMediaSelection.selectedMediaOption(in: group)
+        return group.options.enumerated().map { index, option in
             TrackPickerOption(
                 id: "audio-\(index)",
                 title: option.displayName,
                 isSelected: selected === option,
-                select: { [weak self] in
+                select: { [weak self, weak item] in
                     guard let self,
+                          self.disposed == false,
+                          self.player?.currentItem === item,
                           let currentGroup = self.audioGroup,
                           currentGroup.options.indices.contains(index) else { return }
                     self.selectMediaOption(currentGroup.options[index], in: currentGroup)
@@ -602,19 +632,13 @@ final class RigelPlayerViewController: UIViewController {
                 }
             )
         }
-        presentTrackPicker(
-            title: "Audio",
-            options: options,
-            emptyMessage: "No alternate audio tracks are available."
-        )
     }
 
-    @objc private func subtitlesTapped() {
-        showControls()
+    private func subtitlePickerOptions(item: AVPlayerItem?) -> [TrackPickerOption] {
         var options: [TrackPickerOption] = []
         let nativeOptions = visibleNativeSubtitleOptions()
         let selectedNative = subtitleGroup.flatMap {
-            player?.currentItem?.currentMediaSelection.selectedMediaOption(in: $0)
+            item?.currentMediaSelection.selectedMediaOption(in: $0)
         }
         let canShowOff = nativeOptions.isEmpty || subtitleGroup?.allowsEmptySelection == true
         if canShowOff && (!nativeOptions.isEmpty || !sidecarSubtitles.isEmpty) {
@@ -623,8 +647,10 @@ final class RigelPlayerViewController: UIViewController {
                     id: "subtitles-off",
                     title: "Off",
                     isSelected: activeSidecarSubtitleIndex == nil && selectedNative == nil,
-                    select: { [weak self] in
-                        guard let self else { return }
+                    select: { [weak self, weak item] in
+                        guard let self,
+                              !self.disposed,
+                              self.player?.currentItem === item else { return }
                         self.activeSidecarSubtitleIndex = nil
                         self.selectedExternalSubtitleUrl = nil
                         if let group = self.subtitleGroup {
@@ -643,8 +669,10 @@ final class RigelPlayerViewController: UIViewController {
                     id: "subtitle-\(index)",
                     title: Self.subtitleDisplayName(for: option),
                     isSelected: activeSidecarSubtitleIndex == nil && selectedNative === option,
-                    select: { [weak self] in
+                    select: { [weak self, weak item] in
                         guard let self,
+                              !self.disposed,
+                              self.player?.currentItem === item,
                               let currentGroup = self.subtitleGroup,
                               currentGroup.options.contains(where: { $0 === option }) else { return }
                         self.activeSidecarSubtitleIndex = nil
@@ -665,8 +693,10 @@ final class RigelPlayerViewController: UIViewController {
                     id: "sidecar-\(order)",
                     title: label,
                     isSelected: activeSidecarSubtitleIndex == index,
-                    select: { [weak self] in
+                    select: { [weak self, weak item] in
                         guard let self,
+                              !self.disposed,
+                              self.player?.currentItem === item,
                               let currentIndex = self.sidecarSubtitles.firstIndex(where: { $0.order == order }) else {
                             return
                         }
@@ -682,23 +712,17 @@ final class RigelPlayerViewController: UIViewController {
                 )
             )
         }
-        let customizeEnabled = activeSidecarSubtitleIndex.map {
-            sidecarSubtitles.indices.contains($0)
-        } ?? false
-        presentTrackPicker(
-            title: "Subtitles",
-            options: options,
-            emptyMessage: trackGroupsLoadedFor == nil
-                ? "Subtitle tracks are still loading."
-                : "No subtitle tracks are available.",
-            moreAction: { [weak self] in
-                self?.presentOpenSubtitlesSearch()
-            },
-            customizeAction: { [weak self] in
-                self?.presentSubtitleCustomization()
-            },
-            customizeEnabled: customizeEnabled
-        )
+        return options
+    }
+
+    @objc private func audioTapped() {
+        showControls()
+        presentTrackPicker(kind: .audio)
+    }
+
+    @objc private func subtitlesTapped() {
+        showControls()
+        presentTrackPicker(kind: .subtitles)
     }
 
     private func presentSubtitleCustomization() {
@@ -735,24 +759,44 @@ final class RigelPlayerViewController: UIViewController {
         item.select(option, in: group)
     }
 
-    private func presentTrackPicker(
-        title: String,
-        options: [TrackPickerOption],
-        emptyMessage: String,
-        moreAction: (() -> Void)? = nil,
-        customizeAction: (() -> Void)? = nil,
-        customizeEnabled: Bool = true
-    ) {
-        presentSheet(
+    private func presentTrackPicker(kind: TrackPickerModel.Kind) {
+        guard !disposed else { return }
+        let isSubtitles = kind == .subtitles
+        let model = TrackPickerModel(
+            kind: kind,
+            options: isSubtitles ? subtitlePickerOptions(item: player?.currentItem) : audioPickerOptions(item: player?.currentItem),
+            loadState: trackGroupLoadState,
+            customizeEnabled: isSubtitles && (activeSidecarSubtitleIndex.map {
+                sidecarSubtitles.indices.contains($0)
+            } ?? false)
+        )
+        trackPickerModel = model
+        trackPickerHost = presentSheet(
             TrackPickerSheet(
-                title: title,
-                options: options,
-                emptyMessage: emptyMessage,
-                moreAction: moreAction,
-                customizeAction: customizeAction,
-                customizeEnabled: customizeEnabled
+                model: model,
+                moreAction: isSubtitles ? { [weak self] in
+                    self?.presentOpenSubtitlesSearch()
+                } : nil,
+                customizeAction: isSubtitles ? { [weak self] in
+                    self?.presentSubtitleCustomization()
+                } : nil
             )
         )
+    }
+
+    /// Rebuilds the already-presented picker from current groups, sidecars,
+    /// and discovery state; no-op when no picker is open.
+    private func refreshTrackPicker() {
+        guard let model = trackPickerModel,
+              trackPickerHost?.presentingViewController != nil || trackPickerHost?.view.window != nil else { return }
+        let isSubtitles = model.kind == .subtitles
+        model.options = isSubtitles
+            ? subtitlePickerOptions(item: player?.currentItem)
+            : audioPickerOptions(item: player?.currentItem)
+        model.loadState = trackGroupLoadState
+        model.customizeEnabled = isSubtitles && (activeSidecarSubtitleIndex.map {
+            sidecarSubtitles.indices.contains($0)
+        } ?? false)
     }
 
     private func presentOpenSubtitlesSearch() {
@@ -802,24 +846,30 @@ final class RigelPlayerViewController: UIViewController {
     }
 
     private func loadTrackGroups(for item: AVPlayerItem) {
-        guard trackGroupsLoadedFor !== item else { return }
-        let asset = item.asset
-        let key = "availableMediaCharacteristicsWithMediaSelectionOptions"
-        asset.loadValuesAsynchronously(forKeys: [key]) { [weak self, weak item] in
-            guard let self, let item else { return }
-            var error: NSError?
-            guard asset.statusOfValue(forKey: key, error: &error) == .loaded else { return }
-            let audio = asset.mediaSelectionGroup(forMediaCharacteristic: .audible)
-            let subtitles = asset.mediaSelectionGroup(forMediaCharacteristic: .legible)
+        trackGroupLoadState = .loading
+        trackGroupLoader(item.asset) { [weak self, weak item] result in
             DispatchQueue.main.async {
-                guard !self.disposed, self.player?.currentItem === item else { return }
-                self.audioGroup = audio
-                self.subtitleGroup = subtitles
-                self.selectedExternalSubtitleOption = self.selectedExternalOption(in: subtitles)
-                self.trackGroupsLoadedFor = item
-                self.reconcileSubtitlePresentation(
-                    externalPlaybackActive: self.player?.isExternalPlaybackActive ?? false
-                )
+                guard let self,
+                      !self.disposed,
+                      let item,
+                      self.player?.currentItem === item,
+                      self.trackGroupLoadState == .loading else { return }
+                switch result {
+                case .success(let groups):
+                    self.audioGroup = groups.audio
+                    self.subtitleGroup = groups.subtitles
+                    self.selectedExternalSubtitleOption = self.selectedExternalOption(in: groups.subtitles)
+                    self.trackGroupLoadState = .loaded
+                    self.reconcileSubtitlePresentation(
+                        externalPlaybackActive: self.player?.isExternalPlaybackActive ?? false
+                    )
+                case .failure(let error):
+                    NSLog("[RigelPlayer] media selection metadata failed: %@", error.localizedDescription)
+                    self.audioGroup = nil
+                    self.subtitleGroup = nil
+                    self.selectedExternalSubtitleOption = nil
+                    self.trackGroupLoadState = .failed
+                }
                 self.updateTrackButtons()
             }
         }
@@ -872,14 +922,42 @@ final class RigelPlayerViewController: UIViewController {
     }
 
     private func updateTrackButtons() {
-        let audioCount = audioGroup?.options.count ?? 0
         let subtitleCount = visibleNativeSubtitleOptions().count + sidecarSubtitles.count
-        audioButton.accessibilityValue = audioCount == 0
-            ? "No alternate audio tracks"
-            : "\(audioCount) audio track" + (audioCount == 1 ? "" : "s")
-        tracksButton.accessibilityValue = subtitleCount == 0
-            ? "No subtitle tracks"
-            : "\(subtitleCount) subtitle track" + (subtitleCount == 1 ? "" : "s")
+        audioButton.accessibilityValue = Self.trackAccessibilityValue(
+            state: trackGroupLoadState,
+            count: audioGroup?.options.count ?? 0,
+            noun: "audio track",
+            loading: "Loading audio tracks",
+            empty: "No alternate audio tracks",
+            failed: "Unable to load audio tracks"
+        )
+        tracksButton.accessibilityValue = Self.trackAccessibilityValue(
+            state: trackGroupLoadState,
+            count: subtitleCount,
+            noun: "subtitle track",
+            loading: "Loading subtitle tracks",
+            empty: "No subtitle tracks",
+            failed: "Unable to load subtitle tracks"
+        )
+        refreshTrackPicker()
+    }
+
+    private static func trackAccessibilityValue(
+        state: TrackPickerModel.LoadState,
+        count: Int,
+        noun: String,
+        loading: String,
+        empty: String,
+        failed: String
+    ) -> String {
+        if count > 0 {
+            return "\(count) \(noun)" + (count == 1 ? "" : "s")
+        }
+        switch state {
+        case .loading: return loading
+        case .loaded: return empty
+        case .failed: return failed
+        }
     }
     private func applySubtitleAppearance(_ appearance: SubtitleAppearance) {
         let weight: UIFont.Weight = appearance.bold ? .bold : .regular
@@ -1206,11 +1284,11 @@ final class RigelPlayerViewController: UIViewController {
         durationLabel.text = "—"
         audioGroup = nil
         subtitleGroup = nil
-        trackGroupsLoadedFor = nil
+        selectedExternalSubtitleOption = nil
+        trackGroupLoadState = .loading
         audioButton.isHidden = false
         tracksButton.isHidden = false
-        audioButton.accessibilityValue = "Loading audio tracks"
-        tracksButton.accessibilityValue = "Loading subtitle tracks"
+        updateTrackButtons()
         showControls()
 
         let item = AVPlayerItem(url: avURL)
@@ -1260,6 +1338,7 @@ final class RigelPlayerViewController: UIViewController {
         // AVPlayer queues this request until the item is ready. Do not call
         // play() from polling: that would override a user's pause.
         p.play()
+        loadTrackGroups(for: item)
         startPolling()
         updatePlaybackControls()
     }
@@ -1550,9 +1629,13 @@ final class RigelPlayerViewController: UIViewController {
         pendingScrubValue = nil
         scrubGeneration &+= 1
         bottomBar.isHidden = true
+        trackPickerHost?.dismiss(animated: false)
+        trackPickerHost = nil
+        trackPickerModel = nil
         audioGroup = nil
         subtitleGroup = nil
-        trackGroupsLoadedFor = nil
+        selectedExternalSubtitleOption = nil
+        trackGroupLoadState = .loading
         sidecarGeneration &+= 1
         sidecarSubtitles.removeAll()
         nextSidecarOrder = 0
@@ -1592,9 +1675,6 @@ final class RigelPlayerViewController: UIViewController {
 
     private func poll() {
         guard !disposed, let player, let item = player.currentItem else { return }
-        if trackGroupsLoadedFor !== item {
-            loadTrackGroups(for: item)
-        }
         if phaseBufferingRequested, player.timeControlStatus == .playing {
             player.pause()
         }
@@ -1618,6 +1698,16 @@ final class RigelPlayerViewController: UIViewController {
         }
         switch item.status {
         case .failed:
+            // Settle still-pending track discovery before the one-shot
+            // playback error: a later metadata callback must not repopulate
+            // a doomed item's pickers.
+            if trackGroupLoadState == .loading {
+                audioGroup = nil
+                subtitleGroup = nil
+                selectedExternalSubtitleOption = nil
+                trackGroupLoadState = .failed
+                updateTrackButtons()
+            }
             let nsErr = item.error as NSError?
             let detail = nsErr?.localizedDescription ?? "Playback failed"
             NSLog("[RigelPlayer] item failed: %@ (domain=%@ code=%ld)", detail, nsErr?.domain ?? "?", nsErr?.code ?? -1)
