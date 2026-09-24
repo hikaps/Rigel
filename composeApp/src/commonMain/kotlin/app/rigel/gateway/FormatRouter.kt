@@ -34,7 +34,7 @@ object FormatRouter {
         preference: RouteOverride = RouteOverride.AUTO,
         sourceIsRemotelyReachable: Boolean = true,
     ): RouteDecision {
-        if (profile.detail == "This iPhone" || profile.mode == ReceiverCompatibilityMode.CONSERVATIVE &&
+        if (profile.mode == ReceiverCompatibilityMode.CONSERVATIVE &&
             profile.directSchemes.contains("file")
         ) {
             return localDecision(probe, preference, profile.detail)
@@ -103,10 +103,13 @@ object FormatRouter {
         sourceReachable: Boolean,
     ): RouteDecision.Playable? {
         if (!sourceReachable) return null
-        if (profile.mode != ReceiverCompatibilityMode.OPTIMISTIC_HTTP &&
+        val directAudioIncompatible =
+            (profile.mode != ReceiverCompatibilityMode.OPTIMISTIC_HTTP || profile.directAudioCodecs.isNotEmpty()) &&
+                probe.audioCodecs.any { it.lowercase() !in profile.directAudioCodecs }
+        if (directAudioIncompatible ||
+            profile.mode != ReceiverCompatibilityMode.OPTIMISTIC_HTTP &&
             (probe.container.lowercase() !in profile.directContainers ||
                 probe.videoCodec?.lowercase()?.let { it !in profile.directVideoCodecs } == true ||
-                probe.audioCodecs.any { it.lowercase() !in profile.directAudioCodecs } ||
                 probe.videoCodec != null && probe.pixFmt?.lowercase() !in profile.directPixelFormats ||
                 !dimensionsFit(probe, profile))
         ) return null

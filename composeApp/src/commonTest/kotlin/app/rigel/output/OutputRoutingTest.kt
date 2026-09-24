@@ -2,6 +2,7 @@ package app.rigel.output
 
 import app.rigel.bridge.ProbeResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.KodiDevice
 import app.rigel.cast.RokuDevice
 import app.rigel.gateway.FormatRouter
 import app.rigel.gateway.PlaybackRoute
@@ -107,7 +108,7 @@ class OutputRoutingTest {
     @Test
     fun airPlayTriesDirectBeforeProxyWithExternalSubtitle() {
         val airPlayDirect = FormatRouter.decide(
-            probe = probe("webm", video = "vp9"),
+            probe = probe("webm", video = "vp9", audio = listOf("aac")),
             profile = OutputMediaProfiles.airPlay("Living Room"),
             hasSelectedExternalSubtitle = true,
             preference = RouteOverride.AUTO,
@@ -132,6 +133,114 @@ class OutputRoutingTest {
             sourceIsRemotelyReachable = true,
         ) as RouteDecision.Playable
         assertEquals(PlaybackRoute.TRANSCODE, local.route)
+    }
+
+    @Test
+    fun airPlayNonAacAudioUsesHlsAndOnlyAacPassesThrough() {
+        val h264 = FormatRouter.decide(
+            probe = probe("mp4", video = "h264", audio = listOf("DTS")),
+            profile = OutputMediaProfiles.airPlay("Living Room"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.REMUX, h264.route)
+        assertTrue(h264.passthroughAudioCodecs.isEmpty())
+
+        val mixed = FormatRouter.decide(
+            probe = probe("mp4", video = "h264", audio = listOf("aac", "dts")),
+            profile = OutputMediaProfiles.airPlay("Living Room"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.REMUX, mixed.route)
+        assertEquals(setOf("aac"), mixed.passthroughAudioCodecs)
+
+        val unsupportedVideo = FormatRouter.decide(
+            probe = probe("matroska", video = "hevc", audio = listOf("dts")),
+            profile = OutputMediaProfiles.airPlay("Living Room"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.TRANSCODE, unsupportedVideo.route)
+    }
+
+    @Test
+    fun airPlayCodecNamesAreCaseInsensitiveAndNoAudioStaysDirect() {
+        val uppercaseAac = FormatRouter.decide(
+            probe = probe("WEBM", video = "VP9", audio = listOf("AAC")),
+            profile = OutputMediaProfiles.airPlay("Living Room"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.DIRECT, uppercaseAac.route)
+
+        val noAudio = FormatRouter.decide(
+            probe = probe("webm", video = "vp9", audio = emptyList()),
+            profile = OutputMediaProfiles.airPlay("Living Room"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.DIRECT, noAudio.route)
+
+        val audioOnly = FormatRouter.decide(
+            probe = probe("matroska", video = null, audio = listOf("DTS")),
+            profile = OutputMediaProfiles.airPlay("Living Room"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.REMUX, audioOnly.route)
+    }
+
+    @Test
+    fun directPreferenceCannotBypassAirPlayOrThisIphoneAudioCompatibility() {
+        val probeWithDts = probe("mp4", video = "h264", audio = listOf("dts"))
+
+        val airPlay = FormatRouter.decide(
+            probe = probeWithDts,
+            profile = OutputMediaProfiles.airPlay("Living Room"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.DIRECT,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.REMUX, airPlay.route)
+
+        val thisIphone = FormatRouter.decide(
+            probe = probeWithDts,
+            profile = OutputMediaProfiles.airPlay("This iPhone"),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.DIRECT,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.REMUX, thisIphone.route)
+    }
+
+    @Test
+    fun kodiOptimisticAndLocalFlacAlacPlaybackRemainDirect() {
+        val kodi = FormatRouter.decide(
+            probe = probe("webm", video = "vp9", audio = listOf("dts")),
+            profile = OutputMediaProfiles.familyDefault(
+                CastTarget.Kodi(KodiDevice("k1", "http://192.168.1.9:8080", "Kodi")),
+            ),
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.DIRECT, kodi.route)
+
+        val local = FormatRouter.decide(
+            probe = probe("mp4", video = "h264", audio = listOf("flac", "alac")),
+            profile = OutputMediaProfiles.local,
+            hasSelectedExternalSubtitle = false,
+            preference = RouteOverride.AUTO,
+            sourceIsRemotelyReachable = true,
+        ) as RouteDecision.Playable
+        assertEquals(PlaybackRoute.DIRECT, local.route)
     }
     @Test
     fun compatibleReceiverKeepsDirectPlaybackWithExternalSubtitle() {

@@ -20,6 +20,7 @@ data class OutputMediaProfile(
     val directSchemes: Set<String>,
     val directContainers: Set<String>,
     val directVideoCodecs: Set<String>,
+    /** Only optimistic profiles treat an empty set as unconstrained direct audio. */
     val directAudioCodecs: Set<String>,
     val directPixelFormats: Set<String>,
     val hlsVideoCodecs: Set<String>,
@@ -89,6 +90,7 @@ object OutputMediaProfiles {
 
     fun airPlay(name: String) = optimisticHttp(name.ifBlank { "AirPlay" }).copy(
         directSchemes = setOf("http", "https", "file"),
+        directAudioCodecs = aac,
         detail = name.ifBlank { "AirPlay" },
     )
 
