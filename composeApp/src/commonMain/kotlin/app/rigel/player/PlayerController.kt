@@ -1034,7 +1034,7 @@ class PlayerController(
     private fun airPlayFallbackDecision(probe: ProbeResult): RouteDecision.Playable? =
         FormatRouter.decide(
             probe = probe,
-            profile = OutputMediaProfiles.local.copy(detail = currentDestination.displayName),
+            profile = OutputMediaProfiles.airPlay(currentDestination.displayName),
             hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null,
             preference = RouteOverride.ALWAYS_PROXY,
             sourceIsRemotelyReachable = true,
@@ -1043,9 +1043,9 @@ class PlayerController(
 
     /**
      * Native playback failure seam. A DIRECT decoder failure gets exactly one
-     * automatic demotion to the TRANSCODE proxy. REMUX would preserve the
-     * incompatible bitstream and fail a second time. Proxy failures surface
-     * as errors (no infinite loop).
+     * automatic proxy fallback. AirPlay reevaluates through its output profile,
+     * while local playback uses a full TRANSCODE fallback. Proxy failures
+     * surface as errors (no infinite loop).
      */
     fun reportError(message: String) {
         val current = _uiState.value

@@ -324,7 +324,7 @@ final class ProbeTest: XCTestCase {
         queue.sync {}
     }
     func testAirPlayProxyPublishesFiniteVODPlaylist() throws {
-        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_dts", withExtension: "mkv"))
         let sessionId = "test-airplay-vod-\(UUID().uuidString)"
         let finished = expectation(description: "AirPlay VOD session finishes")
         var readyPath: String?
@@ -334,7 +334,8 @@ final class ProbeTest: XCTestCase {
             sessionId: sessionId,
             sourceUrl: fixture.absoluteString,
             headers: [:],
-            mode: "transcode",
+            mode: "remux",
+            passthroughAudioCodecs: ["aac"],
             startOffsetMs: 0,
             subtitleTracks: [],
             waitForCompletion: true,
@@ -367,6 +368,52 @@ final class ProbeTest: XCTestCase {
             XCTAssertTrue(playlist.contains("#EXT-X-ENDLIST"), playlist)
             XCTAssertFalse(playlist.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), playlist)
         }
+        let masterURL = outputDir.appendingPathComponent("index.m3u8")
+        let master = try String(contentsOf: masterURL, encoding: .utf8)
+        let masterReferences = master.components(separatedBy: .newlines).flatMap { rawLine -> [String] in
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            var references: [String] = []
+            if !line.isEmpty, !line.hasPrefix("#"), line.hasSuffix(".m3u8") {
+                references.append(line)
+            }
+            if let uriStart = line.range(of: "URI=\""),
+               let uriEnd = line[uriStart.upperBound...].firstIndex(of: "\"") {
+                references.append(String(line[uriStart.upperBound..<uriEnd]))
+            }
+            return references
+        }
+        var variantNames: [String] = []
+        for name in masterReferences where !variantNames.contains(name) {
+            variantNames.append(name)
+        }
+        XCTAssertFalse(variantNames.isEmpty, master)
+
+        var videoCodec: String?
+        var audioCodecs: [String] = []
+        for variantName in variantNames {
+            let variantURL = outputDir.appendingPathComponent(variantName)
+            let variant = try String(contentsOf: variantURL, encoding: .utf8)
+            guard let rawSegment = variant
+                .components(separatedBy: .newlines)
+                .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+                .first(where: { !$0.isEmpty && !$0.hasPrefix("#") }) else {
+                continue
+            }
+            let segmentName = rawSegment
+                .split(separator: "?", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init) ?? rawSegment
+            let mediaURL = outputDir.appendingPathComponent(segmentName)
+            let (probe, probeError) = RigelProbe.probe(url: mediaURL.absoluteString, headers: [:])
+            XCTAssertNil(probeError, "media probe error for \(segmentName): \(probeError ?? "")")
+            guard let probe else { continue }
+            if probe.videoCodec != nil {
+                videoCodec = probe.videoCodec
+            }
+            audioCodecs.append(contentsOf: probe.audioCodecs)
+        }
+        XCTAssertEqual(videoCodec, "h264")
+        XCTAssertTrue(audioCodecs.contains("aac"), "audio codecs: \(audioCodecs)")
     }
 
     func testStopSessionDeletesSessionDirectory() throws {

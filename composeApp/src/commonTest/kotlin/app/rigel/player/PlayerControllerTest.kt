@@ -59,6 +59,7 @@ class PlayerControllerTest {
     private var lanBase: String? = null
     private val stoppedSessions = mutableListOf<String>()
     private val hlsModes = mutableListOf<String>()
+    private val hlsPassthroughAudioCodecs = mutableListOf<List<String>>()
     private val hlsOffsets = mutableListOf<Long>()
     private val hlsSessionIds = mutableListOf<String>()
     private val hlsSubtitleTracks = mutableListOf<List<SubtitleTrack>>()
@@ -92,6 +93,7 @@ class PlayerControllerTest {
                     onError: (String) -> Unit,
                 ) {
                     hlsModes += mode
+                    hlsPassthroughAudioCodecs += passthroughAudioCodecs
                     hlsOffsets += startOffsetMs
                     hlsSessionIds += sessionId
                     hlsSubtitleTracks += subtitleTracks
@@ -153,6 +155,7 @@ class PlayerControllerTest {
         lanBase = null
         stoppedSessions.clear()
         hlsModes.clear()
+        hlsPassthroughAudioCodecs.clear()
         hlsOffsets.clear()
         hlsSessionIds.clear()
         hlsSubtitleTracks.clear()
@@ -993,10 +996,21 @@ class PlayerControllerTest {
             CastDispatcher.install(null, null)
         }
     }
-
     @Test
     fun airPlayDirectFailureFallsBackToRemuxForH264Aac() = runTest(dispatcher.scheduler) {
-        probeResult = ProbeResult("matroska", "h264", listOf("aac"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        probeResult = ProbeResult(
+            "matroska",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
         lanBase = "http://192.168.1.50:8090"
         val c = controller()
         c.loadRequest(
@@ -1014,11 +1028,24 @@ class PlayerControllerTest {
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
         assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
         assertEquals(listOf("remux"), hlsModes)
+        assertEquals(listOf("aac"), hlsPassthroughAudioCodecs.single())
     }
 
     @Test
     fun airPlayDirectFailureFallsBackToTranscodeForUnsupportedVideo() = runTest(dispatcher.scheduler) {
-        probeResult = ProbeResult("webm", "vp9", listOf("opus"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        probeResult = ProbeResult(
+            "webm",
+            "vp9",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
         lanBase = "http://192.168.1.50:8090"
         val c = controller()
         c.loadRequest(
@@ -1034,6 +1061,44 @@ class PlayerControllerTest {
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
         assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
         assertEquals(listOf("transcode"), hlsModes)
+    }
+
+    @Test
+    fun switchingLocalDirectH264FlacToAirPlayBuildsLanRemuxWithAacOnlyPolicy() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("flac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        lanBase = "http://192.168.1.50:8090"
+        val c = controller()
+        c.loadRequest(
+            request.copy(sourceUrl = "http://h/movie.mp4"),
+            PlaybackDestination.Local,
+        )
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertTrue(hlsModes.isEmpty())
+
+        c.selectAirPlay("air-1", "Living Room", positionMs = 0)
+        advanceUntilIdle()
+
+        val state = c.uiState.value
+        assertEquals(PlayerPhase.PLAYING, state.phase)
+        assertEquals(PlaybackRoute.REMUX, state.route)
+        assertEquals("http://192.168.1.50:8090/hls/s1/out.m3u8", state.proxyUrl)
+        assertNull(state.error)
+        assertEquals(listOf("remux"), hlsModes)
+        assertEquals(emptyList(), hlsPassthroughAudioCodecs.single())
     }
 
     @Test
