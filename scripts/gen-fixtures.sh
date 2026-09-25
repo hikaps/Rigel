@@ -64,7 +64,14 @@ mkdir -p "$OUT/fixture_hls"
 ffmpeg -hide_banner -loglevel error -y \
   -f lavfi -i "testsrc=duration=2:size=320x240:rate=10" \
   -f lavfi -i "sine=frequency=440:duration=2" \
-  -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest \
-  -f hls -hls_time 1 -hls_list_size 0 -hls_segment_filename "$OUT/fixture_hls/seg%03d.ts" \
+  -c:v libx264 -pix_fmt yuv420p -g 10 -keyint_min 10 -sc_threshold 0 \
+  -c:a aac -shortest -force_key_frames "expr:gte(t,n_forced*1)" \
+  -f hls -hls_time 1 -hls_list_size 0 -hls_flags independent_segments \
+  -hls_segment_filename "$OUT/fixture_hls/seg%03d.ts" \
   "$OUT/fixture_hls/index.m3u8"
+SEGMENT_COUNT="$(find "$OUT/fixture_hls" -maxdepth 1 -name 'seg*.ts' -type f | wc -l | tr -d '[:space:]')"
+if [ "$SEGMENT_COUNT" -ne 2 ]; then
+  echo "Expected exactly two deterministic HLS segments, found $SEGMENT_COUNT" >&2
+  exit 1
+fi
 echo "Fixtures regenerated in $OUT"

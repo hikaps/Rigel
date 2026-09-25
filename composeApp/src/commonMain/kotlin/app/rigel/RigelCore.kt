@@ -6,8 +6,8 @@ import app.rigel.output.OutputSelection
 import app.rigel.output.ReceiverCapabilityRepository
 import app.rigel.player.PlayerController
 import app.rigel.settings.SettingsStore
+import app.rigel.settings.createPlatformSettingsStore
 import app.rigel.source.jellyfin.JellyfinClient
-import com.russhwolf.settings.Settings
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.HttpTimeout
 
@@ -29,7 +29,7 @@ object RigelCore {
             socketTimeoutMillis = 10_000
         }
     }
-    val settings: SettingsStore = SettingsStore(Settings())
+    val settings: SettingsStore = createPlatformSettingsStore()
     val outputSelection: OutputSelection = OutputSelection()
     val capabilityRepository: ReceiverCapabilityRepository = ReceiverCapabilityRepository(client)
     val jellyfin: JellyfinClient = JellyfinClient(client)

@@ -705,6 +705,34 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertEqual(model.playableURL, proxy)
     }
 
+    func testNativeBufferingReplacementClearsPreviousGeneration() {
+        var state = NativeBufferingState()
+        let oldGeneration = UUID()
+        let newGeneration = UUID()
+
+        state.begin(generation: oldGeneration)
+        state.apply(.changed(generation: oldGeneration, buffering: true))
+        XCTAssertTrue(state.isBuffering)
+
+        state.begin(generation: newGeneration)
+        XCTAssertFalse(state.isBuffering)
+    }
+
+    func testStaleNativeBufferingEventCannotClearReplacement() {
+        var state = NativeBufferingState()
+        let oldGeneration = UUID()
+        let newGeneration = UUID()
+
+        state.begin(generation: oldGeneration)
+        state.apply(.changed(generation: oldGeneration, buffering: true))
+        state.begin(generation: newGeneration)
+        state.apply(.changed(generation: newGeneration, buffering: true))
+
+        state.apply(.changed(generation: oldGeneration, buffering: false))
+
+        XCTAssertTrue(state.isBuffering)
+    }
+
     @MainActor
     func testNativeControllerTracksInstalledItemURL() {
         let events = PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})

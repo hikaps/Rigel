@@ -1587,7 +1587,12 @@ final class RigelPlayerViewController: UIViewController {
         guard seconds.isFinite, seconds >= 0 else { return nil }
         return Int64((seconds * 1000).rounded(.down))
     }
+
     private func tearDownPlayer() {
+        // A replacement or dismantle ends the old item's buffering state. The
+        // host tags this callback with the active replacement generation, so a
+        // late teardown from an old controller cannot clear a new item.
+        reportNativeBuffering(false)
         externalPlaybackObservation?.invalidate()
         externalPlaybackObservation = nil
         subtitleCustomizationHost?.dismiss(animated: false)

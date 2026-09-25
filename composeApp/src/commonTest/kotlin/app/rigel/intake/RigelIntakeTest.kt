@@ -1,6 +1,8 @@
 package app.rigel.intake
 
+import app.rigel.bridge.Bridges
 import app.rigel.bridge.ProbeBridge
+import app.rigel.bridge.ProbeOperation
 import app.rigel.bridge.ProbeResult
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.player.PlayerController
@@ -8,8 +10,14 @@ import app.rigel.player.PlayerPhase
 import app.rigel.settings.LinkHistoryEntry
 import app.rigel.settings.SettingsStore
 import com.russhwolf.settings.MapSettings
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -29,14 +37,24 @@ class RigelIntakeTest {
 
     private fun controller() = PlayerController(SettingsStore(MapSettings(mutableMapOf())))
 
+    private class RecordingProbeOperation : ProbeOperation {
+        var cancelCount = 0
+        override fun cancel() {
+            cancelCount += 1
+        }
+    }
+
     @BeforeTest
     fun setUp() {
         Dispatchers.setMain(dispatcher)
         RigelIntake.resetForTest()
+        RigelBridgeFactory.register(null, null, null, null)
     }
 
     @AfterTest
     fun tearDown() {
+        RigelIntake.resetForTest()
+        RigelBridgeFactory.register(null, null, null, null)
         Dispatchers.resetMain()
     }
 
@@ -79,8 +97,11 @@ class RigelIntakeTest {
         RigelBridgeFactory.register(
             discovery = null,
             probe = object : ProbeBridge {
-                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit) {
+                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
                     onResult(null, "probe unavailable in intake test")
+                    return object : ProbeOperation {
+                        override fun cancel() = Unit
+                    }
                 }
             },
             transcode = null,
@@ -96,5 +117,68 @@ class RigelIntakeTest {
             listOf(LinkHistoryEntry("http://h/v.mp4", "My Movie")),
             settings.linkHistory(),
         )
+    }
+    @Test
+    fun probeBridgeHandlesSynchronousCallbackWithoutCancellingCompletedOperation() = runTest {
+        val operation = RecordingProbeOperation()
+        RigelBridgeFactory.register(
+            discovery = null,
+            probe = object : ProbeBridge {
+                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
+                    onResult(null, "synchronous result")
+                    return operation
+                }
+            },
+            transcode = null,
+            httpServer = null,
+        )
+
+        assertEquals(null to "synchronous result", Bridges.probe("http://h/v.mp4", emptyMap()))
+        assertEquals(0, operation.cancelCount)
+    }
+
+    @Test
+    fun canceledProbeCancelsNativeOperation() = runTest {
+        val operation = RecordingProbeOperation()
+        val started = CompletableDeferred<Unit>()
+        RigelBridgeFactory.register(
+            discovery = null,
+            probe = object : ProbeBridge {
+                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
+                    started.complete(Unit)
+                    return operation
+                }
+            },
+            transcode = null,
+            httpServer = null,
+        )
+
+        val probe = launch { Bridges.probe("http://h/v.mp4", emptyMap()) }
+        started.await()
+        probe.cancelAndJoin()
+        assertEquals(1, operation.cancelCount)
+    }
+
+    @Test
+    fun cancellationBeforeOperationHandleRegistrationStillCancelsOperation() = runTest {
+        val parent = Job()
+        val operation = RecordingProbeOperation()
+        RigelBridgeFactory.register(
+            discovery = null,
+            probe = object : ProbeBridge {
+                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
+                    parent.cancel()
+                    return operation
+                }
+            },
+            transcode = null,
+            httpServer = null,
+        )
+
+        val probe = launch(parent, start = CoroutineStart.UNDISPATCHED) {
+            Bridges.probe("http://h/v.mp4", emptyMap())
+        }
+        probe.join()
+        assertEquals(1, operation.cancelCount)
     }
 }

@@ -114,6 +114,10 @@ object DlnaAdapter : ReceiverAdapter {
         DlnaRenderer(client).seek((target as CastTarget.Dlna).device, positionMs)
     }.getOrDefault(false)
 
+    override suspend fun position(target: CastTarget, client: HttpClient): Long? = runCatching {
+        DlnaRenderer(client).position((target as CastTarget.Dlna).device)?.first
+    }.getOrNull()
+
     override suspend fun pause(target: CastTarget, client: HttpClient): Boolean = runCatching {
         DlnaRenderer(client).pause((target as CastTarget.Dlna).device)
     }.getOrDefault(false)

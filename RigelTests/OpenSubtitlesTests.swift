@@ -28,7 +28,7 @@ final class OpenSubtitlesTests: XCTestCase {
             case "/api/v1/download":
                 return Self.response(
                     request: request,
-                    body: "{\"link\":\"https://downloads.example/subtitle.srt\"}"
+                    body: "{\"link\":\"https://dl.opensubtitles.com/subtitle.srt\"}"
                 )
             case "/subtitle.srt":
                 return Self.response(
@@ -104,6 +104,7 @@ final class OpenSubtitlesTests: XCTestCase {
 
         let downloadRequest = try XCTUnwrap(capturedRequests[2])
         XCTAssertEqual(downloadRequest.httpMethod, "POST")
+        XCTAssertEqual(downloadRequest.value(forHTTPHeaderField: "Api-Key"), "app-key")
         XCTAssertEqual(
             downloadRequest.value(forHTTPHeaderField: "Authorization"),
             "Bearer token-123"
@@ -116,14 +117,14 @@ final class OpenSubtitlesTests: XCTestCase {
         XCTAssertEqual(downloadJSON["sub_format"] as? String, "srt")
 
         let fileRequest = try XCTUnwrap(capturedRequests[3])
-        XCTAssertEqual(fileRequest.url?.absoluteString, "https://downloads.example/subtitle.srt")
+        XCTAssertEqual(fileRequest.url?.absoluteString, "https://dl.opensubtitles.com/subtitle.srt")
         XCTAssertEqual(fileRequest.value(forHTTPHeaderField: "Api-Key"), "app-key")
         XCTAssertNotNil(fileRequest.value(forHTTPHeaderField: "User-Agent"))
     }
 
     func testDownloadRejectsArchivePayloads() async throws {
         serve([
-            "/api/v1/download": (200, Self.data("{\"link\":\"https://downloads.example/batch.zip\"}")),
+            "/api/v1/download": (200, Self.data("{\"link\":\"https://dl.opensubtitles.com/batch.zip\"}")),
             "/batch.zip": (200, Data("PK\u{03}\u{04}not-a-plain-subtitle".utf8)),
         ])
         defer { OpenSubtitlesURLProtocol.handler = nil }
@@ -138,7 +139,7 @@ final class OpenSubtitlesTests: XCTestCase {
 
     func testDownloadSurfacesHTTPFailures() async throws {
         serve([
-            "/api/v1/download": (200, Self.data("{\"link\":\"https://downloads.example/gone.srt\"}")),
+            "/api/v1/download": (200, Self.data("{\"link\":\"https://dl.opensubtitles.com/gone.srt\"}")),
             "/gone.srt": (403, Self.data("forbidden")),
         ])
         defer { OpenSubtitlesURLProtocol.handler = nil }
@@ -159,7 +160,7 @@ final class OpenSubtitlesTests: XCTestCase {
         var utf16 = Data([0xFF, 0xFE])
         utf16.append(contentsOf: text.data(using: .utf16LittleEndian) ?? Data())
         serve([
-            "/api/v1/download": (200, Self.data("{\"link\":\"https://downloads.example/utf16.srt\"}")),
+            "/api/v1/download": (200, Self.data("{\"link\":\"https://dl.opensubtitles.com/utf16.srt\"}")),
             "/utf16.srt": (200, utf16),
         ])
         defer { OpenSubtitlesURLProtocol.handler = nil }
@@ -191,16 +192,189 @@ final class OpenSubtitlesTests: XCTestCase {
         )
     }
 
+    func testLoginRejectsUntrustedBaseURL() async throws {
+        serve([
+            "/api/v1/login": (200, Self.data("{\"token\":\"token-123\",\"base_url\":\"api.opensubtitles.com.attacker.example\"}")),
+        ])
+        defer {
+            OpenSubtitlesURLProtocol.handler = nil
+        }
+
+        do {
+            _ = try await makeAuthorizedClient().login(apiKey: "app-key", username: "user", password: "password")
+            XCTFail("login must reject an untrusted base_url")
+        } catch let error as OpenSubtitlesError {
+            XCTAssertEqual(error.localizedDescription, OpenSubtitlesError.invalidResponse.localizedDescription)
+        }
+    }
+
+    func testDownloadRejectsInsecureLookalikeAndNonstandardPortLinks() async throws {
+        let links = [
+            "http://dl.opensubtitles.com/subtitle.srt",
+            "https://user:secret@dl.opensubtitles.com/subtitle.srt",
+            "https://dl.opensubtitles.com.attacker.example/subtitle.srt",
+            "https://dl.opensubtitles.com:8443/subtitle.srt",
+        ]
+        defer {
+            OpenSubtitlesURLProtocol.handler = nil
+        }
+
+        for link in links {
+            do {
+                _ = try await OpenSubtitlesClient.fetchSubtitleFile(
+                    from: try XCTUnwrap(URL(string: link)),
+                    for: makeResult(id: 8, title: "Rejected", fileName: "rejected.srt"),
+                    apiKey: "app-key",
+                    session: makeSession(),
+                    directory: nil
+                )
+                XCTFail("unsafe link must be rejected: \(link)")
+            } catch let error as OpenSubtitlesError {
+                XCTAssertEqual(error.localizedDescription, OpenSubtitlesError.missingDownloadLink.localizedDescription)
+            }
+        }
+    }
+
+    func testAPIRequestRedirectRejectsUntrustedAuthority() throws {
+        var request = URLRequest(
+            url: try XCTUnwrap(URL(string: "https://api.opensubtitles.com.attacker.example/api/v1/subtitles"))
+        )
+        request.setValue("stale-key", forHTTPHeaderField: "Api-Key")
+        request.setValue("Bearer stale-token", forHTTPHeaderField: "Authorization")
+
+        let redirected = OpenSubtitlesClient.redirectedRequest(
+            for: request,
+            policy: .api(apiKey: "app-key", token: "token-123")
+        )
+
+        XCTAssertNil(redirected, "API credentials must not follow an untrusted authority")
+    }
+
+    func testAPIRequestDispatchUsesTrustedAuthorityAndCredentials() async throws {
+        var requests: [URLRequest] = []
+        let lock = NSLock()
+        serve([
+            "/api/v1/subtitles": (200, Self.data("{\"data\":[]}")),
+        ])
+        OpenSubtitlesURLProtocol.observer = { request in
+            lock.lock()
+            requests.append(request)
+            lock.unlock()
+        }
+        defer {
+            OpenSubtitlesURLProtocol.handler = nil
+            OpenSubtitlesURLProtocol.observer = nil
+        }
+
+        let results = try await makeAuthorizedClient().search(query: "The Matrix")
+        XCTAssertEqual(results.count, 0)
+
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(request.url?.host, "api.opensubtitles.com")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Api-Key"), "app-key")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token-123")
+    }
+
+    func testSignedThirdPartyLinkDoesNotReceiveApplicationKey() async throws {
+        var requests: [URLRequest] = []
+        let lock = NSLock()
+        serve([
+            "/subtitle.srt": (200, Self.data("1\n00:00:00,000 --> 00:00:01,000\nSigned\n")),
+        ])
+        OpenSubtitlesURLProtocol.observer = { request in
+            lock.lock()
+            requests.append(request)
+            lock.unlock()
+        }
+        defer {
+            OpenSubtitlesURLProtocol.handler = nil
+            OpenSubtitlesURLProtocol.observer = nil
+        }
+
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensubtitles-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        _ = try await OpenSubtitlesClient.fetchSubtitleFile(
+            from: try XCTUnwrap(URL(string: "https://signed.example/subtitle.srt")),
+            for: makeResult(id: 9, title: "Signed", fileName: "signed.srt"),
+            apiKey: "app-key",
+            session: makeSession(),
+            directory: destination
+        )
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertNil(request.value(forHTTPHeaderField: "Api-Key"))
+    }
+
+    func testTrustedCDNRedirectStripsApiKeyForSignedDestination() throws {
+        var request = URLRequest(
+            url: try XCTUnwrap(URL(string: "https://signed.example/subtitle.srt"))
+        )
+        request.setValue("app-key", forHTTPHeaderField: "Api-Key")
+        request.setValue("Bearer token-123", forHTTPHeaderField: "Authorization")
+
+        let redirected = try XCTUnwrap(
+            OpenSubtitlesClient.redirectedRequest(
+                for: request,
+                policy: .download(apiKey: "app-key")
+            )
+        )
+
+        XCTAssertNil(redirected.value(forHTTPHeaderField: "Api-Key"))
+        XCTAssertNil(redirected.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testTrustedCDNRedirectRejectsHTTPDowngrade() throws {
+        var request = URLRequest(
+            url: try XCTUnwrap(URL(string: "http://signed.example/subtitle.srt"))
+        )
+        request.setValue("app-key", forHTTPHeaderField: "Api-Key")
+
+        XCTAssertNil(
+            OpenSubtitlesClient.redirectedRequest(
+                for: request,
+                policy: .download(apiKey: "app-key")
+            )
+        )
+    }
+
+    func testSubtitleTransportStopsAtMaximumSize() async throws {
+        serve([
+            "/too-large.srt": (200, Data(repeating: 0x61, count: OpenSubtitlesClient.maximumSubtitleBytes + 1)),
+        ])
+        defer {
+            OpenSubtitlesURLProtocol.handler = nil
+        }
+
+        do {
+            _ = try await OpenSubtitlesClient.fetchSubtitleFile(
+                from: try XCTUnwrap(URL(string: "https://signed.example/too-large.srt")),
+                for: makeResult(id: 12, title: "Large", fileName: "large.srt"),
+                apiKey: "app-key",
+                session: makeSession(),
+                directory: nil
+            )
+            XCTFail("oversize subtitle must be rejected while streaming")
+        } catch let error as OpenSubtitlesError {
+            XCTAssertEqual(error.localizedDescription, OpenSubtitlesError.fileTooLarge.localizedDescription)
+        }
+    }
+
+
+
     // MARK: - Helpers
+    private func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenSubtitlesURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
 
     private func makeAuthorizedClient() -> OpenSubtitlesClient {
         let store = TestCredentialStore()
         store.apiKey = "app-key"
         store.token = "token-123"
         store.baseURL = "api.opensubtitles.com"
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [OpenSubtitlesURLProtocol.self]
-        return OpenSubtitlesClient(store: store, session: URLSession(configuration: configuration))
+        return OpenSubtitlesClient(store: store, session: makeSession())
     }
 
     private func makeResult(id: Int, title: String, fileName: String?) -> OpenSubtitlesSearchResult {
@@ -294,12 +468,14 @@ private final class TestCredentialStore: OpenSubtitlesCredentialStore {
 
 private final class OpenSubtitlesURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    static var observer: ((URLRequest) -> Void)?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.observer?(request)
         guard let handler = Self.handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
             return

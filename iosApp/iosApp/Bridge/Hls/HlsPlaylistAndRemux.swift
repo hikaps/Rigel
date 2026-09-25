@@ -234,9 +234,193 @@ extension RigelHlsExporter {
         }
     }
 
-    /// Supplies timestamps for remux packets whose source has no usable PTS/DTS.
-    /// MPEG-TS/HLS cannot segment such packets reliably; keep the repair in the
-    /// source stream time base before writeRemuxPacket rescales it.
+    /// Packet timing retained while libavformat supplies a later decode-time
+    /// anchor. Missing DTS is an ordering problem, not permission to copy PTS:
+    /// PTS is presentation order and may move backwards for B frames.
+    struct RemuxTimestamp {
+        var pts: Int64
+        var dts: Int64
+        let duration: Int64
+    }
+
+    /// Reconstructs only missing decode timestamps, in demux/decode order.
+    /// A later valid DTS anchors the bounded queue, so initial missing values
+    /// are filled backwards from that anchor. Valid source PTS/DTS and epochs
+    /// are otherwise left untouched. The muxer's missing-DTS fallback copies
+    /// PTS, which is incorrect for B-frame presentation order; streams with no
+    /// usable anchor fail rather than being silently converted to that timeline.
+    struct RemuxTimestampState {
+        let frameDuration: Int64
+        let maximumPendingPackets: Int
+        private(set) var pending: [RemuxTimestamp] = []
+        private(set) var lastDTS: Int64?
+        private(set) var error: String?
+
+        init(frameDuration: Int64, maximumPendingPackets: Int) {
+            self.frameDuration = max(frameDuration, 1)
+            self.maximumPendingPackets = max(maximumPendingPackets, 1)
+        }
+
+        private func step(for timestamp: RemuxTimestamp) -> Int64 {
+            max(timestamp.duration, frameDuration)
+        }
+
+        mutating func append(
+            pts: Int64,
+            dts: Int64,
+            duration: Int64
+        ) -> [RemuxTimestamp] {
+            guard error == nil else { return [] }
+            let timestamp = RemuxTimestamp(pts: pts, dts: dts, duration: duration)
+            guard dts == Int64.min else {
+                var ready = inferPending(before: dts)
+                ready.append(timestamp)
+                lastDTS = dts
+                return ready
+            }
+
+            pending.append(timestamp)
+            guard pending.count > maximumPendingPackets else { return [] }
+
+            // Keep the queue bounded even when a source never emits a decode
+            // timestamp. Releasing an unresolved packet is not success: the
+            // terminal state below makes the exporter fail at the boundary.
+            if let lastDTS {
+                var unresolved = pending.removeFirst()
+                unresolved.dts = lastDTS + step(for: unresolved)
+                self.lastDTS = unresolved.dts
+                return [unresolved]
+            }
+            error = "video stream has no usable DTS anchor"
+            pending.removeFirst()
+            return []
+        }
+
+        mutating func finish() -> [RemuxTimestamp] {
+            guard error == nil else { return [] }
+            guard !pending.isEmpty else { return [] }
+            guard var anchor = lastDTS else {
+                error = "video stream has no usable DTS anchor"
+                return []
+            }
+            var ready: [RemuxTimestamp] = []
+            ready.reserveCapacity(pending.count)
+            for var timestamp in pending {
+                anchor += step(for: timestamp)
+                timestamp.dts = anchor
+                ready.append(timestamp)
+            }
+            pending.removeAll(keepingCapacity: false)
+            lastDTS = anchor
+            return ready
+        }
+
+        private mutating func inferPending(before nextDTS: Int64) -> [RemuxTimestamp] {
+            guard !pending.isEmpty else { return [] }
+            var anchor = nextDTS
+            var inferred = pending
+            for index in pending.indices.reversed() {
+                let timestamp = pending[index]
+                anchor -= step(for: timestamp)
+                if let lastDTS, anchor <= lastDTS {
+                    // The valid timestamps leave no representable decode-time
+                    // slot. Preserve the missing value and let the mux result
+                    // report malformed timing instead of changing valid input.
+                    inferred[index] = timestamp
+                } else {
+                    var repaired = timestamp
+                    repaired.dts = anchor
+                    inferred[index] = repaired
+                }
+            }
+            pending.removeAll(keepingCapacity: false)
+            return inferred
+        }
+    }
+
+    struct RemuxReadyPacket {
+        let packet: UnsafeMutablePointer<AVPacket>
+        let timestamps: RemuxTimestamp
+    }
+
+    enum RemuxPacketBufferResult {
+        case ready([RemuxReadyPacket])
+        case failure(String)
+    }
+
+    /// Owns packet references until their decode-time order can be established.
+    /// The queue is deliberately bounded by the selected stream's codec delay.
+    struct RemuxVideoPacketBuffer {
+        private var timestamps: RemuxTimestampState
+        private var packets: [UnsafeMutablePointer<AVPacket>] = []
+
+        var hasDTSAnchor: Bool { timestamps.lastDTS != nil }
+        init(frameDuration: Int64, maximumPendingPackets: Int) {
+            timestamps = RemuxTimestampState(
+                frameDuration: frameDuration,
+                maximumPendingPackets: maximumPendingPackets
+            )
+        }
+
+        mutating func append(_ source: UnsafeMutablePointer<AVPacket>) -> RemuxPacketBufferResult {
+            guard let copy = av_packet_alloc() else {
+                return .failure("could not retain video packet for DTS inference")
+            }
+            guard av_packet_ref(copy, source) >= 0 else {
+                var pointer: UnsafeMutablePointer<AVPacket>? = copy
+                av_packet_free(&pointer)
+                return .failure("could not retain video packet for DTS inference")
+            }
+            packets.append(copy)
+            let readyTimestamps = timestamps.append(
+                pts: source.pointee.pts,
+                dts: source.pointee.dts,
+                duration: source.pointee.duration
+            )
+            if let error = timestamps.error {
+                return .failure(error)
+            }
+            return .ready(takeReady(readyTimestamps))
+        }
+
+        mutating func finish() -> RemuxPacketBufferResult {
+            let readyTimestamps = timestamps.finish()
+            if let error = timestamps.error {
+                return .failure(error)
+            }
+            return .ready(takeReady(readyTimestamps))
+        }
+
+        mutating func release() {
+            for packet in packets {
+                var pointer: UnsafeMutablePointer<AVPacket>? = packet
+                av_packet_free(&pointer)
+            }
+            packets.removeAll(keepingCapacity: false)
+        }
+
+        private mutating func takeReady(_ readyTimestamps: [RemuxTimestamp]) -> [RemuxReadyPacket] {
+            var ready: [RemuxReadyPacket] = []
+            ready.reserveCapacity(readyTimestamps.count)
+            for timestamp in readyTimestamps {
+                guard !packets.isEmpty else { break }
+                ready.append(RemuxReadyPacket(packet: packets.removeFirst(), timestamps: timestamp))
+            }
+            return ready
+        }
+    }
+    static func remuxTimestampBufferLimit(inputStream: UnsafeMutablePointer<AVStream>) -> Int {
+        let codecDelay: Int
+        if let codecpar = inputStream.pointee.codecpar {
+            codecDelay = Int(codecpar.pointee.video_delay)
+        } else {
+            codecDelay = 0
+        }
+        // Keep enough room for codec reordering plus a small demuxer lead,
+        // while retaining a hard bound for broken/intermittent timestamps.
+        return min(max(codecDelay + 4, 4), 64)
+    }
+
     static func remuxFrameDuration(inputStream: UnsafeMutablePointer<AVStream>) -> Int64 {
         for rate in [inputStream.pointee.avg_frame_rate, inputStream.pointee.r_frame_rate]
             where rate.num > 0 && rate.den > 0 {
@@ -250,34 +434,16 @@ extension RigelHlsExporter {
         return 1
     }
 
-    static func repairedRemuxTimestamps(
-        pts: Int64,
-        dts: Int64,
-        duration: Int64,
-        nextTimestamp: Int64?,
-        frameDuration: Int64
-    ) -> (pts: Int64, dts: Int64, nextTimestamp: Int64) {
-        let step = max(duration, max(frameDuration, 1))
-        let normalizedPTS = pts != Int64.min
-            ? pts
-            : (dts != Int64.min ? dts : (nextTimestamp ?? 0))
-        let normalizedDTS = dts != Int64.min ? dts : normalizedPTS
-        return (
-            pts: normalizedPTS,
-            dts: normalizedDTS,
-            nextTimestamp: max(normalizedPTS, normalizedDTS) + step
-        )
-    }
-
+    @discardableResult
     static func writeRemuxPacket(
         _ pkt: UnsafeMutablePointer<AVPacket>,
         inStream: UnsafeMutablePointer<AVStream>,
         outStream: UnsafeMutablePointer<AVStream>,
         out: UnsafeMutablePointer<AVFormatContext>
-    ) {
+    ) -> Int32 {
         pkt.pointee.stream_index = outStream.pointee.index
         av_packet_rescale_ts(pkt, inStream.pointee.time_base, outStream.pointee.time_base)
         pkt.pointee.pos = -1
-        av_interleaved_write_frame(out, pkt)
+        return av_interleaved_write_frame(out, pkt)
     }
 }

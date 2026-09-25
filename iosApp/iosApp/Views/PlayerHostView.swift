@@ -2,6 +2,31 @@ import SwiftUI
 import UIKit
 import ComposeApp
 
+enum NativeBufferingEvent: Equatable {
+    case generationStarted(UUID)
+    case changed(generation: UUID, buffering: Bool)
+}
+
+struct NativeBufferingState: Equatable {
+    private(set) var generation: UUID? = nil
+    private(set) var isBuffering = false
+
+    mutating func begin(generation: UUID) {
+        self.generation = generation
+        isBuffering = false
+    }
+
+    mutating func apply(_ event: NativeBufferingEvent) {
+        switch event {
+        case .generationStarted(let generation):
+            begin(generation: generation)
+        case .changed(let generation, let buffering):
+            guard self.generation == generation else { return }
+            isBuffering = buffering
+        }
+    }
+}
+
 /// Rotates the app while the player cover is up. The window-scene geometry
 
 /// Full-screen player host. Renders the native AVPlayerViewController when
@@ -9,7 +34,7 @@ import ComposeApp
 struct PlayerHostView: View {
     @EnvironmentObject private var player: PlayerModel
     @State private var showDevicesPicker = false
-    @State private var nativeBuffering = false
+    @State private var nativeBufferingState = NativeBufferingState()
 
     private struct LoadSignature: Equatable {
         let url: String
@@ -30,10 +55,16 @@ struct PlayerHostView: View {
         }
         .onDisappear {
             PlayerOrientation.restore()
+            nativeBufferingState = NativeBufferingState()
             // Belt-and-braces: if the cover is dismissed by any path other than
             // the back/close buttons, make sure the native player stops.
             if player.phase != .idle {
                 player.stop()
+            }
+        }
+        .onChange(of: player.phase) { phase in
+            if phase != .playing && phase != .buffering {
+                nativeBufferingState = NativeBufferingState()
             }
         }
         .sheet(isPresented: $showDevicesPicker) {
@@ -145,7 +176,7 @@ struct PlayerHostView: View {
                     .contentShape(Rectangle())
             }
         } else if phase == .playing || phase == .buffering {
-            let buffering = phase == .buffering || nativeBuffering
+            let buffering = phase == .buffering || nativeBufferingState.isBuffering
             ZStack {
                 if player.remotePlayback {
                     stateContent {
@@ -191,7 +222,7 @@ struct PlayerHostView: View {
                         startPositionMs: player.startPositionMs,
                         isPhaseBuffering: player.phase == .buffering,
                         isCastActive: player.castActive,
-                        onNativeBufferingChange: { nativeBuffering = $0 },
+                        onNativeBufferingChange: { nativeBufferingState.apply($0) },
                         onReady: {},
                         onError: { player.reportError($0) },
                         onBack: { player.stop() },
@@ -303,7 +334,7 @@ struct PlayerView: UIViewControllerRepresentable {
     let isPhaseBuffering: Bool
     /// True while a cast session owns playback; proxy seeks then rebuild.
     let isCastActive: Bool
-    let onNativeBufferingChange: (Bool) -> Void
+    let onNativeBufferingChange: (NativeBufferingEvent) -> Void
     let onReady: () -> Void
     let onError: (String) -> Void
     let onBack: () -> Void
@@ -325,10 +356,23 @@ struct PlayerView: UIViewControllerRepresentable {
         /// outlives makeUIViewController; otherwise the box deallocates and
         /// every error forwards unconditionally.
         var errorOrigin: PlayerErrorOrigin?
+        private(set) var nativeBufferingGeneration: UUID?
+
+        func beginNativeBufferingGeneration() -> UUID {
+            let generation = UUID()
+            nativeBufferingGeneration = generation
+            return generation
+        }
+
+        func invalidateNativeBufferingGeneration() {
+            nativeBufferingGeneration = nil
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
+
     static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: Coordinator) {
+        coordinator.invalidateNativeBufferingGeneration()
         // SwiftUI removes this representable for initial proxy preparation or
         // error. Dispose only this concrete controller;
         // the bridge may already retain a newer replacement.
@@ -339,6 +383,7 @@ struct PlayerView: UIViewControllerRepresentable {
             (uiViewController as? RigelPlayerViewController)?.stopPlayback()
         }
     }
+
     func makeUIViewController(context: Context) -> UIViewController {
         guard let bridge = PlayerBridgeFactory.shared.create() else {
             let vc = UIViewController()
@@ -390,10 +435,16 @@ struct PlayerView: UIViewControllerRepresentable {
         )
         let created = bridge.createPlayerViewController(events: events)
         if let player = created as? RigelPlayerViewController {
+            let generation = context.coordinator.beginNativeBufferingGeneration()
+            onNativeBufferingChange(.generationStarted(generation))
             player.onExternalSubtitleSelected = onExternalSubtitleSelected
             player.onDevicesRequested = onDevices
             player.onSeekRequested = onSeek
-            player.onNativeBufferingChange = onNativeBufferingChange
+            player.onNativeBufferingChange = { [weak coordinator = context.coordinator] buffering in
+                guard let coordinator,
+                      coordinator.nativeBufferingGeneration == generation else { return }
+                onNativeBufferingChange(.changed(generation: generation, buffering: buffering))
+            }
             player.isCastPlayback = isCastActive
             player.setPhaseBuffering(isPhaseBuffering)
         }
@@ -407,42 +458,60 @@ struct PlayerView: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
-        if let player = uiViewController as? RigelPlayerViewController {
-            player.onExternalSubtitleSelected = onExternalSubtitleSelected
-            player.onNativeBufferingChange = onNativeBufferingChange
-            player.isCastPlayback = isCastActive
-            // Clear the freeze before a changed URL reloads and plays.
-            player.setPhaseBuffering(isPhaseBuffering)
-        }
-        guard let bridge = PlayerBridgeFactory.shared.create() else { return }
+        let bridge = PlayerBridgeFactory.shared.create()
         let loaded = context.coordinator.loaded
-        if loaded?.url != url ||
+        let needsLoad = loaded?.url != url ||
             loaded?.title != title ||
             loaded?.sender != sender ||
             loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible ||
             loaded?.isProxy != isProxy ||
-            loaded?.probeDurationMs != probeDurationMs {
-            bridge.load(
-                url: url,
-                title: title,
-                sender: sender,
-                longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
-                subtitleTracks: subtitleTracks,
-                selectedExternalSubtitleUrl: selectedExternalSubtitleUrl,
-                durationMs: probeDurationMs.map { KotlinLong(longLong: Int64($0)) },
-                isProxy: isProxy,
-                startOffsetMs: startPositionMs
-            )
-            context.coordinator.loaded = (
-                url,
-                title,
-                sender,
-                subtitleTracks,
-                selectedExternalSubtitleUrl,
-                longFormVideoAirPlayEligible,
-                isProxy,
-                probeDurationMs
-            )
+            loaded?.probeDurationMs != probeDurationMs
+
+        if let player = uiViewController as? RigelPlayerViewController {
+            player.onExternalSubtitleSelected = onExternalSubtitleSelected
+            player.isCastPlayback = isCastActive
+            // Clear the freeze before a changed URL reloads and plays.
+            player.setPhaseBuffering(isPhaseBuffering)
+
+            let generation: UUID
+            if needsLoad {
+                generation = context.coordinator.beginNativeBufferingGeneration()
+                onNativeBufferingChange(.generationStarted(generation))
+            } else if let current = context.coordinator.nativeBufferingGeneration {
+                generation = current
+            } else {
+                generation = context.coordinator.beginNativeBufferingGeneration()
+                onNativeBufferingChange(.generationStarted(generation))
+            }
+            player.onNativeBufferingChange = { [weak coordinator = context.coordinator] buffering in
+                guard let coordinator,
+                      coordinator.nativeBufferingGeneration == generation else { return }
+                onNativeBufferingChange(.changed(generation: generation, buffering: buffering))
+            }
         }
+
+        guard needsLoad else { return }
+        guard let bridge = bridge else { return }
+        bridge.load(
+            url: url,
+            title: title,
+            sender: sender,
+            longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
+            subtitleTracks: subtitleTracks,
+            selectedExternalSubtitleUrl: selectedExternalSubtitleUrl,
+            durationMs: probeDurationMs.map { KotlinLong(longLong: Int64($0)) },
+            isProxy: isProxy,
+            startOffsetMs: startPositionMs
+        )
+        context.coordinator.loaded = (
+            url,
+            title,
+            sender,
+            subtitleTracks,
+            selectedExternalSubtitleUrl,
+            longFormVideoAirPlayEligible,
+            isProxy,
+            probeDurationMs
+        )
     }
 }

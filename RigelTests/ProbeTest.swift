@@ -67,81 +67,42 @@ final class ProbeTest: XCTestCase {
         )
     }
 
-    func testRemuxTimestampsRepairMissingSourceTimes() {
-        let first = RigelHlsExporter.repairedRemuxTimestamps(
-            pts: Int64.min,
-            dts: Int64.min,
-            duration: 0,
-            nextTimestamp: nil,
-            frameDuration: 40
-        )
-        XCTAssertEqual(first.pts, 0)
-        XCTAssertEqual(first.dts, 0)
-        XCTAssertEqual(first.nextTimestamp, 40)
+    func testRemuxTimestampsInferInitialMissingDTSFromLaterDecodeAnchor() {
+        var state = RigelHlsExporter.RemuxTimestampState(frameDuration: 100, maximumPendingPackets: 8)
+        XCTAssertTrue(state.append(pts: 0, dts: Int64.min, duration: 100).isEmpty)
+        XCTAssertTrue(state.append(pts: 400, dts: Int64.min, duration: 100).isEmpty)
 
-        let second = RigelHlsExporter.repairedRemuxTimestamps(
-            pts: Int64.min,
-            dts: Int64.min,
-            duration: 0,
-            nextTimestamp: first.nextTimestamp,
-            frameDuration: 40
-        )
-        XCTAssertEqual(second.pts, 40)
-        XCTAssertEqual(second.dts, 40)
-        XCTAssertEqual(second.nextTimestamp, 80)
+        let ready = state.append(pts: 200, dts: 0, duration: 100)
+        XCTAssertEqual(ready.map(\.pts), [0, 400, 200])
+        XCTAssertEqual(ready.map(\.dts), [-200, -100, 0])
+
+        XCTAssertEqual(state.append(pts: 100, dts: 100, duration: 100).map(\.dts), [100])
+        XCTAssertEqual(state.append(pts: 300, dts: 200, duration: 100).map(\.dts), [200])
     }
 
-    func testRemuxTimestampsPassthroughUntouched() {
-        // Well-timestamped sources must pass through byte-identical;
-        // only the synthesized next marker advances from the valid tail.
-        let passthrough = RigelHlsExporter.repairedRemuxTimestamps(
-            pts: 1_000,
-            dts: 960,
-            duration: 40,
-            nextTimestamp: nil,
-            frameDuration: 40
-        )
-        XCTAssertEqual(passthrough.pts, 1_000)
-        XCTAssertEqual(passthrough.dts, 960)
-        XCTAssertEqual(passthrough.nextTimestamp, 1_040)
+    func testRemuxTimestampsInferIntermittentMissingDTSWithoutChangingPTS() {
+        var state = RigelHlsExporter.RemuxTimestampState(frameDuration: 100, maximumPendingPackets: 8)
+        XCTAssertEqual(state.append(pts: 0, dts: 0, duration: 100).map(\.dts), [0])
+        XCTAssertTrue(state.append(pts: 300, dts: Int64.min, duration: 100).isEmpty)
+
+        let ready = state.append(pts: 200, dts: 200, duration: 100)
+        XCTAssertEqual(ready.map(\.pts), [300, 200])
+        XCTAssertEqual(ready.map(\.dts), [100, 200])
     }
 
-    func testRemuxTimestampsSingleSideFallbacks() {
-        // Missing PTS falls back to DTS (pts=dts), matching libavformat.
-        let ptsMissing = RigelHlsExporter.repairedRemuxTimestamps(
-            pts: Int64.min,
-            dts: 960,
-            duration: 40,
-            nextTimestamp: nil,
-            frameDuration: 40
-        )
-        XCTAssertEqual(ptsMissing.pts, 960)
-        XCTAssertEqual(ptsMissing.dts, 960)
-        XCTAssertEqual(ptsMissing.nextTimestamp, 1_000)
+    func testRemuxTimestampsPreserveValidEpochAndDoNotSynthesizeUnanchoredDTS() {
+        var state = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 8)
+        XCTAssertEqual(state.append(pts: 1_000, dts: 960, duration: 40).map(\.dts), [960])
+        XCTAssertTrue(state.append(pts: 1_200, dts: Int64.min, duration: 40).isEmpty)
+        let trailing = state.finish()
+        XCTAssertEqual(trailing.map(\.pts), [1_200])
+        XCTAssertEqual(trailing.map(\.dts), [1_000])
 
-        // Missing DTS mirrors PTS.
-        let dtsMissing = RigelHlsExporter.repairedRemuxTimestamps(
-            pts: 1_000,
-            dts: Int64.min,
-            duration: 40,
-            nextTimestamp: nil,
-            frameDuration: 40
-        )
-        XCTAssertEqual(dtsMissing.pts, 1_000)
-        XCTAssertEqual(dtsMissing.dts, 1_000)
-        XCTAssertEqual(dtsMissing.nextTimestamp, 1_040)
-
-        // A real packet duration prefers itself over the frame-rate step.
-        let longDuration = RigelHlsExporter.repairedRemuxTimestamps(
-            pts: Int64.min,
-            dts: Int64.min,
-            duration: 80,
-            nextTimestamp: nil,
-            frameDuration: 40
-        )
-        XCTAssertEqual(longDuration.pts, 0)
-        XCTAssertEqual(longDuration.dts, 0)
-        XCTAssertEqual(longDuration.nextTimestamp, 80)
+        var unanchored = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 8)
+        XCTAssertTrue(unanchored.append(pts: 1_000, dts: Int64.min, duration: 40).isEmpty)
+        let unresolved = unanchored.finish()
+        XCTAssertTrue(unresolved.isEmpty)
+        XCTAssertEqual(unanchored.error, "video stream has no usable DTS anchor")
     }
 
     func testHardwareFramesContextUsesBufferData() {
@@ -390,6 +351,7 @@ final class ProbeTest: XCTestCase {
 
         var videoCodec: String?
         var audioCodecs: [String] = []
+        var videoPackets: [(pts: Int64, dts: Int64, size: Int32)] = []
         for variantName in variantNames {
             let variantURL = outputDir.appendingPathComponent(variantName)
             let variant = try String(contentsOf: variantURL, encoding: .utf8)
@@ -409,11 +371,23 @@ final class ProbeTest: XCTestCase {
             guard let probe else { continue }
             if probe.videoCodec != nil {
                 videoCodec = probe.videoCodec
+                videoPackets = try readVideoPackets(from: mediaURL)
             }
             audioCodecs.append(contentsOf: probe.audioCodecs)
         }
         XCTAssertEqual(videoCodec, "h264")
         XCTAssertTrue(audioCodecs.contains("aac"), "audio codecs: \(audioCodecs)")
+        XCTAssertGreaterThan(videoPackets.count, 0, "the muxed VOD retained video packets")
+        XCTAssertTrue(videoPackets.allSatisfy { $0.size > 0 }, "video packets retained encoded data")
+        XCTAssertTrue(videoPackets.allSatisfy { $0.dts != Int64.min }, "muxed video packets retained decode timestamps")
+        XCTAssertTrue(
+            zip(videoPackets, videoPackets.dropFirst()).allSatisfy { $0.0.dts <= $0.1.dts },
+            "muxed video packets must be in nondecreasing decode order"
+        )
+        XCTAssertTrue(
+            zip(videoPackets, videoPackets.dropFirst()).contains { $0.0.pts > $0.1.pts },
+            "muxed video must retain presentation reordering rather than flattening B frames"
+        )
     }
 
     func testStopSessionDeletesSessionDirectory() throws {
@@ -1110,5 +1084,37 @@ final class ProbeTest: XCTestCase {
 
         XCTAssertNil(readyPath, "a stalled sidecar must not publish a playlist")
         XCTAssertEqual(error, "Could not prepare the selected subtitle")
+    }
+    private func readVideoPackets(from url: URL) throws -> [(pts: Int64, dts: Int64, size: Int32)] {
+        var format: UnsafeMutablePointer<AVFormatContext>? = nil
+        let openRet = url.absoluteString.withCString { address in
+            avformat_open_input(&format, address, nil, nil)
+        }
+        guard openRet >= 0, let context = format else {
+            throw NSError(domain: "ProbeTest", code: Int(openRet), userInfo: nil)
+        }
+        defer { avformat_close_input(&format) }
+        guard avformat_find_stream_info(context, nil) >= 0 else {
+            throw NSError(domain: "ProbeTest", code: -1, userInfo: nil)
+        }
+        guard let videoIndex = (0..<Int(context.pointee.nb_streams)).first(where: { index in
+            context.pointee.streams[index]?.pointee.codecpar?.pointee.codec_type == AVMEDIA_TYPE_VIDEO
+        }) else {
+            throw NSError(domain: "ProbeTest", code: -2, userInfo: nil)
+        }
+
+        var packet = AVPacket()
+        av_init_packet(&packet)
+        var result: [(pts: Int64, dts: Int64, size: Int32)] = []
+        while av_read_frame(context, &packet) >= 0 {
+            if packet.stream_index == Int32(videoIndex) {
+                result.append((pts: packet.pts, dts: packet.dts, size: packet.size))
+            }
+            av_packet_unref(&packet)
+        }
+        guard !result.isEmpty else {
+            throw NSError(domain: "ProbeTest", code: -3, userInfo: nil)
+        }
+        return result
     }
 }

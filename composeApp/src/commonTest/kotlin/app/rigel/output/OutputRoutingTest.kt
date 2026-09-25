@@ -2,6 +2,7 @@ package app.rigel.output
 
 import app.rigel.bridge.ProbeResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.DlnaDevice
 import app.rigel.cast.KodiDevice
 import app.rigel.cast.RokuDevice
 import app.rigel.gateway.FormatRouter
@@ -85,25 +86,43 @@ class OutputRoutingTest {
         assertTrue(RemoteUrlPolicy.isReceiverFetchable("http://[::ffff:192.168.1.20]:8080/movie.mp4", profile))
         assertTrue(RemoteUrlPolicy.isReceiverFetchable("http://[::192.168.1.20]:8080/movie.mp4", profile))
     }
-
     @Test
-    fun capabilityRepositoryCachesByTargetFingerprint() = kotlinx.coroutines.test.runTest {
+    fun capabilityRepositoryFingerprintExpiryAndCapacityAreObservable() = kotlinx.coroutines.test.runTest {
         var now = 0L
+        val engine = MockEngine {
+            respond("<Envelope><Sink>http-get:*:video/mp4:AVC_MP4</Sink></Envelope>")
+        }
         val repository = ReceiverCapabilityRepository(
-            client = HttpClient(MockEngine { respond("") }),
+            client = HttpClient(engine),
             clockMillis = { now },
+            maxEntries = 1,
         )
-        val target = CastTarget.Roku(RokuDevice("r1", "http://192.168.1.8:8060/", "Roku"))
-        val first = repository.profileFor(target)
-        now += 599_000L
-        val second = repository.profileFor(target)
-        assertEquals(first, second)
-        now += 2_000L
-        val third = repository.profileFor(target)
-        assertEquals(first, third)
-        repository.invalidate(target)
-        assertEquals(first, repository.profileFor(target))
+        fun target(usn: String, connectionManagerUrl: String) = CastTarget.Dlna(
+            DlnaDevice(
+                usn = usn,
+                location = "http://10.0.0.8:1234/root.xml",
+                friendlyName = "Living Room",
+                controlUrl = "http://10.0.0.8:1234/control",
+                connectionManagerUrl = connectionManagerUrl,
+            ),
+        )
 
+        val first = target("d1", "http://10.0.0.8:1234/cm-a")
+        repository.profileFor(first)
+        repository.profileFor(target("d1", "http://10.0.0.8:1234/cm-b"))
+        assertEquals(2, engine.requestHistory.size)
+
+        now += 600_001L
+        val changed = target("d1", "http://10.0.0.8:1234/cm-b")
+        repository.profileFor(changed)
+        assertEquals(3, engine.requestHistory.size)
+
+        repository.profileFor(target("d2", "http://10.0.0.8:1234/cm-c"))
+        repository.profileFor(changed)
+        assertEquals(5, engine.requestHistory.size)
+        repository.invalidate(changed)
+        repository.profileFor(changed)
+        assertEquals(6, engine.requestHistory.size)
     }
     @Test
     fun airPlayTriesDirectBeforeProxyWithExternalSubtitle() {

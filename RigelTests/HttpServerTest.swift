@@ -86,4 +86,42 @@ final class HttpServerTest: XCTestCase {
         XCTAssertNil(RigelHttpServer.rangeBounds(start: 5, fileSize: 0), "empty file has no range")
         XCTAssertNil(RigelHttpServer.rangeBounds(start: -1, fileSize: 100))
     }
+
+    func testFramerHandlesFragmentationBodyAndPipelinedLeftover() {
+        var framer = RigelHTTPFramer()
+        let first = Data("GET /ctl HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello".utf8)
+        let second = Data("GET /rootDesc.xml HTTP/1.1\r\n\r\n".utf8)
+
+        guard case .needMore = framer.append(Data(first.prefix(19))) else {
+            return XCTFail("fragmented header must wait for the delimiter")
+        }
+        var remainder = Data(first.dropFirst(19))
+        remainder.append(second)
+        guard case .frame(let firstFrame) = framer.append(remainder) else {
+            return XCTFail("complete body should produce one frame")
+        }
+        XCTAssertEqual(String(data: firstFrame.body, encoding: .utf8), "hello")
+        XCTAssertEqual(RigelHttpServer.parseRequest(firstFrame.head)?.path, "/ctl")
+
+        guard case .frame(let secondFrame) = framer.next() else {
+            return XCTFail("pipelined bytes must remain buffered")
+        }
+        XCTAssertEqual(RigelHttpServer.parseRequest(secondFrame.head)?.path, "/rootDesc.xml")
+    }
+
+    func testFramerRejectsConflictingAndOversizedContentLengths() {
+        var conflicting = RigelHTTPFramer()
+        let conflict = Data("POST /ctl HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc".utf8)
+        guard case .invalid = conflicting.append(conflict) else {
+            return XCTFail("conflicting lengths must be rejected")
+        }
+
+        var oversized = RigelHTTPFramer()
+        let length = RigelHTTPFramer.maxBodyBytes + 1
+        let request = Data("POST /ctl HTTP/1.1\r\nContent-Length: \(length)\r\n\r\n".utf8)
+        guard case .invalid = oversized.append(request) else {
+            return XCTFail("oversized bodies must be rejected before buffering")
+        }
+    }
+
 }

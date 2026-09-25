@@ -490,13 +490,44 @@ extension RigelHlsExporter {
         var lastReadinessCheck = DispatchTime(uptimeNanoseconds: 0)
         var lastInputUs: Int64 = 0
         let externalSourceCount = externalSubtitleOutputs.count
-        let remuxVideoFrameDuration: Int64? = {
+        var remuxVideoBuffer: RemuxVideoPacketBuffer? = {
             guard mode == "remux", let videoIndex = selectedVideoIndex,
                   let videoStream = ctx.pointee.streams[Int(videoIndex)] else { return nil }
-            return remuxFrameDuration(inputStream: videoStream)
+            return RemuxVideoPacketBuffer(
+                frameDuration: remuxFrameDuration(inputStream: videoStream),
+                maximumPendingPackets: remuxTimestampBufferLimit(inputStream: videoStream)
+            )
         }()
-        var nextRemuxVideoTimestamp: Int64?
-        while true {
+        defer {
+            remuxVideoBuffer?.release()
+        }
+        func writeBufferedRemuxPackets(
+            _ ready: [RemuxReadyPacket],
+            inStream: UnsafeMutablePointer<AVStream>,
+            outStream: UnsafeMutablePointer<AVStream>
+        ) -> String? {
+            for (index, readyPacket) in ready.enumerated() {
+                readyPacket.packet.pointee.pts = readyPacket.timestamps.pts
+                readyPacket.packet.pointee.dts = readyPacket.timestamps.dts
+                let writeRet = writeRemuxPacket(
+                    readyPacket.packet,
+                    inStream: inStream,
+                    outStream: outStream,
+                    out: out
+                )
+                var packetPointer: UnsafeMutablePointer<AVPacket>? = readyPacket.packet
+                av_packet_free(&packetPointer)
+                if writeRet < 0 {
+                    for remaining in ready.dropFirst(index + 1) {
+                        var remainingPointer: UnsafeMutablePointer<AVPacket>? = remaining.packet
+                        av_packet_free(&remainingPointer)
+                    }
+                    return "HLS video packet write failed: \(avErrorString(writeRet))"
+                }
+            }
+            return nil
+        }
+        packetLoop: while true {
             if isCancelled(session) { break }
             paceExport(session: session, exportedUs: lastInputUs)
             var didRead = false
@@ -532,25 +563,20 @@ extension RigelHlsExporter {
                         case AVMEDIA_TYPE_VIDEO:
                             if let chain = videoChain, chain.inputIndex == inIdx {
                                 writeTranscodedVideo(chain: chain, packet: &primaryPacket, out: out, outStream: outStream)
-                            } else {
-                                if let frameDuration = remuxVideoFrameDuration {
-                                    let repaired = repairedRemuxTimestamps(
-                                        pts: primaryPacket.pts,
-                                        dts: primaryPacket.dts,
-                                        duration: primaryPacket.duration,
-                                        nextTimestamp: nextRemuxVideoTimestamp,
-                                        frameDuration: frameDuration
+                            } else if var buffer = remuxVideoBuffer {
+                                switch buffer.append(&primaryPacket) {
+                                case .failure(let message):
+                                    terminalError = message
+                                case .ready(let ready):
+                                    terminalError = writeBufferedRemuxPackets(
+                                        ready,
+                                        inStream: inStream,
+                                        outStream: outStream
                                     )
-                                    primaryPacket.pts = repaired.pts
-                                    primaryPacket.dts = repaired.dts
-                                    nextRemuxVideoTimestamp = repaired.nextTimestamp
                                 }
-                                writeRemuxPacket(
-                                    &primaryPacket,
-                                    inStream: inStream,
-                                    outStream: outStream,
-                                    out: out
-                                )
+                                remuxVideoBuffer = buffer
+                            } else {
+                                terminalError = "failed to initialize video timestamp buffer"
                             }
                         case AVMEDIA_TYPE_AUDIO:
                             if let chain = audioChains[inIdx] {
@@ -567,6 +593,10 @@ extension RigelHlsExporter {
                             packet: &primaryPacket,
                             sidecarOffsetUs: sidecarOffsetUs
                         )
+                    }
+                    if terminalError != nil {
+                        av_packet_unref(&primaryPacket)
+                        break packetLoop
                     }
                     av_packet_unref(&primaryPacket)
                 }
@@ -604,7 +634,7 @@ extension RigelHlsExporter {
             // files that already exist; the public master is then immutable
             // until the final trailer pass.
             // Finite AirPlay playback waits for the final VOD playlist instead of exposing EVENT media.
-            if !notified && !session.waitForCompletion {
+            if !notified && !session.waitForCompletion && (remuxVideoBuffer?.hasDTSAnchor ?? true) {
                 let now = DispatchTime.now()
                 if now.uptimeNanoseconds - lastReadinessCheck.uptimeNanoseconds >= 100_000_000 {
                     lastReadinessCheck = now
@@ -643,6 +673,24 @@ extension RigelHlsExporter {
             }
         }
 
+        if terminalError == nil && !isCancelled(session),
+           var buffer = remuxVideoBuffer,
+           let videoIndex = selectedVideoIndex,
+           let outIndex = streamMap[videoIndex],
+           let inStream = ctx.pointee.streams[Int(videoIndex)],
+           let outStream = out.pointee.streams[Int(outIndex)] {
+            switch buffer.finish() {
+            case .failure(let message):
+                terminalError = message
+            case .ready(let ready):
+                terminalError = writeBufferedRemuxPackets(
+                    ready,
+                    inStream: inStream,
+                    outStream: outStream
+                )
+            }
+            remuxVideoBuffer = buffer
+        }
         if terminalError == nil && !isCancelled(session) {
             for audioIndex in outputAudioIndices {
                 guard let chain = audioChains[audioIndex],

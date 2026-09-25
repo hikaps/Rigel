@@ -11,6 +11,7 @@ data class SsdpDevice(
     val location: String,
     val server: String?,
     val searchTarget: String,
+    val responderAddress: String? = null,
 )
 data class SubtitleTrack(
     val url: String,
@@ -40,8 +41,18 @@ interface DiscoveryBridge {
     fun ssdpSearch(searchTargets: List<String>, timeoutMs: Int, onResult: (List<SsdpDevice>) -> Unit)
 }
 
+/** Handle returned by [ProbeBridge.probe] for canceling an in-flight probe. */
+interface ProbeOperation {
+    fun cancel()
+}
+
 interface ProbeBridge {
-    fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, errorMsg: String?) -> Unit)
+    /** Starts a probe and returns a handle that interrupts its native I/O. */
+    fun probe(
+        url: String,
+        headers: Map<String, String>,
+        onResult: (ProbeResult?, errorMsg: String?) -> Unit,
+    ): ProbeOperation
 }
 
 interface TranscodeBridge {

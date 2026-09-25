@@ -9,12 +9,16 @@ env:
   # SideStore currently compares semantic versions, not source buildVersion.
   # Keep beta builds on the current stable major/minor; each run becomes the patch version.
   BETA_VERSION_PREFIX: "1.0"
+  FFMPEG_VERSION: "7.1"
 
 on:
   push:
     branches: [develop]
   workflow_dispatch:
 
+# A newer beta supersedes an older beta, but beta and stable publication jobs
+# use a separate non-cancelling lock below so they cannot overwrite each other's
+# shared develop manifest.
 concurrency:
   group: beta-ipa
   cancel-in-progress: true
@@ -24,7 +28,7 @@ permissions:
 
 jobs:
   build-beta-ipa:
-    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]') }}
+    if: ${{ github.ref == 'refs/heads/develop' && (github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]')) }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,22 +43,25 @@ jobs:
       - name: Install JDK 21 (Xcode prebuild hardcodes brew prefix)
         run: brew install openjdk@21
 
+      - id: apple-sdk
+        name: Identify Xcode and iPhoneOS SDK for FFmpeg cache
+        run: |
+          set -euo pipefail
+          echo "xcode=$(xcodebuild -version | awk 'NR == 1 { print $2 }')" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(xcrun --sdk iphoneos --show-sdk-version)" >> "$GITHUB_OUTPUT"
+
       - id: ffmpeg-cache
         name: Restore FFmpeg device libs
         uses: actions/cache@v4
         with:
           path: iosApp/vendor/ffmpeg-device
-          key: ffmpeg-device-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
-          restore-keys: |
-            ffmpeg-device-${{ runner.arch }}-
-            ffmpeg-device-
+          key: ffmpeg-device-${{ runner.os }}-${{ runner.arch }}-xcode-${{ steps.apple-sdk.outputs.xcode }}-sdk-${{ steps.apple-sdk.outputs.sdk }}-ffmpeg-${{ env.FFMPEG_VERSION }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
 
       - name: Build FFmpeg device libs
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          SDK=iphoneos JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-dev" ./scripts/build-ffmpeg.sh \
-            || SDK=iphoneos JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-dev" ./scripts/build-ffmpeg.sh
+          FF_VERSION="$FFMPEG_VERSION" SDK=iphoneos JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-dev" ./scripts/build-ffmpeg.sh
 
       - name: Archive unsigned beta app
         env:
@@ -77,7 +84,7 @@ jobs:
 
       - name: Package ad-hoc IPA
         env:
-          SHA: ${{ github.sha }}
+          SHA: "${{ github.sha }}"
         run: |
           set -euo pipefail
           ASSET_NAME="Rigel-beta-${SHA:0:7}.ipa"
@@ -86,6 +93,29 @@ jobs:
           mkdir -p build/payload/Payload
           cp -R "$APP" build/payload/Payload/
           (cd build/payload && zip -qry "$GITHUB_WORKSPACE/build/$ASSET_NAME" Payload)
+
+      - name: Upload beta IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-ipa-${{ github.run_id }}
+          path: build/Rigel-beta-*.ipa
+          if-no-files-found: error
+
+  publish-beta:
+    needs: build-beta-ipa
+    if: ${{ needs.build-beta-ipa.result == 'success' && github.ref == 'refs/heads/develop' }}
+    runs-on: macos-latest
+    concurrency:
+      group: rigel-altstore-manifest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download beta IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: beta-ipa-${{ github.run_id }}
+          path: build
 
       - name: Publish rolling beta release and source
         env:
@@ -99,10 +129,16 @@ jobs:
           SOURCE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/altstore/source.json"
           ICON_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/develop/iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png"
 
+          git fetch origin develop
+          MANIFEST_WORKTREE="${RUNNER_TEMP}/manifest"
+          git worktree add --detach "$MANIFEST_WORKTREE" origin/develop
+          trap 'git worktree remove --force "$MANIFEST_WORKTREE"' EXIT
+          MANIFEST_SOURCE="$MANIFEST_WORKTREE/altstore/source.json"
+
           python3 scripts/generate-altstore-source.py \
             --channel beta \
             --ipa "$IPA" \
-            --output altstore/source.json \
+            --output "$MANIFEST_SOURCE" \
             --download-url "$DOWNLOAD_URL" \
             --source-url "$SOURCE_URL" \
             --icon-url "$ICON_URL" \
@@ -114,12 +150,16 @@ jobs:
             --title "Rigel Beta ($(date -u +%Y-%m-%d))" \
             --notes "Rolling ad-hoc beta from develop @ ${SHA:0:7}. AltStore/SideStore re-signs the IPA with the installer's Apple ID. The source is refreshed at ${SOURCE_URL}." \
             --latest=false
-          gh release upload beta altstore/source.json --clobber
+          gh release upload beta "$MANIFEST_SOURCE" --clobber
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add altstore/source.json
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: update AltStore source [skip ci]"
-            git push origin HEAD:develop
+          git -C "$MANIFEST_WORKTREE" config user.name "github-actions[bot]"
+          git -C "$MANIFEST_WORKTREE" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$MANIFEST_WORKTREE" add altstore/source.json
+          if ! git -C "$MANIFEST_WORKTREE" diff --cached --quiet; then
+            git -C "$MANIFEST_WORKTREE" commit -m "chore: update AltStore source (beta) [skip ci]"
+            git -C "$MANIFEST_WORKTREE" push origin HEAD:develop || {
+              git -C "$MANIFEST_WORKTREE" fetch origin develop
+              git -C "$MANIFEST_WORKTREE" rebase origin/develop
+              git -C "$MANIFEST_WORKTREE" push origin HEAD:develop
+            }
           fi

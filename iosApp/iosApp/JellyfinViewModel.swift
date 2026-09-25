@@ -1,6 +1,61 @@
 import SwiftUI
 import ComposeApp
 
+@MainActor
+protocol JellyfinClientFacade {
+    func authenticate(base: String, username: String, password: String, deviceId: String) async -> JellyfinAuth?
+    func browse(base: String, token: String, userId: String, parentId: String?) async throws -> [JellyfinItem]
+    func search(base: String, token: String, userId: String, term: String) async throws -> [JellyfinItem]
+    func itemSubtitleTracks(base: String, token: String, userId: String, itemId: String) async throws -> [SubtitleTrack]
+}
+
+@MainActor
+protocol JellyfinSettingsFacade {
+    func jellyfinServer() -> String
+    func setJellyfinServer(v: String)
+    func jellyfinToken() -> String
+    func setJellyfinToken(v: String) -> Bool
+    func jellyfinUserId() -> String
+    func setJellyfinUserId(v: String)
+    func jellyfinUsername() -> String
+    func setJellyfinUsername(v: String)
+}
+
+@MainActor
+private struct DefaultJellyfinClientFacade: JellyfinClientFacade {
+    let client: JellyfinClient
+
+    func authenticate(base: String, username: String, password: String, deviceId: String) async -> JellyfinAuth? {
+        await client.authenticateAsync(base: base, username: username, password: password, deviceId: deviceId)
+    }
+
+    func browse(base: String, token: String, userId: String, parentId: String?) async throws -> [JellyfinItem] {
+        try await client.browseAsync(base: base, token: token, userId: userId, parentId: parentId)
+    }
+
+    func search(base: String, token: String, userId: String, term: String) async throws -> [JellyfinItem] {
+        try await client.searchAsync(base: base, token: token, userId: userId, term: term)
+    }
+
+    func itemSubtitleTracks(base: String, token: String, userId: String, itemId: String) async throws -> [SubtitleTrack] {
+        try await client.itemSubtitleTracksAsync(base: base, token: token, userId: userId, itemId: itemId)
+    }
+}
+
+@MainActor
+private struct DefaultJellyfinSettingsFacade: JellyfinSettingsFacade {
+    let store: SettingsStore
+
+    func jellyfinServer() -> String { store.jellyfinServer() }
+    func setJellyfinServer(v: String) { store.setJellyfinServer(v: v) }
+    func jellyfinToken() -> String { store.jellyfinToken() }
+    func setJellyfinToken(v: String) -> Bool { store.setJellyfinToken(v: v) }
+    func jellyfinUserId() -> String { store.jellyfinUserId() }
+    func setJellyfinUserId(v: String) { store.setJellyfinUserId(v: v) }
+    func jellyfinUsername() -> String { store.jellyfinUsername() }
+    func setJellyfinUsername(v: String) { store.setJellyfinUsername(v: v) }
+}
+
 /// State for the Jellyfin source screen: connect, browse the library, search,
 /// and push items to logged-in client sessions. One task handle per operation
 /// kind — a new request cancels its predecessor and disconnect cancels
@@ -35,8 +90,13 @@ final class JellyfinViewModel: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var playbackTask: Task<Void, Never>?
 
-    private var settings: SettingsStore { RigelCore.shared.settings }
-    private var jellyfin: JellyfinClient { RigelCore.shared.jellyfin }
+    private let jellyfin: JellyfinClientFacade
+    private let settings: JellyfinSettingsFacade
+
+    init(jellyfin: JellyfinClientFacade? = nil, settings: JellyfinSettingsFacade? = nil) {
+        self.jellyfin = jellyfin ?? DefaultJellyfinClientFacade(client: RigelCore.shared.jellyfin)
+        self.settings = settings ?? DefaultJellyfinSettingsFacade(store: RigelCore.shared.settings)
+    }
 
     var connected: Bool { !settings.jellyfinToken().isEmpty }
     var base: String { settings.jellyfinServer() }
@@ -62,7 +122,7 @@ final class JellyfinViewModel: ObservableObject {
         notice = nil
         noticeIsError = false
         connectTask = Task {
-            let auth = await jellyfin.authenticateAsync(
+            let auth = await jellyfin.authenticate(
                 base: server,
                 username: username,
                 password: password,
@@ -71,11 +131,15 @@ final class JellyfinViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
             busy = false
             if let auth {
+                guard settings.setJellyfinToken(v: auth.token) else {
+                    notice = "Unable to securely store Jellyfin credentials"
+                    noticeIsError = true
+                    return
+                }
                 let previousServer = settings.jellyfinServer()
                 if previousServer != server { SwiftOutputSelection.shared.clearJellyfinServer(serverBase: previousServer) }
                 settings.setJellyfinServer(v: server)
                 settings.setJellyfinUsername(v: username)
-                settings.setJellyfinToken(v: auth.token)
                 settings.setJellyfinUserId(v: auth.userId)
                 self.password = ""
                 loadedOnce = false
@@ -96,9 +160,13 @@ final class JellyfinViewModel: ObservableObject {
         invalidateInFlight()
         busy = false
         searchBusy = false
+        guard settings.setJellyfinToken(v: "") else {
+            notice = "Unable to securely clear Jellyfin credentials"
+            noticeIsError = true
+            return
+        }
         SwiftOutputSelection.shared.clearJellyfinServer(serverBase: settings.jellyfinServer())
         password = ""
-        settings.setJellyfinToken(v: "")
         items = []
         parentId = nil
         parentName = nil
@@ -109,6 +177,7 @@ final class JellyfinViewModel: ObservableObject {
         searchError = nil
         libraryError = nil
         notice = nil
+        noticeIsError = false
     }
 
     func loadLibrary(at parentId: String?) {
@@ -117,7 +186,7 @@ final class JellyfinViewModel: ObservableObject {
         browseTask?.cancel()
         browseTask = Task {
             do {
-                let found = try await jellyfin.browseAsync(
+                let found = try await jellyfin.browse(
                     base: base,
                     token: token,
                     userId: userId,
@@ -130,7 +199,7 @@ final class JellyfinViewModel: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error) else { return }
                 busy = false
                 loadedOnce = true
                 items = []
@@ -176,7 +245,7 @@ final class JellyfinViewModel: ObservableObject {
         searchTask?.cancel()
         searchTask = Task {
             do {
-                let found = try await jellyfin.searchAsync(
+                let found = try await jellyfin.search(
                     base: base,
                     token: token,
                     userId: userId,
@@ -188,7 +257,7 @@ final class JellyfinViewModel: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error) else { return }
                 searchBusy = false
                 searchResults = []
                 searchError = Self.errorMessage(error)
@@ -206,7 +275,7 @@ final class JellyfinViewModel: ObservableObject {
         playbackTask = Task {
             var tracks: [SubtitleTrack] = []
             do {
-                tracks = try await jellyfin.itemSubtitleTracksAsync(
+                tracks = try await jellyfin.itemSubtitleTracks(
                     base: base,
                     token: token,
                     userId: userId,
@@ -215,6 +284,7 @@ final class JellyfinViewModel: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
+                guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error) else { return }
                 NSLog("[Rigel] Jellyfin subtitle lookup failed: %@", error.localizedDescription)
             }
             guard !Task.isCancelled else { return }
@@ -226,6 +296,8 @@ final class JellyfinViewModel: ObservableObject {
 
 
     private func invalidateInFlight() {
+        connectTask?.cancel()
+        connectTask = nil
         browseTask?.cancel()
         searchTask?.cancel()
         playbackTask?.cancel()

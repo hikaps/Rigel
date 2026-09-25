@@ -31,6 +31,9 @@ interface ReceiverAdapter {
         client: HttpClient,
     ): Boolean = false
 
+    /** Read the source-relative playback position, or null when unsupported/unavailable. */
+    suspend fun position(target: CastTarget, client: HttpClient): Long? = null
+
     /** Pause the active remote item; false means this receiver cannot pause. */
     suspend fun pause(target: CastTarget, client: HttpClient): Boolean = false
 

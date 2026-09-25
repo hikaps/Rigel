@@ -10,6 +10,15 @@ class JellyfinApiTest {
     fun authBodyEscapes() {
         assertEquals("""{"Username":"a\"b","Pw":"pw"}""", JellyfinApi.authBody("""a"b""", "pw"))
     }
+    @Test
+    fun authBodyEscapesJsonControlCharacters() {
+        val username = "\"\\\b\t\n\u0000\u001F"
+        val password = "\r\u000C"
+        val expected = """{"Username":"\"\\\b\t\n""" +
+            "\\" + "u0000" + "\\" + "u001F" +
+            """","Pw":"\r\f"}"""
+        assertEquals(expected, JellyfinApi.authBody(username, password))
+    }
 
     @Test
     fun embyAuthHeaderFormat() {

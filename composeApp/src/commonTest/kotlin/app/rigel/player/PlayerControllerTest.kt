@@ -2,6 +2,7 @@ package app.rigel.player
 
 import app.rigel.bridge.HttpServerBridge
 import app.rigel.bridge.ProbeBridge
+import app.rigel.bridge.ProbeOperation
 import app.rigel.bridge.ProbeResult
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.TranscodeBridge
@@ -75,8 +76,11 @@ class PlayerControllerTest {
         RigelBridgeFactory.register(
             discovery = null,
             probe = object : ProbeBridge {
-                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit) {
+                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
                     onResult(probeResult, probeError)
+                    return object : ProbeOperation {
+                        override fun cancel() = Unit
+                    }
                 }
             },
             transcode = object : TranscodeBridge {
