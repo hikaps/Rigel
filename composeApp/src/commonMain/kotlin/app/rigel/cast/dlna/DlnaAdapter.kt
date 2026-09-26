@@ -151,7 +151,8 @@ object DlnaAdapter : ReceiverAdapter {
         if (!device.searchTarget.contains("MediaRenderer")) return null
         val xml = runCatching { client.get(device.location).bodyAsText() }.getOrNull()
             ?: return null
-        val d = DlnaDeviceDescription.parse(device.usn, device.location, xml) ?: return null
+        val d = DlnaDeviceDescription.parse(device.usn, device.location, xml, trustedBase = device.location)
+            ?: return null
         return CastTarget.Dlna(d)
     }
 

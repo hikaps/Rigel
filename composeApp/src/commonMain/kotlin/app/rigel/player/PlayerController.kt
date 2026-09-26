@@ -119,7 +119,9 @@ class PlayerController(
     ): Boolean {
         val request = UrlIntake.parse(rawUrl)
         if (request == null) {
+            stopJellyfinIfActive()
             invalidatePendingWork()
+            CastDispatcher.detachActive()?.let(::stopDetachedReceiver)
             _uiState.value = PlayerUiState(phase = PlayerPhase.ERROR, error = "Unrecognized URL: $rawUrl")
             return false
         }
@@ -415,6 +417,8 @@ class PlayerController(
             restartProxyAt(target)
         } else if (current.castActive) {
             scope.launch { CastDispatcher.seekActive(target, duration ?: 0) }
+        } else if (current.route == PlaybackRoute.DIRECT) {
+            _uiState.value = current.copy(startPositionMs = target)
         }
     }
 

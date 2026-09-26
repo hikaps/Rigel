@@ -137,17 +137,17 @@ final class PlayerModel: ObservableObject {
     }
 
     func selectDestinationLocal() {
-        let positionMs = SwiftPlayer.shared.currentPositionMs()
+        let positionMs = SwiftPlayer.shared.remotePositionMs()
         SwiftPlayer.shared.selectLocal(positionMs: positionMs)
     }
 
     func selectDestinationAirPlay(routeId: String, name: String) {
-        let positionMs = SwiftPlayer.shared.currentPositionMs()
+        let positionMs = SwiftPlayer.shared.remotePositionMs()
         SwiftPlayer.shared.selectAirPlay(routeId: routeId, name: name, positionMs: positionMs)
     }
 
     func selectDestinationReceiver(_ target: CastTarget) {
-        let positionMs = SwiftPlayer.shared.currentPositionMs()
+        let positionMs = SwiftPlayer.shared.remotePositionMs()
         SwiftPlayer.shared.selectReceiver(target: target, positionMs: positionMs)
     }
 

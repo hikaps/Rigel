@@ -185,6 +185,55 @@ class PlayerControllerTest {
     }
 
     @Test
+    fun invalidLoadRawStopsActiveRemotePlayback() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        val actions = mutableListOf<String>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    actions += request.headers["SOAPACTION"] ?: request.url.toString()
+                    respond("<ok/>", HttpStatusCode.OK)
+                }
+            }
+        }
+        val c = controller()
+        val target = CastTarget.Dlna(
+            DlnaDevice("invalid-load-1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+        )
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(request.copy(sourceUrl = "http://192.168.1.20/movie.mp4"), PlaybackDestination.Receiver(target))
+            advanceUntilIdle()
+            assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+            assertEquals(target, CastDispatcher.activeTarget())
+
+            assertFalse(c.loadRaw("not a url"))
+            assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+            advanceUntilIdle()
+
+            assertNull(CastDispatcher.activeTarget())
+            assertTrue(actions.any { it.contains("#Stop") }, "actions=$actions")
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
     fun loadRawRecordsLinkInHistory() {
         val settings = SettingsStore(MapSettings(mutableMapOf()))
         val c = controller(settings)
@@ -572,6 +621,23 @@ class PlayerControllerTest {
         assertEquals(PlaybackRoute.TRANSCODE, state.route)
         assertEquals("http://127.0.0.1:8090/hls/s1/out.m3u8", state.proxyUrl)
         assertEquals(listOf("transcode"), hlsModes)
+    }
+
+    @Test
+    fun directSeekPositionIsUsedByProxyFallback() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request)
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.seek(12_345, 60_000)
+        assertEquals(12_345, c.uiState.value.startPositionMs)
+
+        c.reportError("decoder failure")
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(12_345, hlsOffsets.single())
     }
 
     @Test

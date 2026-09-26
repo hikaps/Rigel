@@ -684,6 +684,7 @@ class CastDispatcherTest {
 
         val stale = async { CastDispatcher.cast(firstTarget, "http://origin/first.mp4", "First", client) }
         firstStarted.await()
+
         val current = CastDispatcher.cast(secondTarget, "http://origin/second.mp4", "Second", client)
 
         assertTrue(current is CastResult.Sent)
@@ -717,5 +718,55 @@ class CastDispatcherTest {
         assertNotNull(staleResult)
         assertTrue(staleResult is CastResult.Rejected)
         assertEquals(replacement, CastDispatcher.activeTarget())
+    }
+    @Test
+    fun delayedCastIsRejectedWhenCommitVoidedByDetach() = runTest {
+        val started = CompletableDeferred<Unit>()
+        var delayStale = false
+        val engine = MockEngine { request ->
+            if (delayStale && request.url.toString().contains("10.0.0.1")) {
+                started.complete(Unit)
+                delay(1_000)
+            }
+            respond("""{"jsonrpc":"2.0","id":1,"result":"OK"}""", HttpStatusCode.OK)
+        }
+        val client = HttpClient(engine)
+        val stale = CastTarget.Kodi(KodiDevice("voided-first", "http://10.0.0.1:8080", "Kodi 1"))
+
+        assertTrue(CastDispatcher.cast(stale, "http://origin/first.mp4", "First", client) is CastResult.Sent)
+        delayStale = true
+        val inFlight = async { CastDispatcher.cast(stale, "http://origin/recast.mp4", "Recast", client) }
+        started.await()
+        assertNotNull(CastDispatcher.detachActive())
+
+        assertTrue(inFlight.await() is CastResult.Rejected)
+        assertNull(CastDispatcher.activeTarget())
+        assertFalse(port.active)
+    }
+
+    @Test
+    fun delayedCastIsRejectedWhenCommitVoidedByNewCast() = runTest {
+        val started = CompletableDeferred<Unit>()
+        var delayStale = false
+        val engine = MockEngine { request ->
+            if (delayStale && request.url.toString().contains("10.0.0.1")) {
+                started.complete(Unit)
+                delay(1_000)
+            }
+            respond("""{"jsonrpc":"2.0","id":1,"result":"OK"}""", HttpStatusCode.OK)
+        }
+        val client = HttpClient(engine)
+        val stale = CastTarget.Kodi(KodiDevice("voided-old", "http://10.0.0.1:8080", "Kodi 1"))
+        val replacement = CastTarget.Kodi(KodiDevice("voided-new", "http://10.0.0.2:8080", "Kodi 2"))
+
+        assertTrue(CastDispatcher.cast(stale, "http://origin/first.mp4", "First", client) is CastResult.Sent)
+        delayStale = true
+        val inFlight = async { CastDispatcher.cast(stale, "http://origin/recast.mp4", "Recast", client) }
+        started.await()
+        assertTrue(CastDispatcher.cast(replacement, "http://origin/new.mp4", "New", client) is CastResult.Sent)
+
+        assertTrue(inFlight.await() is CastResult.Rejected)
+        assertEquals(replacement, CastDispatcher.activeTarget())
+        assertTrue(port.active)
     }
 }

@@ -1,6 +1,7 @@
 package app.rigel.bridge
 
 import app.rigel.RigelCore
+import app.rigel.cast.CastDispatcher
 import app.rigel.cast.CastTarget
 import app.rigel.player.PlayerUiState
 import kotlinx.coroutines.CoroutineScope
@@ -21,6 +22,62 @@ object SwiftPlayer {
     fun currentPositionMs(): Long =
         PlayerBridgeFactory.create()?.currentPositionMs() ?: RigelCore.controller.uiState.value.startPositionMs
 
+    private var remotePositionCache: Long? = null
+    private var remotePositionQueryState: PlayerUiState? = null
+    private var remotePositionJob: Job? = null
+    private var remotePositionState: PlayerUiState? = null
+
+    init {
+        scope.launch {
+            RigelCore.controller.uiState.collect { state ->
+                remotePositionState = state
+                remotePositionCache = null
+                remotePositionQueryState = null
+                remotePositionJob?.cancel()
+                remotePositionJob = null
+                scheduleRemotePositionQuery(state)
+            }
+        }
+    }
+
+    /**
+     * Returns the active receiver's playhead for destination handoff. The
+     * receiver query is asynchronous; callers get the last known start offset
+     * until the query completes, and only when the query has no result.
+     */
+    fun remotePositionMs(): Long {
+        val state = RigelCore.controller.uiState.value
+        if (!state.remotePlayback) return currentPositionMs()
+
+        val nativePosition = PlayerBridgeFactory.create()?.currentPositionMs()
+        if (nativePosition != null) return nativePosition
+
+        if (remotePositionState != state) {
+            remotePositionState = state
+            remotePositionCache = null
+            remotePositionQueryState = null
+            remotePositionJob?.cancel()
+            remotePositionJob = null
+        }
+        scheduleRemotePositionQuery(state)
+        return remotePositionCache ?: state.startPositionMs
+    }
+
+    private fun scheduleRemotePositionQuery(state: PlayerUiState) {
+        if (!state.remotePlayback ||
+            remotePositionQueryState == state ||
+            remotePositionJob != null ||
+            PlayerBridgeFactory.create()?.currentPositionMs() != null
+        ) return
+        remotePositionJob = scope.launch {
+            val position = runCatching { CastDispatcher.positionActive() }.getOrNull()
+            if (RigelCore.controller.uiState.value == state) {
+                remotePositionCache = position
+                remotePositionQueryState = state
+                remotePositionJob = null
+            }
+        }
+    }
     /** Fires on the main thread on every state change; cancel the Job to stop observing. */
     fun observe(onChange: (PlayerUiState) -> Unit): Job =
         scope.launch { RigelCore.controller.uiState.collect { onChange(it) } }

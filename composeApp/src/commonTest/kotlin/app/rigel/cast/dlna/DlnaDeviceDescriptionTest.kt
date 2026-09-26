@@ -79,11 +79,39 @@ class DlnaDeviceDescriptionTest {
     }
 
     @Test
-    fun absoluteControlUrlPassesThrough() {
+    fun absoluteControlUrlPassesThroughForManualDevice() {
         val xml = deviceXml.replace("/upnp/control/AVTransport1", "http://other:9999/ctl")
         val device = DlnaDeviceDescription.parse("u", "http://10.0.0.5:1234/desc.xml", xml)
         assertNotNull(device)
+        // Manual rows have no trusted responder origin. Preserve the existing
+        // local-device policy and accept the URL verbatim.
         assertEquals("http://other:9999/ctl", device.controlUrl)
+    }
+
+    @Test
+    fun sameHostAbsoluteControlUrlIsAllowedWhenResponderIsTrusted() {
+        val xml = deviceXml.replace("/upnp/control/AVTransport1", "http://10.0.0.5:1234/ctl")
+        val device = DlnaDeviceDescription.parse(
+            "u",
+            "http://10.0.0.5:1234/desc.xml",
+            xml,
+            trustedBase = "http://10.0.0.5:1234/desc.xml",
+        )
+        assertNotNull(device)
+        assertEquals("http://10.0.0.5:1234/ctl", device.controlUrl)
+    }
+
+    @Test
+    fun crossHostAbsoluteControlUrlIsRejectedWhenResponderIsTrusted() {
+        val xml = deviceXml.replace("/upnp/control/AVTransport1", "http://other:9999/ctl")
+        assertNull(
+            DlnaDeviceDescription.parse(
+                "u",
+                "http://10.0.0.5:1234/desc.xml",
+                xml,
+                trustedBase = "http://10.0.0.5:1234/desc.xml",
+            ),
+        )
     }
 
     @Test
