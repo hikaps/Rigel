@@ -51,6 +51,12 @@ ffmpeg -hide_banner -loglevel error -y \
   -metadata:s:s:1 language=fra -metadata:s:s:1 title=French \
   -c:v libx264 -pix_fmt yuv420p -c:a aac -c:s srt -shortest \
   "$OUT/fixture_subtitles.mkv"
+# Same subtitle fixture with a genuine 10-second media timestamp epoch.
+# Keep the streams copied so embedded subtitle, remux, and transcode paths all
+# consume one deterministic source clock.
+ffmpeg -hide_banner -loglevel error -y \
+  -i "$OUT/fixture_subtitles.mkv" \
+  -output_ts_offset 10 -c copy "$OUT/fixture_subtitles_nonzero.mkv"
 cat > "$OUT/fixture_sidecar.vtt" <<'EOF'
 WEBVTT
 

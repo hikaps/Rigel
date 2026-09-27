@@ -11,6 +11,10 @@ import ComposeApp
 final class RigelHlsExporter {
     final class Session {
         let queue: DispatchQueue
+        let inputWatchdog: InputWatchdog
+        private let watchdogLock = NSLock()
+        private var sidecarWatchdogs: [InputWatchdog] = []
+        private var watchdogsCancelled = false
         let startOffsetMs: Int64
         let waitForCompletion: Bool
         let subtitleTracks: [SubtitleTrack]
@@ -25,14 +29,37 @@ final class RigelHlsExporter {
 
         init(
             queue: DispatchQueue,
+            inputWatchdog: InputWatchdog,
             startOffsetMs: Int64,
             subtitleTracks: [SubtitleTrack],
             waitForCompletion: Bool
         ) {
             self.queue = queue
+            self.inputWatchdog = inputWatchdog
             self.startOffsetMs = startOffsetMs
             self.subtitleTracks = subtitleTracks
             self.waitForCompletion = waitForCompletion
+        }
+        /// Late sidecar registrations race stopSession's watchdog teardown:
+        /// once cancellation is recorded, every retained watchdog (including
+        /// a watchdog registered afterwards) must abort immediately.
+        func retainSidecarWatchdog(_ watchdog: InputWatchdog) {
+            watchdogLock.lock()
+            if watchdogsCancelled {
+                watchdogLock.unlock()
+                watchdog.cancel()
+            } else {
+                sidecarWatchdogs.append(watchdog)
+                watchdogLock.unlock()
+            }
+        }
+
+        func cancelWatchdogs() {
+            watchdogLock.lock()
+            watchdogsCancelled = true
+            inputWatchdog.cancel()
+            sidecarWatchdogs.forEach { $0.cancel() }
+            watchdogLock.unlock()
         }
     }
 
@@ -99,8 +126,10 @@ final class RigelHlsExporter {
             return
         }
         let queue = DispatchQueue(label: "rigel-hls-\(sessionId)")
+        let inputWatchdog = InputWatchdog(timeoutSeconds: 10)
         let session = Session(
             queue: queue,
+            inputWatchdog: inputWatchdog,
             startOffsetMs: startOffsetMs,
             subtitleTracks: subtitleTracks,
             waitForCompletion: waitForCompletion
@@ -134,6 +163,7 @@ final class RigelHlsExporter {
         let session = sessions[key]
         let queue = session?.queue
         session?.cancel = true
+        session?.cancelWatchdogs()
         session?.cleanupPending = true
         lock.unlock()
         deleteSessionDir(sessionId: key, session: session, writerQueue: queue)
@@ -152,7 +182,7 @@ final class RigelHlsExporter {
     /// ffmpeg's segment opens. An active session deletes on its own serial
     /// queue, so the removal runs strictly after run() finishes; a session
     /// that already ended has no writer and is removed right away.
-    private static func deleteSessionDir(
+    static func deleteSessionDir(
         sessionId: String,
         session: Session?,
         writerQueue: DispatchQueue?

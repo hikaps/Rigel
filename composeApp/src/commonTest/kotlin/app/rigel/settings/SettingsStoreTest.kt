@@ -294,6 +294,40 @@ class SettingsStoreTest {
     }
 
     @Test
+    fun linkHistoryRedactsPercentEncodedCredentialQueryNames() {
+        val settings = MapSettings(mutableMapOf())
+        settings.putString(
+            "link_history",
+            "Encoded|https://jf.example/items/1?api%5Fkey=old-secret&access%5Ftoken=also-secret&quality=full",
+        )
+
+        val s = store(settings)
+
+        assertEquals(
+            listOf(LinkHistoryEntry("https://jf.example/items/1?quality=full", "Encoded")),
+            s.linkHistory(),
+        )
+        val persisted = settings.getString("link_history", "")
+        assertFalse(persisted.contains("old-secret"))
+        assertFalse(persisted.contains("also-secret"))
+        assertFalse(persisted.contains("api%5Fkey"))
+        assertFalse(persisted.contains("access%5Ftoken"))
+        assertTrue(persisted.contains("quality=full"))
+    }
+
+    @Test
+    fun linkHistoryPreservesMalformedNonsensitiveQueryNames() {
+        val s = store()
+
+        s.addToLinkHistory("https://example.com/video?quality%ZZ=full", null)
+
+        assertEquals(
+            listOf(LinkHistoryEntry("https://example.com/video?quality%ZZ=full", null)),
+            s.linkHistory(),
+        )
+    }
+
+    @Test
     fun linkHistoryRedactsCredentialsWhenAddingEntry() {
         val settings = MapSettings(mutableMapOf())
         val s = store(settings)

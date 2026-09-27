@@ -155,6 +155,7 @@ targets:
     platform: iOS
     sources:
       - path: ../RigelTests
+      - path: ShareExtension/ShareViewController.swift
     resources:
       - path: ../RigelTests/Fixtures
     dependencies:

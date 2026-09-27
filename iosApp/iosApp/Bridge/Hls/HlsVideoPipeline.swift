@@ -37,6 +37,11 @@ final class VideoChain {
         self.timestampOrigin90k = timestampOrigin90k
         self.frameDurationPTS = max(1, Int64((90_000.0 / max(frameRate, 1.0)).rounded()))
     }
+    func recordError(_ message: String) {
+        if error == nil {
+            error = message
+        }
+    }
 
     func release() {
         for frame in pendingFrames {
@@ -64,6 +69,9 @@ final class VideoChain {
 }
 
 extension RigelHlsExporter {
+    static func isExpectedCodecDrainResult(_ ret: Int32) -> Bool {
+        ret == -EAGAIN || ret == -541_478_725
+    }
     static func makeVideoChain(
         inputStream: UnsafeMutablePointer<AVStream>,
         outputStream: UnsafeMutablePointer<AVStream>,
@@ -275,13 +283,31 @@ extension RigelHlsExporter {
         inputStream: UnsafeMutablePointer<AVStream>,
         outputStream: UnsafeMutablePointer<AVStream>
     ) -> PrimeVideoResult {
-        guard avcodec_send_packet(chain.decCtx, packet) >= 0 else { return .fatal }
+        let sendRet = avcodec_send_packet(chain.decCtx, packet)
+        guard sendRet >= 0 else {
+            chain.recordError("video decoder send failed: \(avErrorString(sendRet))")
+            return .fatal
+        }
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        guard frame != nil else {
+            chain.recordError("video decoder frame allocation failed")
+            return .fatal
+        }
         defer { av_frame_free(&frame) }
-        while let decoded = frame, avcodec_receive_frame(chain.decCtx, decoded) >= 0 {
-            guard retainPrimedFrame(chain, decoded: decoded, inputStream: inputStream, outputStream: outputStream) else {
+        while let decoded = frame {
+            let receiveRet = avcodec_receive_frame(chain.decCtx, decoded)
+            if receiveRet >= 0 {
+                guard retainPrimedFrame(chain, decoded: decoded, inputStream: inputStream, outputStream: outputStream) else {
+                    chain.recordError("video priming frame retention failed")
+                    return .fatal
+                }
+                continue
+            }
+            if !Self.isExpectedCodecDrainResult(receiveRet) {
+                chain.recordError("video decoder receive failed: \(avErrorString(receiveRet))")
                 return .fatal
             }
+            break
         }
         return chain.initialized ? .initialized : .needMoreInput
     }
@@ -291,13 +317,31 @@ extension RigelHlsExporter {
         inputStream: UnsafeMutablePointer<AVStream>,
         outputStream: UnsafeMutablePointer<AVStream>
     ) -> PrimeVideoResult {
-        guard avcodec_send_packet(chain.decCtx, nil) >= 0 else { return .fatal }
+        let sendRet = avcodec_send_packet(chain.decCtx, nil)
+        guard sendRet >= 0 else {
+            chain.recordError("video decoder flush failed: \(avErrorString(sendRet))")
+            return .fatal
+        }
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        guard frame != nil else {
+            chain.recordError("video decoder frame allocation failed")
+            return .fatal
+        }
         defer { av_frame_free(&frame) }
-        while let decoded = frame, avcodec_receive_frame(chain.decCtx, decoded) >= 0 {
-            guard retainPrimedFrame(chain, decoded: decoded, inputStream: inputStream, outputStream: outputStream) else {
+        while let decoded = frame {
+            let receiveRet = avcodec_receive_frame(chain.decCtx, decoded)
+            if receiveRet >= 0 {
+                guard retainPrimedFrame(chain, decoded: decoded, inputStream: inputStream, outputStream: outputStream) else {
+                    chain.recordError("video priming frame retention failed")
+                    return .fatal
+                }
+                continue
+            }
+            if !Self.isExpectedCodecDrainResult(receiveRet) {
+                chain.recordError("video decoder receive failed: \(avErrorString(receiveRet))")
                 return .fatal
             }
+            break
         }
         return chain.initialized ? .initialized : .fatal
     }
@@ -474,11 +518,27 @@ extension RigelHlsExporter {
         out: UnsafeMutablePointer<AVFormatContext>,
         outStream: UnsafeMutablePointer<AVStream>
     ) {
-        if avcodec_send_packet(chain.decCtx, packet) < 0 { return }
+        let sendRet = avcodec_send_packet(chain.decCtx, packet)
+        guard sendRet >= 0 else {
+            chain.recordError("video decoder send failed: \(avErrorString(sendRet))")
+            return
+        }
         var swFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        guard swFrame != nil else {
+            chain.recordError("video decoder frame allocation failed")
+            return
+        }
         defer { av_frame_free(&swFrame) }
-        while let decoded = swFrame, avcodec_receive_frame(chain.decCtx, decoded) >= 0 {
-            writeTranscodedVideoFrame(chain: chain, decoded: decoded, out: out, outStream: outStream)
+        while let decoded = swFrame {
+            let receiveRet = avcodec_receive_frame(chain.decCtx, decoded)
+            if receiveRet >= 0 {
+                writeTranscodedVideoFrame(chain: chain, decoded: decoded, out: out, outStream: outStream)
+                continue
+            }
+            if !Self.isExpectedCodecDrainResult(receiveRet) {
+                chain.recordError("video decoder receive failed: \(avErrorString(receiveRet))")
+            }
+            break
         }
     }
 
@@ -577,9 +637,12 @@ extension RigelHlsExporter {
             return
         }
         hw.pointee.pts = nextVideoPTS(decoded, chain: chain)
-        if avcodec_send_frame(chain.encCtx, hw) >= 0 {
-            drainEncodedVideo(chain: chain, out: out, outStream: outStream)
+        let sendRet = avcodec_send_frame(chain.encCtx, hw)
+        guard sendRet >= 0 else {
+            chain.recordError("video encoder send failed: \(avErrorString(sendRet))")
+            return
         }
+        drainEncodedVideo(chain: chain, out: out, outStream: outStream)
     }
 
     static func drainEncodedVideo(
@@ -590,16 +653,33 @@ extension RigelHlsExporter {
         var encPkt = AVPacket()
         av_init_packet(&encPkt)
         let outputStreams = chain.outputStreams.isEmpty ? [outStream] : chain.outputStreams
-        while avcodec_receive_packet(chain.encCtx, &encPkt) >= 0 {
+        while true {
+            let receiveRet = avcodec_receive_packet(chain.encCtx, &encPkt)
+            guard receiveRet >= 0 else {
+                if !Self.isExpectedCodecDrainResult(receiveRet) {
+                    chain.recordError("video encoder receive failed: \(avErrorString(receiveRet))")
+                }
+                return
+            }
             for destination in outputStreams {
                 var copy = AVPacket()
                 av_init_packet(&copy)
-                guard av_packet_ref(&copy, &encPkt) >= 0 else { continue }
+                let refRet = av_packet_ref(&copy, &encPkt)
+                guard refRet >= 0 else {
+                    chain.recordError("video packet reference failed: \(avErrorString(refRet))")
+                    av_packet_unref(&encPkt)
+                    return
+                }
                 copy.stream_index = destination.pointee.index
                 av_packet_rescale_ts(&copy, chain.encCtx.pointee.time_base, destination.pointee.time_base)
                 copy.pos = -1
-                av_interleaved_write_frame(out, &copy)
+                let writeRet = av_interleaved_write_frame(out, &copy)
                 av_packet_unref(&copy)
+                if writeRet < 0 {
+                    chain.recordError("video packet write failed: \(avErrorString(writeRet))")
+                    av_packet_unref(&encPkt)
+                    return
+                }
             }
             av_packet_unref(&encPkt)
         }
@@ -610,15 +690,33 @@ extension RigelHlsExporter {
         out: UnsafeMutablePointer<AVFormatContext>,
         outStream: UnsafeMutablePointer<AVStream>
     ) {
-        if avcodec_send_packet(chain.decCtx, nil) >= 0 {
+        let decoderFlushRet = avcodec_send_packet(chain.decCtx, nil)
+        if decoderFlushRet >= 0 {
             var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
-            defer { av_frame_free(&frame) }
-            while let decoded = frame, avcodec_receive_frame(chain.decCtx, decoded) >= 0 {
-                writeTranscodedVideoFrame(chain: chain, decoded: decoded, out: out, outStream: outStream)
+            guard frame != nil else {
+                chain.recordError("video decoder frame allocation failed")
+                return
             }
+            defer { av_frame_free(&frame) }
+            while let decoded = frame {
+                let receiveRet = avcodec_receive_frame(chain.decCtx, decoded)
+                if receiveRet >= 0 {
+                    writeTranscodedVideoFrame(chain: chain, decoded: decoded, out: out, outStream: outStream)
+                    continue
+                }
+                if !Self.isExpectedCodecDrainResult(receiveRet) {
+                    chain.recordError("video decoder receive failed: \(avErrorString(receiveRet))")
+                }
+                break
+            }
+        } else {
+            chain.recordError("video decoder flush failed: \(avErrorString(decoderFlushRet))")
         }
-        if avcodec_send_frame(chain.encCtx, nil) >= 0 {
-            drainEncodedVideo(chain: chain, out: out, outStream: outStream)
+        let encoderFlushRet = avcodec_send_frame(chain.encCtx, nil)
+        guard encoderFlushRet >= 0 else {
+            chain.recordError("video encoder flush failed: \(avErrorString(encoderFlushRet))")
+            return
         }
+        drainEncodedVideo(chain: chain, out: out, outStream: outStream)
     }
 }

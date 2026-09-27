@@ -8,7 +8,6 @@ import app.rigel.cast.ChromeDevice
 import app.rigel.cast.chrome.ChromecastBridgeFactory
 import app.rigel.settings.SettingsStore
 import app.rigel.source.jellyfin.JellyfinClient
-import app.rigel.source.jellyfin.JellyfinSession
 import app.rigel.output.canonicalIpAddress
 import io.ktor.client.HttpClient
 import io.ktor.http.Url
@@ -17,9 +16,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
@@ -28,6 +29,18 @@ data class DiscoveredDevice(
     val target: CastTarget,
     val via: String, // "ssdp" | "mdns" | "manual"
 )
+
+private sealed class DiscoveryResult(
+    val index: Int,
+    val target: CastTarget,
+    val via: String,
+    val sourceOrder: Int,
+) {
+    class Ssdp(index: Int, target: CastTarget) : DiscoveryResult(index, target, "ssdp", 0)
+    class Mdns(index: Int, target: CastTarget) : DiscoveryResult(index, target, "mdns", 1)
+    class Manual(index: Int, target: CastTarget) : DiscoveryResult(index, target, "manual", 2)
+    class Jellyfin(index: Int, target: CastTarget) : DiscoveryResult(index, target, "jellyfin", 3)
+}
 
 /**
  * Registry-driven discovery (SSDP + mDNS) with manual-IP fallback.
@@ -52,14 +65,6 @@ class DevicesRepository(
         val deadlineMs = timeoutMs.coerceAtLeast(0)
         if (deadlineMs == 0L) return@coroutineScope emptyList()
 
-        val found = mutableListOf<DiscoveredDevice>()
-        val identities = mutableSetOf<String>()
-        fun append(target: CastTarget, via: String) {
-            if (identities.add(canonicalTargetKey(target))) {
-                found += DiscoveredDevice(target, via)
-            }
-        }
-
         suspend fun <T> bestEffort(block: suspend () -> T): T? = try {
             block()
         } catch (error: CancellationException) {
@@ -68,81 +73,104 @@ class DevicesRepository(
             null
         }
 
-        val enrichmentSlots = Semaphore(ENRICHMENT_CONCURRENCY)
-        val ssdpWindowMs = (deadlineMs / 2).coerceAtLeast(1).coerceAtMost(Int.MAX_VALUE.toLong())
-        withTimeoutOrNull(deadlineMs) {
+        val results = supervisorScope {
+            val completed = Channel<DiscoveryResult>(Channel.UNLIMITED)
+            val enrichmentSlots = Semaphore(ENRICHMENT_CONCURRENCY)
+            val nativeSearchWindowMs = (deadlineMs / 2).coerceAtLeast(1).coerceAtMost(Int.MAX_VALUE.toLong())
             val ssdpTargets = ReceiverRegistry.adapters.flatMap { it.ssdpTargets }.distinct()
+
+            // Each worker publishes immutable result values through a channel. The
+            // collector drains it only after all workers have stopped, so no child
+            // mutates a result list owned by another dispatcher.
             val ssdpSearch = async {
-                bestEffort { Bridges.ssdpSearch(ssdpTargets, ssdpWindowMs.toInt()) }.orEmpty()
+                bestEffort { Bridges.ssdpSearch(ssdpTargets, nativeSearchWindowMs.toInt()) }
+                    .orEmpty()
+                    .mapNotNull(::validatedSsdp)
+                    .also { valid -> Logger.i(tag) { "SSDP found ${valid.size} devices" } }
+            }
+            val ssdpEnrichment = async {
+                val validSsdp = ssdpSearch.await()
+                val jobs = validSsdp.mapIndexed { index, device ->
+                    async {
+                        bestEffort {
+                            enrichmentSlots.withPermit {
+                                ReceiverRegistry.adapters.firstNotNullOfOrNull {
+                                    it.fromSsdp(device, enrichmentClient)
+                                }
+                            }
+                        }?.let { target ->
+                            completed.trySend(DiscoveryResult.Ssdp(index, target))
+                        }
+                    }
+                }
+                jobs.joinAll()
             }
             val mdnsSearch = async {
                 if (ChromecastBridgeFactory.current == null) {
-                    emptyList()
-                } else {
-                    bestEffort {
-                        discoverChromecast(deadlineMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
-                    }.orEmpty()
+                    return@async
+                }
+                bestEffort {
+                    discoverChromecast(nativeSearchWindowMs.toInt())
+                }.orEmpty().forEachIndexed { index, device ->
+                    completed.trySend(DiscoveryResult.Mdns(index, CastTarget.Chrome(device)))
                 }
             }
             val jellyfinSearch = async {
-                val service = jellyfin ?: return@async emptyList<JellyfinSession>()
+                val service = jellyfin ?: return@async
                 val base = settings.jellyfinServer().trim().trimEnd('/')
                 val token = settings.jellyfinToken()
                 val userId = settings.jellyfinUserId()
-                if (base.isEmpty() || token.isEmpty() || userId.isEmpty()) return@async emptyList()
-                bestEffort { service.sessions(base, token, userId) }.orEmpty()
+                if (base.isEmpty() || token.isEmpty() || userId.isEmpty()) return@async
+                bestEffort { service.sessions(base, token, userId) }.orEmpty().forEachIndexed { index, session ->
+                    completed.trySend(DiscoveryResult.Jellyfin(index, CastTarget.JellyfinSessionTarget(session)))
+                }
             }
-
-            val validSsdp = ssdpSearch.await().mapNotNull(::validatedSsdp)
-            Logger.i(tag) { "SSDP found ${validSsdp.size} devices" }
-
-            // Each child stores its completed result before joining. If the overall
-            // deadline cancels the join, completed enrichments are still published.
-            val ssdpTargetsFound = arrayOfNulls<CastTarget>(validSsdp.size)
-            val ssdpJobs = validSsdp.mapIndexed { index, device ->
-                async {
-                    ssdpTargetsFound[index] = bestEffort {
-                        enrichmentSlots.withPermit {
-                            ReceiverRegistry.adapters.firstNotNullOfOrNull {
-                                it.fromSsdp(device, enrichmentClient)
+            val manualSearch = async {
+                // Persisted manual rows start independently of SSDP; explicit manual
+                // hostnames remain valid and retain their spelling.
+                val manualRows = settings.manualDevices().mapNotNull { row ->
+                    validatedManualParts(row.split('|'))
+                }
+                val jobs = manualRows.mapIndexed { index, parts ->
+                    async {
+                        bestEffort {
+                            enrichmentSlots.withPermit {
+                                ReceiverRegistry.adapters.firstOrNull { it.kind == parts[0] }
+                                    ?.fromRow(parts, enrichmentClient)
                             }
+                        }?.let { target ->
+                            completed.trySend(DiscoveryResult.Manual(index, target))
                         }
                     }
                 }
-            }
-            try {
-                ssdpJobs.joinAll()
-            } finally {
-                ssdpTargetsFound.forEach { it?.let { target -> append(target, "ssdp") } }
+                jobs.joinAll()
             }
 
-            mdnsSearch.await().forEach { append(CastTarget.Chrome(it), "mdns") }
-
-            // Persisted manual rows; explicit manual hostnames are valid and retain
-            // their spelling, while numeric loopback/unspecified addresses are rejected.
-            val manualRows = settings.manualDevices().mapNotNull { row ->
-                val parts = row.split('|')
-                validatedManualParts(parts)
-            }
-            val manualTargets = arrayOfNulls<CastTarget>(manualRows.size)
-            val manualJobs = manualRows.mapIndexed { index, parts ->
-                async {
-                    manualTargets[index] = bestEffort {
-                        enrichmentSlots.withPermit {
-                            ReceiverRegistry.adapters.firstOrNull { it.kind == parts[0] }
-                                ?.fromRow(parts, enrichmentClient)
-                        }
-                    }
-                }
-            }
-            try {
-                manualJobs.joinAll()
-            } finally {
-                manualTargets.forEach { it?.let { target -> append(target, "manual") } }
+            val workers = listOf(ssdpSearch, ssdpEnrichment, mdnsSearch, jellyfinSearch, manualSearch)
+            val finished = withTimeoutOrNull(deadlineMs) {
+                workers.joinAll()
+                true
+            } == true
+            if (!finished) {
+                workers.forEach { it.cancel() }
+                workers.joinAll()
             }
 
-            jellyfinSearch.await().forEach { append(CastTarget.JellyfinSessionTarget(it), "jellyfin") }
+            completed.close()
+            val drained = mutableListOf<DiscoveryResult>()
+            for (result in completed) drained += result
+            drained
         }
+
+        val found = mutableListOf<DiscoveredDevice>()
+        val identities = mutableSetOf<String>()
+        fun append(target: CastTarget, via: String) {
+            if (identities.add(canonicalTargetKey(target))) {
+                found += DiscoveredDevice(target, via)
+            }
+        }
+        results.sortedWith(compareBy<DiscoveryResult> { it.sourceOrder }.thenBy { it.index })
+            .forEach { result -> append(result.target, result.via) }
         found
     }
 

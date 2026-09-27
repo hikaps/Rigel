@@ -2,6 +2,7 @@ package app.rigel.settings
 
 import app.rigel.cast.CastTarget
 import app.rigel.cast.ReceiverRegistry
+import app.rigel.intake.UrlIntake
 import com.russhwolf.settings.Settings
 
 enum class RouteOverride { AUTO, DIRECT, ALWAYS_PROXY }
@@ -208,7 +209,11 @@ class SettingsStore(
     }
 
     private fun isSensitiveHistoryQueryKey(key: String): Boolean =
-        key.trim().lowercase().replace("-", "").replace("_", "") in SENSITIVE_HISTORY_QUERY_KEYS
+        UrlIntake.percentDecode(key)
+            .trim()
+            .lowercase()
+            .replace("-", "")
+            .replace("_", "") in SENSITIVE_HISTORY_QUERY_KEYS
 
     private companion object {
         val SENSITIVE_HISTORY_QUERY_KEYS = setOf(

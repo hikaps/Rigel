@@ -63,7 +63,58 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertFalse(AirPlayRouteMonitor.routeChanged(currentIdentity: "airplay:route-1", routeId: "route-1"))
         XCTAssertTrue(AirPlayRouteMonitor.routeChanged(currentIdentity: "airplay:route-1", routeId: "route-2"))
     }
+    func testHistoryJellyfinRestorationRequiresExactOriginAndBasePath() {
+        let base = "https://media.example/jellyfin"
+        let history = "https://media.example/jellyfin/Videos/episode%2F1/stream?Static=true"
 
+        let match = HistoryPlaybackResolver.restoreJellyfin(
+            historyURL: history,
+            configuredBaseURL: base,
+            token: "current-token",
+            userId: "user-1"
+        )
+        XCTAssertEqual(match?.itemId, "episode/1")
+        XCTAssertEqual(match?.baseURL, base)
+        XCTAssertTrue(match?.playableURL.contains("api_key=current-token") == true)
+        XCTAssertFalse(match?.playableURL.contains("history-token") == true)
+
+        XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
+            historyURL: "https://media.example.attacker/jellyfin/Videos/item/stream?Static=true",
+            configuredBaseURL: base,
+            token: "current-token",
+            userId: "user-1"
+        ))
+        XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
+            historyURL: "https://media.example/jellyfin-evasion/Videos/item/stream?Static=true",
+            configuredBaseURL: base,
+            token: "current-token",
+            userId: "user-1"
+        ))
+    }
+
+    func testHistoryJellyfinRestorationBlocksMissingCredentialsWithoutChangingGenericURLs() {
+        let base = "https://media.example/jellyfin"
+        let history = "https://media.example/jellyfin/Videos/item/stream?Static=true"
+        XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
+            historyURL: history,
+            configuredBaseURL: base,
+            token: "",
+            userId: "user-1"
+        ))
+        XCTAssertTrue(HistoryPlaybackResolver.isLibraryStreamURL(history, configuredBaseURL: base))
+        XCTAssertFalse(HistoryPlaybackResolver.isLibraryStreamURL(
+            history,
+            configuredBaseURL: "https://other.example/jellyfin"
+        ))
+        XCTAssertFalse(HistoryPlaybackResolver.isLibraryStreamURL(
+            "https://cdn.example/Videos/item/stream",
+            configuredBaseURL: base
+        ))
+        XCTAssertFalse(HistoryPlaybackResolver.isLibraryStreamURL(
+            "https://media.example/media/movie.mp4",
+            configuredBaseURL: base
+        ))
+    }
     @MainActor
     func testPlayingStateMapsAndPresentsPlayer() {
         let model = PlayerModel()

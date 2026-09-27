@@ -20,7 +20,7 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 ## Sources
 
-- **Jellyfin** — connect to your server, browse and search the library, play on this device, or push a library item to a logged-in client session.
+- **Jellyfin** — connect to your server, browse and search the library, play on this device, or push a library item to a logged-in client session. The access token is stored in the iOS Keychain.
 
 ## Integrations
 
@@ -38,7 +38,7 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 Rigel is not on the App Store or TestFlight. The stable release is published from [`main`](https://github.com/hikaps/Rigel/releases) and the rolling beta is published from [`develop`](https://github.com/hikaps/Rigel/releases/tag/beta) as a separate **Rigel Beta** app, so both channels can be installed side by side.
 
-Rolling beta builds use the next intended stable version; the GitHub Actions run number is only their build identifier.
+Rolling beta versions use `<major>.<minor>.<GitHub run number>`, with the same run number as the build identifier, so AltStore and SideStore recognize each update.
 
 To receive stable and rolling beta updates through AltStore Classic or SideStore, add the source manifest:
 

@@ -58,6 +58,7 @@ class PlayerControllerTest {
     private var serverError: String? = null
     private var serverStopped = false
     private var lanBase: String? = null
+    private val probeUrls = mutableListOf<String>()
     private val stoppedSessions = mutableListOf<String>()
     private val hlsModes = mutableListOf<String>()
     private val hlsPassthroughAudioCodecs = mutableListOf<List<String>>()
@@ -72,11 +73,13 @@ class PlayerControllerTest {
     private fun controller(
         settings: SettingsStore = SettingsStore(MapSettings(mutableMapOf())),
         jellyfin: JellyfinClient? = null,
+        onSuccess: (String) -> Unit = {},
     ): PlayerController {
         RigelBridgeFactory.register(
             discovery = null,
             probe = object : ProbeBridge {
                 override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
+                    probeUrls += url
                     onResult(probeResult, probeError)
                     return object : ProbeOperation {
                         override fun cancel() = Unit
@@ -122,7 +125,7 @@ class PlayerControllerTest {
                 override fun lanBaseUrl(): String? = lanBase
             },
         )
-        return PlayerController(settings, jellyfin = jellyfin)
+        return PlayerController(settings, jellyfin = jellyfin, fireSuccess = onSuccess)
     }
 
     private val request = IntakeRequest(
@@ -157,6 +160,7 @@ class PlayerControllerTest {
         serverError = null
         serverStopped = false
         lanBase = null
+        probeUrls.clear()
         stoppedSessions.clear()
         hlsModes.clear()
         hlsPassthroughAudioCodecs.clear()
@@ -214,6 +218,9 @@ class PlayerControllerTest {
         val target = CastTarget.Dlna(
             DlnaDevice("invalid-load-1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
         )
+        val replacementTarget = CastTarget.Dlna(
+            DlnaDevice("invalid-load-2", "http://192.168.1.10/desc.xml", "Bedroom", "http://192.168.1.10/control"),
+        )
         CastDispatcher.install(c, client)
         try {
             c.loadRequest(request.copy(sourceUrl = "http://192.168.1.20/movie.mp4"), PlaybackDestination.Receiver(target))
@@ -227,10 +234,35 @@ class PlayerControllerTest {
 
             assertNull(CastDispatcher.activeTarget())
             assertTrue(actions.any { it.contains("#Stop") }, "actions=$actions")
+
+            val probesAfterInvalid = probeUrls.toList()
+            val actionsAfterInvalid = actions.toList()
+            c.selectReceiver(replacementTarget, positionMs = 0)
+            advanceUntilIdle()
+
+            assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+            assertTrue(c.uiState.value.error!!.contains("Unrecognized URL"))
+            assertNull(c.uiState.value.sourceUrl)
+            assertEquals(probesAfterInvalid, probeUrls)
+            assertEquals(actionsAfterInvalid, actions)
         } finally {
             CastDispatcher.clearActive()
             CastDispatcher.install(null, null)
         }
+    }
+
+    @Test
+    fun stoppingAfterInvalidLoadDoesNotFireSupersededSuccessCallback() = runTest(dispatcher.scheduler) {
+        val callbacks = mutableListOf<String>()
+        val c = controller(onSuccess = { callbacks += it })
+        c.loadRequest(request.copy(successCallbackUrl = "https://callback.example/done"))
+        advanceUntilIdle()
+
+        assertFalse(c.loadRaw("not a url"))
+        c.stopPlayback()
+        advanceUntilIdle()
+
+        assertTrue(callbacks.isEmpty())
     }
 
     @Test
@@ -1320,6 +1352,235 @@ class PlayerControllerTest {
             advanceUntilIdle()
 
             assertTrue(urls.any { it.endsWith("/keypress/Home") }, "urls=$urls")
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+    @Test
+    fun receiverProgressIsQueriedBeforeHandoff() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        val actions = mutableListOf<String>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val action = request.headers["SOAPACTION"] ?: ""
+                    actions += action
+                    if (action.contains("#GetPositionInfo")) {
+                        respond(
+                            "<RelTime>00:00:12</RelTime><TrackDuration>00:01:00</TrackDuration>",
+                            HttpStatusCode.OK,
+                        )
+                    } else {
+                        respond("<ok/>", HttpStatusCode.OK)
+                    }
+                }
+            }
+        }
+        val c = controller()
+        val target = CastTarget.Dlna(
+            DlnaDevice("handoff-r1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+        )
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(
+                request.copy(sourceUrl = "http://192.168.1.20/movie.mp4"),
+                PlaybackDestination.Receiver(target),
+            )
+            advanceUntilIdle()
+            assertTrue(c.uiState.value.remotePlayback)
+
+            c.selectLocal(positionMs = 0)
+            advanceUntilIdle()
+
+            assertEquals(12_000L, c.uiState.value.startPositionMs)
+            assertFalse(c.uiState.value.remotePlayback)
+            assertNull(CastDispatcher.activeTarget())
+            val positionIndex = actions.indexOfFirst { it.contains("#GetPositionInfo") }
+            val stopIndex = actions.indexOfFirst { it.contains("#Stop") }
+            assertTrue(positionIndex >= 0 && positionIndex < stopIndex, "actions=$actions")
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
+    fun proxyReceiverProgressAddsSourceStartOffsetBeforeHandoff() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        lanBase = "http://192.168.1.50:8090"
+        val actions = mutableListOf<String>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val action = request.headers["SOAPACTION"] ?: ""
+                    actions += action
+                    if (action.contains("#GetPositionInfo")) {
+                        respond(
+                            "<RelTime>00:00:03</RelTime><TrackDuration>00:01:00</TrackDuration>",
+                            HttpStatusCode.OK,
+                        )
+                    } else {
+                        respond("<ok/>", HttpStatusCode.OK)
+                    }
+                }
+            }
+        }
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY")))
+        val c = controller(settings)
+        val target = CastTarget.Dlna(
+            DlnaDevice("handoff-proxy-1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+        )
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(
+                request.copy(sourceUrl = "http://192.168.1.20/movie.mp4"),
+                PlaybackDestination.Receiver(target),
+            )
+            advanceUntilIdle()
+            c.seek(20_000, 60_000)
+            advanceUntilIdle()
+
+            c.selectLocal(positionMs = 0)
+            advanceUntilIdle()
+
+            assertEquals(23_000L, c.uiState.value.startPositionMs)
+            assertEquals(23_000L, hlsOffsets.last())
+            assertTrue(actions.any { it.contains("#GetPositionInfo") })
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
+    fun receiverPositionQueryCannotResurrectAfterNewLoad() = runTest(dispatcher.scheduler) {
+        probeResult = ProbeResult(
+            "mp4",
+            "h264",
+            listOf("aac"),
+            emptyList(),
+            60_000,
+            isLive = false,
+            pixFmt = "yuv420p",
+            width = 1280,
+            height = 720,
+            videoLevel = 40,
+            frameRate = 24.0,
+        )
+        val positionGate = CompletableDeferred<Unit>()
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    val action = request.headers["SOAPACTION"] ?: ""
+                    if (action.contains("#GetPositionInfo")) {
+                        positionGate.await()
+                        respond(
+                            "<RelTime>00:00:45</RelTime><TrackDuration>00:01:00</TrackDuration>",
+                            HttpStatusCode.OK,
+                        )
+                    } else {
+                        respond("<ok/>", HttpStatusCode.OK)
+                    }
+                }
+            }
+        }
+        val c = controller()
+        val target = CastTarget.Dlna(
+            DlnaDevice("handoff-race-1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+        )
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(
+                request.copy(sourceUrl = "http://192.168.1.20/old.mp4"),
+                PlaybackDestination.Receiver(target),
+            )
+            advanceUntilIdle()
+
+            c.selectLocal(positionMs = 0)
+            advanceUntilIdle()
+            c.loadRequest(request.copy(sourceUrl = "http://h/new.mp4"), PlaybackDestination.Local)
+            positionGate.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals("http://h/new.mp4", c.uiState.value.sourceUrl)
+            assertEquals(PlaybackDestination.Local.kind, c.uiState.value.destinationKind)
+            assertEquals(0L, c.uiState.value.startPositionMs)
+            assertNull(CastDispatcher.activeTarget())
+        } finally {
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
+    fun nativePlayheadIsUsedForDirectDecoderFallback() = runTest(dispatcher.scheduler) {
+        val c = controller()
+        c.loadRequest(request)
+        advanceUntilIdle()
+
+        c.reportError("decoder failure", nativePositionMs = 27_500)
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(27_500L, c.uiState.value.startPositionMs)
+        assertEquals(27_500L, hlsOffsets.single())
+    }
+    @Test
+    fun unsupportedReceiverPositionUsesCallerFallback() = runTest(dispatcher.scheduler) {
+        val engineDispatcher = dispatcher
+        val client = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { respond("<ok/>", HttpStatusCode.OK) }
+            }
+        }
+        val c = controller()
+        val target = CastTarget.Dlna(
+            DlnaDevice("handoff-null-1", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+        )
+        CastDispatcher.install(c, client)
+        try {
+            c.loadRequest(
+                request.copy(sourceUrl = "http://192.168.1.20/movie.mp4"),
+                PlaybackDestination.Receiver(target),
+            )
+            advanceUntilIdle()
+            c.selectLocal(positionMs = 17_000)
+            advanceUntilIdle()
+
+            assertEquals(17_000L, c.uiState.value.startPositionMs)
+            assertNull(CastDispatcher.activeTarget())
         } finally {
             CastDispatcher.clearActive()
             CastDispatcher.install(null, null)

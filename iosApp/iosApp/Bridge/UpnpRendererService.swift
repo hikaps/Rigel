@@ -300,14 +300,20 @@ final class UpnpRendererService {
 
     private func receiveRequest(_ connection: NWConnection) {
         guard let state = connectionStates[ObjectIdentifier(connection)], !state.processing else { return }
+        // EOF only prevents future reads. Complete frames already buffered
+        // by the final receive still need to be served in order.
         switch state.framer.next() {
         case .frame(let frame):
             state.cancelTimer()
             state.processing = true
-            respond(connection: connection, frame: frame, halfClosed: state.inputClosed)
+            respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
         case .invalid:
             closeOnQueue(connection)
         case .needMore:
+            if state.inputClosed {
+                closeOnQueue(connection)
+                return
+            }
             if state.timer == nil {
                 scheduleTimeout(state, connection: connection, interval: Self.headerTimeout)
             }
@@ -319,23 +325,23 @@ final class UpnpRendererService {
                         self.closeOnQueue(connection)
                         return
                     }
+                    if isComplete { state.inputClosed = true }
                     if let data, !data.isEmpty {
                         switch state.framer.append(data) {
                         case .frame(let frame):
                             state.cancelTimer()
                             state.processing = true
-                            state.inputClosed = isComplete
-                            self.respond(connection: connection, frame: frame, halfClosed: isComplete)
+                            self.respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
                         case .invalid:
                             self.closeOnQueue(connection)
                         case .needMore:
-                            if isComplete {
+                            if state.inputClosed && !state.framer.hasBufferedData {
                                 self.closeOnQueue(connection)
                             } else {
                                 self.receiveRequest(connection)
                             }
                         }
-                    } else if isComplete {
+                    } else if state.inputClosed {
                         self.closeOnQueue(connection)
                     } else {
                         self.receiveRequest(connection)
@@ -358,6 +364,17 @@ final class UpnpRendererService {
         }
         let method = String(parts[0])
         let path = String(parts[1])
+        let requestWantsClose = head
+            .components(separatedBy: "\r\n")
+            .dropFirst()
+            .contains { headerLine in
+                guard let separator = headerLine.firstIndex(of: ":") else { return false }
+                let name = headerLine[..<separator].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = headerLine[headerLine.index(after: separator)...].lowercased()
+                return name == "connection" && value.split(separator: ",").contains {
+                    $0.trimmingCharacters(in: .whitespaces) == "close"
+                }
+            }
         let body: String
         let status: String
         switch (method, path) {
@@ -380,7 +397,7 @@ final class UpnpRendererService {
             send(body: "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", connection: connection, keepAlive: false)
             return
         }
-        let keepAlive = halfClosed == false
+        let keepAlive = !halfClosed && !requestWantsClose
         let response = "HTTP/1.1 \(status)\r\n" +
             "Content-Type: text/xml; charset=\"utf-8\"\r\n" +
             "Content-Length: \(body.utf8.count)\r\n" +
@@ -389,6 +406,9 @@ final class UpnpRendererService {
     }
 
     private func send(body: String, connection: NWConnection, keepAlive: Bool) {
+        if let state = connectionStates[ObjectIdentifier(connection)] {
+            scheduleTimeout(state, connection: connection, interval: Self.idleTimeout)
+        }
         let data = Data(body.utf8)
         connection.send(content: data, completion: .contentProcessed { [weak self] error in
             guard let self, error == nil else {
@@ -400,9 +420,12 @@ final class UpnpRendererService {
     }
 
     private func finish(_ connection: NWConnection, keepAlive: Bool) {
-        guard let state = connectionStates[ObjectIdentifier(connection)] else { return }
+        guard let state = connectionStates[ObjectIdentifier(connection)] else {
+            closeOnQueue(connection)
+            return
+        }
         state.processing = false
-        if keepAlive && !state.inputClosed {
+        if keepAlive {
             scheduleTimeout(state, connection: connection, interval: Self.idleTimeout)
             receiveRequest(connection)
         } else {

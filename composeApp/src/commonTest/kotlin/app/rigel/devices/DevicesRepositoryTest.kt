@@ -10,6 +10,7 @@ import app.rigel.cast.KodiDevice
 import app.rigel.cast.chrome.ChromecastBridge
 import app.rigel.cast.chrome.ChromecastBridgeFactory
 import app.rigel.settings.SettingsStore
+import app.rigel.source.jellyfin.JellyfinClient
 import com.russhwolf.settings.MapSettings
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -53,8 +54,20 @@ class DevicesRepositoryTest {
     }
 
     private class FakeChromecastBridge(var devices: List<ChromeDevice> = emptyList()) : ChromecastBridge {
+        var completeAfterRequestedTimeout = false
+        var completionScope: CoroutineScope? = null
+
         override fun discover(timeoutMs: Int, onResult: (List<ChromeDevice>) -> Unit) {
-            onResult(devices)
+            val delayed = completeAfterRequestedTimeout
+            completeAfterRequestedTimeout = false
+            if (delayed) {
+                checkNotNull(completionScope) { "completionScope required for delayed fake mDNS" }.launch {
+                    delay(timeoutMs.toLong() + 1L)
+                    onResult(devices)
+                }
+            } else {
+                onResult(devices)
+            }
         }
 
         override fun open(
@@ -91,10 +104,11 @@ class DevicesRepositoryTest {
         engine: MockEngine,
         settings: SettingsStore,
         chrome: ChromecastBridge? = null,
+        jellyfin: JellyfinClient? = null,
     ): DevicesRepository {
         ChromecastBridgeFactory.register(chrome)
         RigelBridgeFactory.register(discovery = discovery, probe = null, transcode = null, httpServer = null)
-        return DevicesRepository(HttpClient(engine), settings)
+        return DevicesRepository(HttpClient(engine), settings, jellyfin)
     }
     private fun TestScope.mockEngine(
         handler: suspend io.ktor.client.engine.mock.MockRequestHandleScope.(
@@ -318,6 +332,61 @@ class DevicesRepositoryTest {
         assertEquals(listOf("http://10.0.0.8:8060/"), found.map {
             (it.target as CastTarget.Roku).device.location
         })
+    }
+
+    @Test
+    fun scanRetainsCompletedParallelSourcesAtDeadline() = kotlinx.coroutines.test.runTest {
+        discovery.devices = listOf(
+            SsdpDevice("slow", "http://10.0.0.7:8060/", "Roku", "roku:ecp"),
+        )
+        val settings = SettingsStore(MapSettings(mutableMapOf()))
+        settings.addManualDevice("roku|manual|http://10.0.0.8:8060/|Roku")
+        settings.setJellyfinServer("http://jellyfin:8096")
+        settings.setJellyfinToken("token")
+        settings.setJellyfinUserId("user")
+        val engine = mockEngine { request ->
+            when {
+                request.url.host == "10.0.0.7" -> {
+                    delay(250)
+                    respond(deviceInfoXml, HttpStatusCode.OK)
+                }
+                request.url.encodedPath == "/Sessions" -> respond(
+                    """[{"Id":"session-1","DeviceName":"Living Room","Client":"Jellyfin TV","SupportsMediaControl":true}]""",
+                    HttpStatusCode.OK,
+                )
+                else -> respond(deviceInfoXml, HttpStatusCode.OK)
+            }
+        }
+        val found = repo(
+            engine = engine,
+            settings = settings,
+            chrome = FakeChromecastBridge(listOf(ChromeDevice("chrome-1", "192.168.1.50", 8009, "Living Room"))),
+            jellyfin = JellyfinClient(HttpClient(engine)),
+        ).scan(timeoutMs = 100)
+
+        assertEquals(listOf("mdns", "manual", "jellyfin"), found.map { it.via })
+        assertEquals("chrome-1", (found[0].target as CastTarget.Chrome).device.id)
+        assertEquals("http://10.0.0.8:8060/", (found[1].target as CastTarget.Roku).device.location)
+        assertEquals("session-1", (found[2].target as CastTarget.JellyfinSessionTarget).session.id)
+    }
+
+    @Test
+    fun scanRetainsMdnsCallbackBeforeOverallDeadline() = kotlinx.coroutines.test.runTest {
+        discovery.devices = emptyList()
+        val chrome = FakeChromecastBridge(
+            listOf(ChromeDevice("delayed-chrome", "192.168.1.51", 8009, "Delayed Chromecast")),
+        )
+        chrome.completeAfterRequestedTimeout = true
+        chrome.completionScope = this
+
+        val found = repo(
+            engine = mockEngine { respond("", HttpStatusCode.NotFound) },
+            settings = SettingsStore(MapSettings(mutableMapOf())),
+            chrome = chrome,
+        ).scan(timeoutMs = 100)
+
+        assertEquals(listOf("mdns"), found.map { it.via })
+        assertEquals("delayed-chrome", (found.single().target as CastTarget.Chrome).device.id)
     }
 
     @Test

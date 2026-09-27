@@ -120,8 +120,8 @@ object UrlIntake {
         if (callbackUrl.isNullOrBlank()) return
         successScope.launch {
             runCatching { client.get(callbackUrl) }
-                .onSuccess { Logger.i(TAG) { "x-success fired: $callbackUrl (${it.status})" } }
-                .onFailure { Logger.w(TAG, it) { "x-success failed: $callbackUrl" } }
+                .onSuccess { Logger.i(TAG) { "x-success fired (${it.status})" } }
+                .onFailure { Logger.w(TAG) { "x-success failed" } }
         }
     }
 }

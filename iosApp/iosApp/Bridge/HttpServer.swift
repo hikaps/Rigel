@@ -20,6 +20,8 @@ struct RigelHTTPFramer {
     }
 
     private var buffer = Data()
+    /// Whether unread bytes remain after the last complete frame.
+    var hasBufferedData: Bool { !buffer.isEmpty }
 
     init() {}
 
@@ -110,6 +112,7 @@ final class RigelHttpServer {
     private let queueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
     private var portValue: Int?
+    private var pendingStartCallbacks: [(Int32?, String?) -> Void] = []
     private static let maxConnections = 32
     private static let headerTimeout: DispatchTimeInterval = .seconds(10)
     private static let idleTimeout: DispatchTimeInterval = .seconds(30)
@@ -131,6 +134,17 @@ final class RigelHttpServer {
         stateLock.lock()
         portValue = value
         stateLock.unlock()
+    }
+    private func resolveStartCallbacksOnQueue(port: Int32?, error: String?) {
+        let callbacks = pendingStartCallbacks
+        pendingStartCallbacks.removeAll()
+        for callback in callbacks {
+            if Thread.isMainThread {
+                callback(port, error)
+            } else {
+                DispatchQueue.main.async { callback(port, error) }
+            }
+        }
     }
 
     static func proxyRootURL() -> URL {
@@ -234,7 +248,15 @@ final class RigelHttpServer {
     }
 
     private func startOnQueue(onStarted: @escaping (Int32?, String?) -> Void) {
-        guard listener == nil else { return }
+        if let currentPort = portValue, listener != nil {
+            DispatchQueue.main.async { onStarted(Int32(currentPort), nil) }
+            return
+        }
+        if listener != nil {
+            pendingStartCallbacks.append(onStarted)
+            return
+        }
+        pendingStartCallbacks.append(onStarted)
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         do {
@@ -246,32 +268,33 @@ final class RigelHttpServer {
             newListener.stateUpdateHandler = { [weak self, weak newListener] state in
                 self?.queue.async { [weak self, weak newListener] in
                     guard let self, let newListener else { return }
-                    self.listenerStateOnQueue(newListener, state: state, onStarted: onStarted)
+                    self.listenerStateOnQueue(newListener, state: state)
                 }
             }
             newListener.start(queue: queue)
         } catch {
-            DispatchQueue.main.async { onStarted(nil, error.localizedDescription) }
+            listener = nil
+            setPort(nil)
+            resolveStartCallbacksOnQueue(port: nil, error: error.localizedDescription)
         }
     }
 
     private func listenerStateOnQueue(
         _ candidate: NWListener,
-        state: NWListener.State,
-        onStarted: @escaping (Int32?, String?) -> Void
+        state: NWListener.State
     ) {
         guard listener === candidate else { return }
         switch state {
         case .ready:
             let readyPort = Int(candidate.port?.rawValue ?? 0)
             setPort(readyPort)
-            DispatchQueue.main.async { onStarted(Int32(readyPort), nil) }
+            resolveStartCallbacksOnQueue(port: Int32(readyPort), error: nil)
         case .failed(let error):
             candidate.cancel()
             listener = nil
             setPort(nil)
             closeAllConnectionsOnQueue()
-            DispatchQueue.main.async { onStarted(nil, error.localizedDescription) }
+            resolveStartCallbacksOnQueue(port: nil, error: error.localizedDescription)
         default:
             break
         }
@@ -284,12 +307,12 @@ final class RigelHttpServer {
             queue.sync { self.stopOnQueue() }
         }
     }
-
     private func stopOnQueue() {
         listener?.cancel()
         listener = nil
         setPort(nil)
         closeAllConnectionsOnQueue()
+        resolveStartCallbacksOnQueue(port: nil, error: "HTTP server stopped")
     }
 
     private func closeAllConnectionsOnQueue() {
@@ -350,14 +373,23 @@ final class RigelHttpServer {
 
     private func receiveRequest(_ connection: NWConnection) {
         guard let state = connectionStates[ObjectIdentifier(connection)], !state.processing else { return }
+        // Drain every complete frame already buffered before touching the
+        // socket again; EOF (inputClosed) only prevents future reads.
         switch state.framer.next() {
         case .frame(let frame):
             state.cancelTimer()
             state.processing = true
-            respond(connection: connection, frame: frame, halfClosed: state.inputClosed)
+            // A frame is the last one this connection can carry only when the
+            // peer half-closed AND no pipelined bytes remain buffered.
+            respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
         case .invalid:
             closeOnQueue(connection)
         case .needMore:
+            if state.inputClosed {
+                // EOF with an incomplete frame: nothing more can arrive.
+                closeOnQueue(connection)
+                return
+            }
             if state.timer == nil {
                 scheduleTimeout(state, connection: connection, interval: Self.headerTimeout)
             }
@@ -369,23 +401,23 @@ final class RigelHttpServer {
                         self.closeOnQueue(connection)
                         return
                     }
+                    if isComplete { state.inputClosed = true }
                     if let data, !data.isEmpty {
                         switch state.framer.append(data) {
                         case .frame(let frame):
                             state.cancelTimer()
                             state.processing = true
-                            state.inputClosed = isComplete
-                            self.respond(connection: connection, frame: frame, halfClosed: isComplete)
+                            self.respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
                         case .invalid:
                             self.closeOnQueue(connection)
                         case .needMore:
-                            if isComplete {
+                            if state.inputClosed && !state.framer.hasBufferedData {
                                 self.closeOnQueue(connection)
                             } else {
                                 self.receiveRequest(connection)
                             }
                         }
-                    } else if isComplete {
+                    } else if state.inputClosed {
                         self.closeOnQueue(connection)
                     } else {
                         self.receiveRequest(connection)
@@ -452,6 +484,9 @@ final class RigelHttpServer {
     }
 
     private func sendSimple(_ connection: NWConnection, status: String, extraHeaders: String, body: Data, keepAlive: Bool) {
+        if let state = connectionStates[ObjectIdentifier(connection)] {
+            scheduleTimeout(state, connection: connection, interval: Self.idleTimeout)
+        }
         let head = "HTTP/1.1 \(status)\r\n" +
             "Content-Length: \(body.count)\r\n" + extraHeaders +
             "Connection: \(keepAlive ? "keep-alive" : "close")\r\n\r\n"
@@ -470,6 +505,9 @@ final class RigelHttpServer {
 
     /// Sends the header block, then streams body (nil for HEAD responses).
     private func sendHead(_ connection: NWConnection, head: String, body: (file: FileHandle, remaining: Int64)?, keepAlive: Bool) {
+        if let state = connectionStates[ObjectIdentifier(connection)] {
+            scheduleTimeout(state, connection: connection, interval: Self.idleTimeout)
+        }
         connection.send(content: Data(head.utf8), completion: .contentProcessed { [weak self] error in
             guard error == nil else {
                 try? body?.file.close()
@@ -485,6 +523,9 @@ final class RigelHttpServer {
     }
 
     private func sendChunk(_ connection: NWConnection, file: FileHandle, remaining: Int64, keepAlive: Bool) {
+        if let state = connectionStates[ObjectIdentifier(connection)] {
+            scheduleTimeout(state, connection: connection, interval: Self.idleTimeout)
+        }
         let data = file.readData(ofLength: Int(min(Int64(Self.chunkSize), remaining)))
         guard !data.isEmpty else {
             try? file.close()
@@ -508,9 +549,12 @@ final class RigelHttpServer {
     }
 
     private func finish(_ connection: NWConnection, keepAlive: Bool) {
-        guard let state = connectionStates[ObjectIdentifier(connection)] else { return }
+        guard let state = connectionStates[ObjectIdentifier(connection)] else {
+            closeOnQueue(connection)
+            return
+        }
         state.processing = false
-        if keepAlive && !state.inputClosed {
+        if keepAlive {
             scheduleTimeout(state, connection: connection, interval: Self.idleTimeout)
             receiveRequest(connection)
         } else {
