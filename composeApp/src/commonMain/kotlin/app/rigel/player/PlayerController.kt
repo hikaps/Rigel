@@ -29,6 +29,7 @@ import app.rigel.settings.RouteOverride
 import app.rigel.settings.SettingsStore
 import app.rigel.source.jellyfin.JellyfinApi
 import app.rigel.source.jellyfin.JellyfinClient
+import app.rigel.source.jellyfin.JellyfinRequestException
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -311,8 +312,11 @@ class PlayerController(
         _uiState.value = _uiState.value.copy(castActive = active)
     }
 
+    private fun requiresCredentialSafeCastProxy(request: IntakeRequest): Boolean =
+        request.jellyfinContext != null || JellyfinApi.isTokenizedJellyfinStream(request.sourceUrl)
     override fun remoteCastUrl(): String? {
         val state = _uiState.value
+        if (currentRequest?.let(::requiresCredentialSafeCastProxy) == true && state.proxyUrl == null) return null
         return CastDispatcher.remoteCastUrl(
             isPlaying = state.phase == PlayerPhase.PLAYING,
             proxyUrl = state.proxyUrl,
@@ -322,6 +326,7 @@ class PlayerController(
 
     override fun remoteCastTitle(): String {
         val state = _uiState.value
+        if (currentRequest?.let(::requiresCredentialSafeCastProxy) == true) return state.title ?: "Stream"
         return CastDispatcher.remoteCastTitle(state.filename, state.sourceUrl)
     }
 
@@ -594,7 +599,41 @@ class PlayerController(
                 context.mediaSourceId,
             )
         } catch (cancelled: CancellationException) {
+            if (isCurrent(generation)) {
+                _uiState.value = _uiState.value.copy(
+                    phase = PlayerPhase.IDLE,
+                    route = null,
+                    proxyUrl = null,
+                    remotePlayback = false,
+                    castActive = false,
+                    error = null,
+                )
+                pendingJob = null
+            }
             throw cancelled
+        } catch (requestFailure: JellyfinRequestException) {
+            if (!isCurrent(generation)) return
+            val currentAccount = requestFailure.statusCode == 401 &&
+                JellyfinApi.normalizeServerBase(settings.jellyfinServer()) == requestBase &&
+                settings.jellyfinToken() == context.token && settings.jellyfinUserId() == context.userId
+            if (currentAccount) {
+                settings.setJellyfinToken("")
+                outputSelection.clearJellyfinServer(requestBase)
+            }
+            val error = when {
+                currentAccount -> "Jellyfin session expired. Sign in again."
+                requestFailure.statusCode == 403 -> "You do not have permission to start this item on " + target.name
+                else -> "Jellyfin request failed (" + requestFailure.statusCode + ")"
+            }
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                route = null,
+                proxyUrl = null,
+                remotePlayback = false,
+                castActive = false,
+                error = error,
+            )
+            return
         } catch (_: Exception) {
             false
         }
@@ -650,7 +689,8 @@ class PlayerController(
         }
         currentOutputProfile = profile
         val remoteTarget = (destination as? PlaybackDestination.Receiver)?.target
-        val remoteReachable = remoteTarget == null || RemoteUrlPolicy.isReceiverFetchable(request.sourceUrl, profile)
+        val remoteReachable = remoteTarget == null ||
+            (!requiresCredentialSafeCastProxy(request) && RemoteUrlPolicy.isReceiverFetchable(request.sourceUrl, profile))
         val hasSelectedExternalSubtitle = _uiState.value.selectedExternalSubtitleUrl != null
         val routeDecision = FormatRouter.decide(
             probe = probe,

@@ -66,21 +66,31 @@ final class JellyfinAsyncTests: XCTestCase {
     }
 
     func testCancelBeforeInstallResumesImmediately() async throws {
+        let bodyInvoked = DispatchSemaphore(value: 0)
+        let reachedInstall = DispatchSemaphore(value: 0)
+        let allowInstall = DispatchSemaphore(value: 0)
         let task = Task<Int, Error> {
-            try await JellyfinAsync.run { completion in
+            reachedInstall.signal()
+            allowInstall.wait()
+            return try await JellyfinAsync.run { completion in
+                bodyInvoked.signal()
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
                     completion(5, nil)
                 }
-            }
+            } as Int
         }
-        // Cancel before the task body runs; install() must resume at once.
+        XCTAssertEqual(reachedInstall.wait(timeout: .now() + 1), .success)
         task.cancel()
+        allowInstall.signal()
         do {
             _ = try await task.value
             XCTFail("expected CancellationError")
         } catch is CancellationError {
         } catch {
             XCTFail("unexpected error type: \(error)")
+        }
+        if bodyInvoked.wait(timeout: .now() + 0.05) == .success {
+            XCTFail("the request body must not start when cancellation wins before install")
         }
     }
 }

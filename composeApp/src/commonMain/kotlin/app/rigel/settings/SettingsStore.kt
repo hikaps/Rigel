@@ -3,6 +3,7 @@ package app.rigel.settings
 import app.rigel.cast.CastTarget
 import app.rigel.cast.ReceiverRegistry
 import app.rigel.intake.UrlIntake
+import app.rigel.source.jellyfin.JellyfinApi
 import com.russhwolf.settings.Settings
 
 enum class RouteOverride { AUTO, DIRECT, ALWAYS_PROXY }
@@ -120,7 +121,7 @@ class SettingsStore(
     }
 
     fun addToLinkHistory(url: String, title: String?) {
-        if (isTokenizedJellyfinStream(url)) return
+        if (JellyfinApi.isTokenizedJellyfinStream(url)) return
         val sanitizedUrl = sanitizeHistoryUrl(url)
         if (sanitizedUrl.isEmpty()) return
         val sanitizedTitle = title
@@ -162,7 +163,7 @@ class SettingsStore(
             .split('\n')
             .filter { it.isNotBlank() }
             .map(::parseHistoryRow)
-            .filterNot { isTokenizedJellyfinStream(it.url) }
+            .filterNot { JellyfinApi.isTokenizedJellyfinStream(it.url) }
             .map { it.copy(url = sanitizeHistoryUrl(it.url)) }
             .filter { it.url.isNotEmpty() }
 
@@ -238,9 +239,4 @@ class SettingsStore(
         )
     }
 
-    private fun isTokenizedJellyfinStream(url: String): Boolean {
-        val path = url.substringBefore('?')
-        if (!path.contains("/Videos/") || !path.endsWith("/stream")) return false
-        return url.substringAfter('?', "").split('&').any { it.substringBefore('=') == "api_key" }
-    }
 }

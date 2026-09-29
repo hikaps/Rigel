@@ -66,6 +66,14 @@ class JellyfinApiTest {
     }
 
     @Test
+    fun tokenizedJellyfinStreamDetectionRequiresItsRouteAndApiKey() {
+        assertTrue(JellyfinApi.isTokenizedJellyfinStream("https://jf/Videos/i1/stream?Static=true&api_key=secret"))
+        assertTrue(JellyfinApi.isTokenizedJellyfinStream("https://jf/Videos/i1/stream?Static=true&api%5Fkey=secret"))
+        assertTrue(JellyfinApi.isTokenizedJellyfinStream("https://jf/Videos/i1/stream?Static=true&API_KEY=secret"))
+        assertTrue(!JellyfinApi.isTokenizedJellyfinStream("https://jf/Videos/i1/stream?Static=true"))
+        assertTrue(!JellyfinApi.isTokenizedJellyfinStream("https://jf/Items/i1?api_key=secret"))
+    }
+    @Test
     fun playUrlEncodesSessionItemsAndParameters() {
         assertEquals(
             "http://jf:8096/Sessions/s%2F1/Playing?playCommand=PlayNow&itemIds=a%20b,c%2Fd&startPositionTicks=42",
@@ -129,7 +137,7 @@ class JellyfinApiTest {
     @Test
     fun itemDetailsUrlUsesCurrentItemRouteAndEncodesIdentifiers() {
         assertEquals(
-            "https://jf/proxy/Items/item%2F1?UserId=user%2F1",
+            "https://jf/proxy/Items/item%2F1?UserId=user%2F1&Fields=MediaStreams,MediaSources",
             JellyfinApi.itemDetailsUrl("https://jf/proxy/", "user/1", "item/1"),
         )
     }

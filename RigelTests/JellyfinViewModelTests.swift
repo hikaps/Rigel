@@ -36,14 +36,20 @@ private final class ControlledJellyfin: JellyfinServing {
     private(set) var searchRequests: [SearchRequest] = []
     private(set) var browseRequests: [(parentId: String?, startIndex: Int32, order: JellyfinBrowseOrder)] = []
     var browsePages: [String: JellyfinItemPage] = [:]
-    private var pendingSearches: [String: CheckedContinuation<JellyfinItemPage, Error>] = [:]
+    var browseError: Error?
+    private var pendingSearches: [Int: CheckedContinuation<JellyfinItemPage, Error>] = [:]
     private(set) var mediaSourceRequests: [String] = []
     private var pendingMediaSources: [String: CheckedContinuation<[JellyfinMediaSource], Error>] = [:]
     private var pendingAuthentication: [String: CheckedContinuation<JellyfinAuth?, Never>] = [:]
     private var authenticationWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    var authenticationError: Error?
     var authenticationPending: Bool { !pendingAuthentication.isEmpty }
-    func authenticateAsync(base: String, username: String, password: String, deviceId: String) async -> JellyfinAuth? {
-        await withCheckedContinuation { continuation in
+    func authenticateAsync(base: String, username: String, password: String, deviceId: String) async throws -> JellyfinAuth? {
+        if let error = authenticationError {
+            authenticationError = nil
+            throw error
+        }
+        return await withCheckedContinuation { continuation in
             pendingAuthentication[base] = continuation
             let waiters = authenticationWaiters.removeValue(forKey: base) ?? []
             waiters.forEach { $0.resume() }
@@ -60,6 +66,7 @@ private final class ControlledJellyfin: JellyfinServing {
         order: JellyfinBrowseOrder
     ) async throws -> JellyfinItemPage {
         browseRequests.append((parentId, startIndex, order))
+        if let browseError { throw browseError }
         return browsePages[parentId ?? "<root>"] ?? JellyfinItemPage(
             items: [], totalRecordCount: nil, startIndex: startIndex, receivedCount: 0
         )
@@ -74,10 +81,10 @@ private final class ControlledJellyfin: JellyfinServing {
         startIndex: Int32,
         limit: Int32
     ) async throws -> JellyfinItemPage {
-        let key = "\(term)|\(startIndex)"
+        let requestId = searchRequests.count
         searchRequests.append(SearchRequest(term: term, filter: filter, startIndex: startIndex, limit: limit))
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<JellyfinItemPage, Error>) in
-            pendingSearches[key] = continuation
+            pendingSearches[requestId] = continuation
         }
     }
     func itemMediaSourcesAsync(base: String, token: String, userId: String, itemId: String) async throws -> [JellyfinMediaSource] {
@@ -87,11 +94,14 @@ private final class ControlledJellyfin: JellyfinServing {
         }
     }
 
-    func resolveSearch(term: String, startIndex: Int32, page: JellyfinItemPage) {
-        pendingSearches.removeValue(forKey: "\(term)|\(startIndex)")?.resume(returning: page)
+    func resolveSearch(term: String, filter: JellyfinSearchFilter = .all, startIndex: Int32, page: JellyfinItemPage) {
+        guard let requestId = searchRequests.lastIndex(where: { $0.term == term && $0.filter == filter && $0.startIndex == startIndex }) else { return }
+        pendingSearches.removeValue(forKey: requestId)?.resume(returning: page)
     }
-    func failSearch(term: String, startIndex: Int32, error: Error = CancellationError()) {
-        pendingSearches.removeValue(forKey: "\(term)|\(startIndex)")?.resume(throwing: error)
+
+    func failSearch(term: String, filter: JellyfinSearchFilter = .all, startIndex: Int32, error: Error = CancellationError()) {
+        guard let requestId = searchRequests.lastIndex(where: { $0.term == term && $0.filter == filter && $0.startIndex == startIndex }) else { return }
+        pendingSearches.removeValue(forKey: requestId)?.resume(throwing: error)
     }
     func resolveMediaSources(itemId: String, sources: [JellyfinMediaSource]) {
         pendingMediaSources.removeValue(forKey: itemId)?.resume(returning: sources)
@@ -349,6 +359,35 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertEqual(model.searchResults.map(\.id), ["new"])
     }
 
+    func testChangingFilterForSameInFlightTermKeepsOnlyNewFilterResults() async {
+        let service = ControlledJellyfin()
+        let gate = SearchDelayGate()
+        let (model, settings, saved, destination) = connectedModel(service) { delay in try await gate.wait(delay) }
+        defer {
+            gate.releaseAll()
+            restore(model: model, service: service, settings: settings, saved: saved, destination: destination)
+        }
+
+        model.searchText = "same term"
+        await waitUntil { gate.count == 1 }
+        gate.releaseAll()
+        await waitUntil { service.searchRequests.count == 1 }
+        XCTAssertEqual(service.searchRequests[0].filter, .all)
+
+        model.searchFilter = .movies
+        await waitUntil { gate.count == 1 }
+        gate.releaseAll()
+        await waitUntil { service.searchRequests.count == 2 }
+        XCTAssertEqual(service.searchRequests[1].filter, .movies)
+
+        service.resolveSearch(term: "same term", filter: .movies, startIndex: 0, page: page([item("movie", "Movie")], total: 1, start: 0, received: 1))
+        await waitUntil { model.searchResults.map(\.id) == ["movie"] }
+        service.resolveSearch(term: "same term", filter: .all, startIndex: 0, page: page([item("stale", "Stale")], total: 1, start: 0, received: 1))
+        for _ in 0..<10 { await Task.yield() }
+
+        XCTAssertEqual(model.searchFilter, .movies)
+        XCTAssertEqual(model.searchResults.map(\.id), ["movie"])
+    }
     func testFilteredSearchAppendsPagesWithoutLosingResults() async {
         var delays: [UInt64] = []
         let service = ControlledJellyfin()
@@ -364,17 +403,42 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertEqual(service.searchRequests[0].startIndex, 0)
         XCTAssertEqual(service.searchRequests[0].limit, 50)
 
-        service.resolveSearch(term: "Amélie & friends", startIndex: 0, page: page([item("one", "First")], total: 100, start: 0, received: 50))
+        service.resolveSearch(term: "Amélie & friends", filter: .movies, startIndex: 0, page: page([item("one", "First")], total: 100, start: 0, received: 50))
         await waitUntil { model.searchResults.count == 1 }
         model.loadMoreSearch()
         await waitUntil { service.searchRequests.count == 2 }
         XCTAssertEqual(service.searchRequests[1].startIndex, 50)
-        service.resolveSearch(term: "Amélie & friends", startIndex: 50, page: page([item("two", "Second")], total: 100, start: 50, received: 50))
+        service.resolveSearch(term: "Amélie & friends", filter: .movies, startIndex: 50, page: page([item("two", "Second")], total: 100, start: 50, received: 50))
         await waitUntil { model.searchResults.count == 2 }
 
         XCTAssertEqual(model.searchResults.map(\.id), ["one", "two"])
     }
 
+    func testRefreshRestartsSearchFromFirstPageWhileMoreIsLoading() async {
+        let service = ControlledJellyfin()
+        let (model, settings, saved, destination) = connectedModel(service) { _ in }
+        defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+        model.searchText = "refresh"
+        await waitUntil { service.searchRequests.count == 1 }
+        let existingItems = (0..<50).map { item("page-\($0)", "Page \($0)") }
+        service.resolveSearch(term: "refresh", startIndex: 0, page: page(existingItems, total: 51, start: 0, received: 50))
+        await waitUntil { model.searchResults.count == 50 }
+
+        model.loadMoreSearch()
+        await waitUntil { service.searchRequests.count == 2 }
+        XCTAssertEqual(service.searchRequests[1].startIndex, 50)
+        model.refreshCurrentLocation()
+        await waitUntil { service.searchRequests.count == 3 }
+        XCTAssertEqual(service.searchRequests[2].startIndex, 0)
+
+        service.resolveSearch(term: "refresh", startIndex: 0, page: page([item("fresh", "Fresh")], total: 1, start: 0, received: 1))
+        await waitUntil { model.searchResults.map(\.id) == ["fresh"] }
+        service.resolveSearch(term: "refresh", startIndex: 50, page: page([item("stale", "Stale")], total: 51, start: 50, received: 1))
+        for _ in 0..<10 { await Task.yield() }
+
+        XCTAssertEqual(model.searchResults.map(\.id), ["fresh"])
+    }
     func testNestedLibraryBackNavigationReloadsTheParentFolder() async {
         let service = ControlledJellyfin()
         let series = item("series", "Series", folder: true, type: "Series")
@@ -661,6 +725,50 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertEqual(settings.jellyfinToken(), "replacement-token")
         XCTAssertNil(model.notice)
     }
+    func testKotlinCancellationDuringBrowseClearsBusyWithoutError() async {
+        let service = ControlledJellyfin()
+        service.browseError = JellyfinInterop.shared.makeCancellationThrowable().asError()
+        let (model, settings, saved, destination) = connectedModel(service)
+        defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+        model.loadLibraryIfNeeded()
+        await waitUntil { service.browseRequests.count == 1 && !model.browseBusy }
+
+        XCTAssertNil(model.libraryError)
+        XCTAssertFalse(model.browseBusy)
+    }
+
+    func testKotlinCancellationDuringSearchClearsBusyWithoutError() async {
+        let service = ControlledJellyfin()
+        let (model, settings, saved, destination) = connectedModel(service) { _ in }
+        defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+        model.searchText = "cancel search"
+        await waitUntil { service.searchRequests.count == 1 }
+        service.failSearch(
+            term: "cancel search",
+            startIndex: 0,
+            error: JellyfinInterop.shared.makeCancellationThrowable().asError()
+        )
+        await waitUntil { !model.searchBusy }
+
+        XCTAssertNil(model.searchError)
+        XCTAssertFalse(model.searchBusy)
+    }
+
+    func testKotlinCancellationDuringMediaSourceLookupClearsBusyWithoutError() async {
+        let service = ControlledJellyfin()
+        let (model, settings, saved, destination) = connectedModel(service)
+        defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+        model.play(item("movie", "Film")) { _ in true }
+        await waitUntil { service.mediaSourceRequests == ["movie"] }
+        service.failMediaSources(itemId: "movie", error: JellyfinInterop.shared.makeCancellationThrowable().asError())
+        await waitUntil { !model.playbackBusy }
+
+        XCTAssertNil(model.playbackError)
+        XCTAssertTrue(model.canRetryPlayback)
+    }
     func testUnauthorizedMediaSourceLookupReturnsToSignIn() async {
         let service = ControlledJellyfin()
         let (model, settings, saved, destination) = connectedModel(service)
@@ -735,5 +843,22 @@ final class JellyfinViewModelTests: XCTestCase {
             model.connected,
             "current authentication did not persist credentials"
         )
+    }
+
+    func testKotlinCancellationDuringAuthenticationIsNotPresentedAsFailure() async {
+        let service = ControlledJellyfin()
+        service.authenticationError = JellyfinInterop.shared.makeCancellationThrowable().asError()
+        let (model, settings, saved, destination) = connectedModel(service)
+        defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+        settings.setJellyfinToken(v: "")
+        model.server = "http://new-jellyfin.invalid"
+        model.username = "new-user"
+        model.password = "password"
+        model.connect()
+        await waitUntil { !model.connectBusy }
+
+        XCTAssertFalse(model.connected)
+        XCTAssertNil(model.notice)
     }
 }

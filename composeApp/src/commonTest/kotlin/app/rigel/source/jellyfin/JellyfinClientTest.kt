@@ -280,9 +280,20 @@ class JellyfinClientTest {
     }
 
     @Test
-    fun playToSessionFalseOnNon2xx() = kotlinx.coroutines.test.runTest {
+    fun playToSessionPreservesUnauthorizedStatus() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { respond("", HttpStatusCode.Unauthorized) }
+        val error = assertFailsWith<JellyfinRequestException> {
+            JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("item1"))
+        }
+        assertEquals(401, error.statusCode)
+    }
+    @Test
+    fun playToSessionPreservesServerErrorStatus() = kotlinx.coroutines.test.runTest {
         val engine = MockEngine { respond("", HttpStatusCode.InternalServerError) }
-        assertFalse(JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("a")))
+        val error = assertFailsWith<JellyfinRequestException> {
+            JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("a"))
+        }
+        assertEquals(500, error.statusCode)
     }
     @Test
     fun playToSessionPropagatesCancellation() = kotlinx.coroutines.test.runTest {
@@ -347,7 +358,7 @@ class JellyfinClientTest {
             }
         """.trimIndent()
         val engine = MockEngine { request ->
-            assertEquals("$base/Items/item1?UserId=u1", request.url.toString())
+            assertEquals("$base/Items/item1?UserId=u1&Fields=MediaStreams,MediaSources", request.url.toString())
             respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
         }
 

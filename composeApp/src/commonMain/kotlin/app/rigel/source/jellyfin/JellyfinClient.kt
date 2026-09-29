@@ -147,9 +147,15 @@ object JellyfinApi {
             "?Static=true&MediaSourceId=" + encodeUrlComponent(mediaSourceId) +
             "&api_key=" + encodeUrlComponent(token)
 
+    internal fun isTokenizedJellyfinStream(url: String): Boolean {
+        val path = url.substringBefore('?')
+        if (!path.contains("/Videos/", ignoreCase = true) || !path.endsWith("/stream", ignoreCase = true)) return false
+        val parsed = runCatching { Url(url) }.getOrNull() ?: return false
+        return parsed.parameters.names().any { it.equals("api_key", ignoreCase = true) }
+    }
     fun itemDetailsUrl(base: String, userId: String, itemId: String): String =
         base.trimEnd('/') + "/Items/" + encodeUrlComponent(itemId) +
-            "?UserId=" + encodeUrlComponent(userId)
+            "?UserId=" + encodeUrlComponent(userId) + "&Fields=MediaStreams,MediaSources"
 
     fun subtitleStreamUrl(
         base: String,
@@ -448,7 +454,8 @@ class JellyfinClient(private val http: HttpClient) {
         } catch (_: Exception) {
             return false
         }
-        return status in 200..299
+        if (status !in 200..299) throw JellyfinRequestException(status)
+        return true
     }
 
     /** Remote stop command for a client session (Playing/Stopped is the client-side report endpoint; it does not stop playback). */

@@ -207,12 +207,23 @@ final class JellyfinViewModel: ObservableObject {
         notice = nil
         noticeIsError = false
         connectTask = Task {
-            let auth = await jellyfin.authenticateAsync(
-                base: server,
-                username: username,
-                password: password,
-                deviceId: "rigel-ios"
-            )
+            let auth: JellyfinAuth?
+            do {
+                auth = try await jellyfin.authenticateAsync(
+                    base: server,
+                    username: username,
+                    password: password,
+                    deviceId: "rigel-ios"
+                )
+            } catch {
+                guard !Task.isCancelled else { return }
+                connectBusy = false
+                connectTask = nil
+                if JellyfinCancellation.isCancellation(error) { return }
+                notice = "Authentication failed — check the server URL and credentials"
+                noticeIsError = true
+                return
+            }
             guard !Task.isCancelled else { return }
             connectBusy = false
             connectTask = nil
@@ -302,8 +313,8 @@ final class JellyfinViewModel: ObservableObject {
     }
 
     func refreshCurrentLocation() {
-        if isShowingSearchResults {
-            searchNow()
+        if isShowingSearchResults, let input = currentSearchInput, connected {
+            startSearchPage(input, startIndex: 0, append: false, debounce: false)
         } else {
             loadBrowsePage(reset: true)
         }
@@ -487,13 +498,19 @@ final class JellyfinViewModel: ObservableObject {
                 searchRequestIssued = false
                 searchExecutionInput = nil
                 searchTask = nil
-            } catch is CancellationError {
-                return
             } catch {
                 guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error),
                       currentSearchInput == input,
                       isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
                 else { return }
+                if JellyfinCancellation.isCancellation(error) {
+                    searchBusy = false
+                    searchMoreBusy = false
+                    searchRequestIssued = false
+                    searchExecutionInput = nil
+                    searchTask = nil
+                    return
+                }
                 if JellyfinCancellation.httpStatusCode(error) == 401 {
                     expireSession(base: requestBase, token: requestToken, userId: requestUserId)
                     return
@@ -582,13 +599,17 @@ final class JellyfinViewModel: ObservableObject {
                 browseBusy = false
                 browseMoreBusy = false
                 browseTask = nil
-            } catch is CancellationError {
-                return
             } catch {
                 guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error),
                       target == activeBrowseTarget,
                       isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
                 else { return }
+                if JellyfinCancellation.isCancellation(error) {
+                    browseBusy = false
+                    browseMoreBusy = false
+                    browseTask = nil
+                    return
+                }
                 if JellyfinCancellation.httpStatusCode(error) == 401 {
                     expireSession(base: requestBase, token: requestToken, userId: requestUserId)
                     return
@@ -753,10 +774,13 @@ final class JellyfinViewModel: ObservableObject {
                 }
                 pendingSourceChoice = PendingSourceChoice(request: request, sources: sources)
                 versionChoice = JellyfinVersionChoice(item: request.item, sources: sources)
-            } catch is CancellationError {
-                return
             } catch {
-                guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error), isCurrent(request) else { return }
+                guard !Task.isCancelled, isCurrent(request) else { return }
+                if JellyfinCancellation.isCancellation(error) {
+                    playbackBusy = false
+                    playbackTask = nil
+                    return
+                }
                 if JellyfinCancellation.httpStatusCode(error) == 401 {
                     expireSession(base: request.base, token: request.token, userId: request.userId)
                     return

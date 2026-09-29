@@ -10,8 +10,9 @@ enum JellyfinAsync {
         let gate = KotlinResumeGate<T>()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-                gate.install(continuation)
-                body { value, error in gate.deliver(value: value, error: error) }
+                if gate.install(continuation) {
+                    body { value, error in gate.deliver(value: value, error: error) }
+                }
             }
         } onCancel: {
             gate.cancel()
@@ -25,18 +26,17 @@ final class KotlinResumeGate<T> {
     private var cancelled = false
     private var resumed = false
 
-    func install(_ continuation: CheckedContinuation<T, Error>) {
-        let alreadyCancelled: Bool = lock.withLock {
-            if cancelled {
+    func install(_ continuation: CheckedContinuation<T, Error>) -> Bool {
+        let shouldStart = lock.withLock {
+            guard !cancelled else {
                 resumed = true
-                return true
+                return false
             }
             self.continuation = continuation
-            return false
+            return true
         }
-        if alreadyCancelled {
-            continuation.resume(throwing: CancellationError())
-        }
+        if !shouldStart { continuation.resume(throwing: CancellationError()) }
+        return shouldStart
     }
 
     func deliver(value: T?, error: Error?) {
@@ -75,7 +75,7 @@ enum JellyfinAsyncError: LocalizedError {
 }
 @MainActor
 protocol JellyfinServing {
-    func authenticateAsync(base: String, username: String, password: String, deviceId: String) async -> JellyfinAuth?
+    func authenticateAsync(base: String, username: String, password: String, deviceId: String) async throws -> JellyfinAuth?
     func browseAsync(
         base: String,
         token: String,
@@ -103,8 +103,8 @@ protocol JellyfinServing {
         username: String,
         password: String,
         deviceId: String
-    ) async -> JellyfinAuth? {
-        try? await JellyfinAsync.run {
+    ) async throws -> JellyfinAuth? {
+        try await JellyfinAsync.run {
             self.authenticate(
                 base: base,
                 username: username,
