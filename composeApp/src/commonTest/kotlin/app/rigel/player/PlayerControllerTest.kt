@@ -28,6 +28,7 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.content.TextContent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -877,17 +878,20 @@ class PlayerControllerTest {
             }
         })
         val c = controller(jellyfin = client)
-        fun jfRequest(itemId: String) = request.copy(
-            sourceUrl = "$jfBase/Videos/$itemId/stream?Static=true&api_key=tok",
-            jellyfinContext = JellyfinPlaybackContext(jfBase, "tok", "u1", itemId),
-        )
+        fun jfRequest(itemId: String): IntakeRequest {
+            val sourceId = "version-$itemId"
+            return request.copy(
+                sourceUrl = "$jfBase/Videos/$itemId/stream?Static=true&MediaSourceId=$sourceId&api_key=tok",
+                jellyfinContext = JellyfinPlaybackContext(jfBase, "tok", "u1", itemId, sourceId),
+            )
+        }
         fun jfTarget(sessionId: String) = PlaybackDestination.Receiver(
             CastTarget.JellyfinSessionTarget(JellyfinSession(sessionId, "TV", "Jellyfin Web", jfBase)),
         )
 
         c.loadRequest(jfRequest("i1"), jfTarget("s1"))
         advanceUntilIdle()
-        assertEquals(listOf("$jfBase/Sessions/s1/Playing?playCommand=PlayNow&itemIds=i1&startPositionTicks=0"), requests)
+        assertEquals(listOf("$jfBase/Sessions/s1/Playing?playCommand=PlayNow&itemIds=i1&startPositionTicks=0&mediaSourceId=version-i1"), requests)
 
         c.loadRequest(jfRequest("i2"), jfTarget("s2"))
         advanceUntilIdle()
@@ -898,7 +902,33 @@ class PlayerControllerTest {
 
         stopGate.complete(Unit)
         advanceUntilIdle()
-        assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0", requests.last())
+        assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0&mediaSourceId=version-i2", requests.last())
+    }
+    @Test
+    fun cancelledJellyfinSessionPlayDoesNotBecomePlaybackFailure() = runTest(dispatcher.scheduler) {
+        val jfBase = "http://jf:8096"
+        val engineDispatcher = dispatcher
+        val client = JellyfinClient(HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { throw CancellationException("cancelled") }
+            }
+        })
+        val c = controller(jellyfin = client)
+        val sourceId = "version-1"
+        val jellyfinRequest = request.copy(
+            sourceUrl = "$jfBase/Videos/item1/stream?Static=true&MediaSourceId=$sourceId&api_key=tok",
+            jellyfinContext = JellyfinPlaybackContext(jfBase, "tok", "u1", "item1", sourceId),
+        )
+        val target = PlaybackDestination.Receiver(
+            CastTarget.JellyfinSessionTarget(JellyfinSession("session-1", "TV", "Jellyfin Web", jfBase)),
+        )
+
+        c.loadRequest(jellyfinRequest, target)
+        advanceUntilIdle()
+
+        assertNull(c.uiState.value.error)
+        assertFalse(c.uiState.value.phase == PlayerPhase.ERROR)
     }
 
 
@@ -924,10 +954,13 @@ class PlayerControllerTest {
             }
         })
         val c = controller(jellyfin = client)
-        fun jfRequest(itemId: String) = request.copy(
-            sourceUrl = "${jfBase}/Videos/${itemId}/stream?Static=true&api_key=tok",
-            jellyfinContext = JellyfinPlaybackContext(jfBase, "tok", "u1", itemId),
-        )
+        fun jfRequest(itemId: String): IntakeRequest {
+            val sourceId = "version-$itemId"
+            return request.copy(
+                sourceUrl = "$jfBase/Videos/$itemId/stream?Static=true&MediaSourceId=$sourceId&api_key=tok",
+                jellyfinContext = JellyfinPlaybackContext(jfBase, "tok", "u1", itemId, sourceId),
+            )
+        }
         fun jfTarget(sessionId: String) = PlaybackDestination.Receiver(
             CastTarget.JellyfinSessionTarget(JellyfinSession(sessionId, "TV", "Jellyfin Web", jfBase)),
         )
@@ -943,7 +976,7 @@ class PlayerControllerTest {
 
         firstStopGate.complete(Unit)
         advanceUntilIdle()
-        assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0", requests.last())
+        assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0&mediaSourceId=version-i2", requests.last())
     }
 
     @Test
@@ -1585,5 +1618,24 @@ class PlayerControllerTest {
             CastDispatcher.clearActive()
             CastDispatcher.install(null, null)
         }
+    }
+
+    @Test
+    fun JellyfinStreamCredentialsAreNotStoredInLinkHistory() = runTest(dispatcher.scheduler) {
+        val settings = SettingsStore(MapSettings(mutableMapOf()))
+        val controller = controller(settings)
+        val base = "http://jf:8096"
+        val token = "private-token"
+        val sourceId = "version-2"
+        val jellyfinRequest = request.copy(
+            sourceUrl = "$base/Videos/item1/stream?Static=true&MediaSourceId=$sourceId&api_key=$token",
+            jellyfinContext = JellyfinPlaybackContext(base, token, "user-1", "item1", sourceId),
+        )
+
+        controller.loadRequest(jellyfinRequest, PlaybackDestination.Local)
+        advanceUntilIdle()
+
+        assertTrue(settings.linkHistory().isEmpty())
+        assertFalse(settings.linkHistory().any { token in it.url })
     }
 }

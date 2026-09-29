@@ -73,8 +73,31 @@ enum JellyfinAsyncError: LocalizedError {
         "The request returned no result."
     }
 }
+@MainActor
+protocol JellyfinServing {
+    func authenticateAsync(base: String, username: String, password: String, deviceId: String) async -> JellyfinAuth?
+    func browseAsync(
+        base: String,
+        token: String,
+        userId: String,
+        parentId: String?,
+        startIndex: Int32,
+        limit: Int32,
+        order: JellyfinBrowseOrder
+    ) async throws -> JellyfinItemPage
+    func searchAsync(
+        base: String,
+        token: String,
+        userId: String,
+        term: String,
+        filter: JellyfinSearchFilter,
+        startIndex: Int32,
+        limit: Int32
+    ) async throws -> JellyfinItemPage
+    func itemMediaSourcesAsync(base: String, token: String, userId: String, itemId: String) async throws -> [JellyfinMediaSource]
+}
 
-extension JellyfinClient {
+@MainActor extension JellyfinClient: JellyfinServing {
     func authenticateAsync(
         base: String,
         username: String,
@@ -89,17 +112,29 @@ extension JellyfinClient {
                 deviceId: deviceId,
                 completionHandler: $0
             )
-        } ?? nil
+        }
     }
 
     func browseAsync(
         base: String,
         token: String,
         userId: String,
-        parentId: String?
-    ) async throws -> [JellyfinItem] {
+        parentId: String?,
+        startIndex: Int32,
+        limit: Int32,
+        order: JellyfinBrowseOrder
+    ) async throws -> JellyfinItemPage {
         try await JellyfinAsync.run {
-            self.browse(base: base, token: token, userId: userId, parentId: parentId, completionHandler: $0)
+            self.browse(
+                base: base,
+                token: token,
+                userId: userId,
+                parentId: parentId,
+                startIndex: startIndex,
+                limit: limit,
+                order: order,
+                completionHandler: $0
+            )
         }
     }
 
@@ -107,21 +142,33 @@ extension JellyfinClient {
         base: String,
         token: String,
         userId: String,
-        term: String
-    ) async throws -> [JellyfinItem] {
+        term: String,
+        filter: JellyfinSearchFilter,
+        startIndex: Int32,
+        limit: Int32
+    ) async throws -> JellyfinItemPage {
         try await JellyfinAsync.run {
-            self.search(base: base, token: token, userId: userId, term: term, completionHandler: $0)
+            self.search(
+                base: base,
+                token: token,
+                userId: userId,
+                term: term,
+                filter: filter,
+                startIndex: startIndex,
+                limit: limit,
+                completionHandler: $0
+            )
         }
     }
 
-    func itemSubtitleTracksAsync(
+    func itemMediaSourcesAsync(
         base: String,
         token: String,
         userId: String,
         itemId: String
-    ) async throws -> [SubtitleTrack] {
+    ) async throws -> [JellyfinMediaSource] {
         try await JellyfinAsync.run {
-            self.itemSubtitleTracks(
+            self.itemMediaSources(
                 base: base,
                 token: token,
                 userId: userId,
@@ -142,18 +189,20 @@ extension JellyfinClient {
         token: String,
         sessionId: String,
         itemIds: [String],
-        startPositionTicks: Int64 = 0
-    ) async -> Bool {
-        let ok = try? await JellyfinAsync.run {
+        startPositionTicks: Int64 = 0,
+        mediaSourceId: String? = nil
+    ) async throws -> Bool {
+        let ok = try await JellyfinAsync.run {
             self.playToSession(
                 base: base,
                 token: token,
                 sessionId: sessionId,
                 itemIds: itemIds,
                 startPositionTicks: startPositionTicks,
+                mediaSourceId: mediaSourceId,
                 completionHandler: $0
             )
         }
-        return ok?.boolValue == true
+        return ok.boolValue
     }
 }

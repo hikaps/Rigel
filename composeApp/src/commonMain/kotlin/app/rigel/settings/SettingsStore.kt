@@ -120,6 +120,7 @@ class SettingsStore(
     }
 
     fun addToLinkHistory(url: String, title: String?) {
+        if (isTokenizedJellyfinStream(url)) return
         val sanitizedUrl = sanitizeHistoryUrl(url)
         if (sanitizedUrl.isEmpty()) return
         val sanitizedTitle = title
@@ -161,6 +162,7 @@ class SettingsStore(
             .split('\n')
             .filter { it.isNotBlank() }
             .map(::parseHistoryRow)
+            .filterNot { isTokenizedJellyfinStream(it.url) }
             .map { it.copy(url = sanitizeHistoryUrl(it.url)) }
             .filter { it.url.isNotEmpty() }
 
@@ -234,5 +236,11 @@ class SettingsStore(
             "xembytoken",
             "xmediabrowsertoken",
         )
+    }
+
+    private fun isTokenizedJellyfinStream(url: String): Boolean {
+        val path = url.substringBefore('?')
+        if (!path.contains("/Videos/") || !path.endsWith("/stream")) return false
+        return url.substringAfter('?', "").split('&').any { it.substringBefore('=') == "api_key" }
     }
 }

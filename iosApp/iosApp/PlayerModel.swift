@@ -123,7 +123,8 @@ final class PlayerModel: ObservableObject {
         baseUrl: String,
         token: String,
         userId: String,
-        itemId: String
+        itemId: String,
+        mediaSourceId: String
     ) -> Bool {
         SwiftPlayer.shared.loadJellyfinItem(
             url: url,
@@ -132,7 +133,8 @@ final class PlayerModel: ObservableObject {
             baseUrl: baseUrl,
             token: token,
             userId: userId,
-            itemId: itemId
+            itemId: itemId,
+            mediaSourceId: mediaSourceId
         )
     }
 

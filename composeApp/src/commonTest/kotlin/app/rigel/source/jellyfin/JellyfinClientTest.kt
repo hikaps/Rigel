@@ -50,6 +50,32 @@ class JellyfinClientTest {
         val engine = MockEngine { throw RuntimeException("unreachable") }
         assertNull(JellyfinClient(HttpClient(engine)).authenticate(base, "a", "p", "d"))
     }
+    @Test
+    fun authenticateRejectsNonSuccessResponsesEvenWithTokenLikeBody() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine {
+            respond("""{"AccessToken":"secret","User":{"Id":"u1"}}""", HttpStatusCode.Unauthorized)
+        }
+
+        assertNull(JellyfinClient(HttpClient(engine)).authenticate(base, "a", "p", "d"))
+    }
+
+    @Test
+    fun authenticateRequiresNestedUserId() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine {
+            respond("""{"AccessToken":"tok","Id":"unrelated"}""", HttpStatusCode.OK)
+        }
+
+        assertNull(JellyfinClient(HttpClient(engine)).authenticate(base, "a", "p", "d"))
+    }
+
+    @Test
+    fun authenticatePropagatesCancellation() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { throw CancellationException("cancelled") }
+
+        assertFailsWith<CancellationException> {
+            JellyfinClient(HttpClient(engine)).authenticate(base, "a", "p", "d")
+        }
+    }
 
     @Test
     fun browseParsesItemsAndFolderFlag() = kotlinx.coroutines.test.runTest {
@@ -58,10 +84,10 @@ class JellyfinClientTest {
             {"Id":"i2","Name":"File.mp4","Type":"Video"}
         ]"""
         val engine = MockEngine { respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
-        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", "root")
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", "root").items
         assertEquals(2, items.size)
-        assertEquals(JellyfinItem("i1", "Movies", isFolder = true), items[0])
-        assertEquals(JellyfinItem("i2", "File.mp4", isFolder = false), items[1])
+        assertEquals(JellyfinItem("i1", "Movies", isFolder = true, type = "Folder"), items[0])
+        assertEquals(JellyfinItem("i2", "File.mp4", isFolder = false, type = "Video"), items[1])
     }
 
     @Test
@@ -75,11 +101,11 @@ class JellyfinClientTest {
         val engine = MockEngine {
             respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
         }
-        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null).items
         assertEquals(
             listOf(
-                JellyfinItem("folder-1", "Movies", isFolder = true),
-                JellyfinItem("movie-1", "A \"quoted\" movie", isFolder = false),
+                JellyfinItem("folder-1", "Movies", isFolder = true, type = "CollectionFolder"),
+                JellyfinItem("movie-1", "A \"quoted\" movie", isFolder = false, type = "Movie"),
             ),
             items,
         )
@@ -96,13 +122,13 @@ class JellyfinClientTest {
             respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
         }
 
-        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", "series-1")
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", "series-1").items
 
         assertEquals(
             listOf(
-                JellyfinItem("series-1", "The Expanse", isFolder = true),
-                JellyfinItem("season-1", "Season 1", isFolder = true),
-                JellyfinItem("episode-1", "Pilot", isFolder = false),
+                JellyfinItem("series-1", "The Expanse", isFolder = true, type = "Series"),
+                JellyfinItem("season-1", "Season 1", isFolder = true, type = "Season"),
+                JellyfinItem("episode-1", "Pilot", isFolder = false, type = "Episode"),
             ),
             items,
         )
@@ -119,16 +145,16 @@ class JellyfinClientTest {
                 headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
-        val items = JellyfinClient(HttpClient(engine)).search(base, "tok", "u1", "star wars")
+        val items = JellyfinClient(HttpClient(engine)).search(base, "tok", "u1", "star wars").items
         assertEquals(
             listOf(
-                JellyfinItem("m1", "Star Wars", isFolder = false),
-                JellyfinItem("s1", "The Expanse", isFolder = true),
+                JellyfinItem("m1", "Star Wars", isFolder = false, type = "Movie"),
+                JellyfinItem("s1", "The Expanse", isFolder = true, type = "Series"),
             ),
             items,
         )
         assertEquals(
-            "$base/Users/u1/Items?Recursive=true&SearchTerm=star%20wars&IncludeItemTypes=Movie,Series,Episode,Video&Fields=Path",
+            "$base/Items?UserId=u1&Recursive=true&SearchTerm=star%20wars&IncludeItemTypes=Movie,Series,Episode,Video&StartIndex=0&Limit=50&EnableTotalRecordCount=true&EnableImages=false",
             requested.single(),
         )
     }
@@ -146,9 +172,10 @@ class JellyfinClientTest {
         val engine = MockEngine {
             respond("", HttpStatusCode.Unauthorized, headersOf(HttpHeaders.ContentType, "application/json"))
         }
-        assertFailsWith<JellyfinRequestException> {
+        val error = assertFailsWith<JellyfinRequestException> {
             JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
         }
+        assertEquals(401, error.statusCode)
     }
 
     @Test
@@ -169,8 +196,8 @@ class JellyfinClientTest {
         val engine = MockEngine {
             respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
         }
-        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
-        assertEquals(listOf(JellyfinItem("season-1", "Season 1", isFolder = false)), items)
+        val items = JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null).items
+        assertEquals(listOf(JellyfinItem("season-1", "Season 1", isFolder = false, type = "Season")), items)
     }
 
     @Test
@@ -196,13 +223,6 @@ class JellyfinClientTest {
         val engine = MockEngine { throw CancellationException("cancelled") }
         assertFailsWith<CancellationException> {
             JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
-        }
-    }
-    @Test
-    fun authenticatePropagatesCancellation() = kotlinx.coroutines.test.runTest {
-        val engine = MockEngine { throw CancellationException("cancelled") }
-        assertFailsWith<CancellationException> {
-            JellyfinClient(HttpClient(engine)).authenticate(base, "user", "pass", "device")
         }
     }
 
@@ -243,6 +263,21 @@ class JellyfinClientTest {
         assertEquals("a,b", url.parameters["itemIds"])
         assertEquals("0", url.parameters["startPositionTicks"])
     }
+    @Test
+    fun playToSessionSendsTheChosenMediaSource() = kotlinx.coroutines.test.runTest {
+        val posted = mutableListOf<io.ktor.http.Url>()
+        val engine = MockEngine { request ->
+            posted += request.url
+            respond("", HttpStatusCode.NoContent)
+        }
+
+        assertTrue(
+            JellyfinClient(HttpClient(engine)).playToSession(
+                base, "tok", "s1", listOf("item1"), mediaSourceId = "version/2",
+            ),
+        )
+        assertEquals("version/2", posted.single().parameters["mediaSourceId"])
+    }
 
     @Test
     fun playToSessionFalseOnNon2xx() = kotlinx.coroutines.test.runTest {
@@ -253,7 +288,7 @@ class JellyfinClientTest {
     fun playToSessionPropagatesCancellation() = kotlinx.coroutines.test.runTest {
         val engine = MockEngine { throw CancellationException("cancelled") }
         assertFailsWith<CancellationException> {
-            JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("a"))
+            JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("item1"))
         }
     }
 
@@ -283,83 +318,142 @@ class JellyfinClientTest {
     }
 
     @Test
-    fun itemSubtitleTracksParsesExternalLanguages() = kotlinx.coroutines.test.runTest {
+    fun itemMediaSourcesKeepMetadataAndSubtitlesPairedWithEachVersion() = kotlinx.coroutines.test.runTest {
         val json = """
             {
-              "Id": "item1",
-              "MediaSources": [{"Id": "ms1", "Protocol": "File", "Container": "mkv"}],
               "MediaStreams": [
-                {"Index": 2, "Type": "Subtitle", "Language": "eng", "DisplayTitle": "English", "IsExternal": true},
-                {"Index": 3, "Type": "Subtitle", "Language": "fra", "DisplayTitle": "French", "IsExternal": false}
+                {"Index": 4, "Type": "Subtitle", "Language": "deu", "DisplayTitle": "Wrong item subtitle", "IsExternal": true}
+              ],
+              "MediaSources": [
+                {
+                  "MediaStreams": [
+                    {"Index": 0, "Type": "Video", "Codec": "h264", "Width": 1920, "Height": 1080},
+                    {"Index": 1, "Type": "Audio", "Codec": "aac", "Channels": 2},
+                    {"Index": 4, "Type": "Subtitle", "Language": "eng", "DisplayTitle": "English", "IsExternal": true}
+                  ],
+                  "Id": "ms-first", "Name": "1080p", "Container": "mkv", "Size": 1000
+                },
+                {
+                  "Id": "ms-second", "Name": "2160p", "Container": "mp4", "Size": 2000,
+                  "MediaStreams": [
+                    {"Index": 0, "Type": "Video", "Codec": "hevc", "Width": 3840, "Height": 2160},
+                    {"Index": 1, "Type": "Audio", "Codec": "dts", "Channels": 6},
+                    {"Index": 4, "Type": "Subtitle", "Language": "fra", "DisplayTitle": "French", "IsExternal": true}
+                  ]
+                },
+                {"Id": "ms-second", "Name": "duplicate", "Container": "avi"},
+                {"Id": "", "Name": "missing identity", "Container": "mkv"}
               ]
             }
         """.trimIndent()
         val engine = MockEngine { request ->
-            assertEquals(
-                "$base/Users/u1/Items/item1?Fields=MediaStreams,MediaSources",
-                request.url.toString(),
-            )
+            assertEquals("$base/Items/item1?UserId=u1", request.url.toString())
             respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
         }
 
-        val tracks = JellyfinClient(HttpClient(engine))
-            .itemSubtitleTracks(base, "tok", "u1", "item1")
+        val sources = JellyfinClient(HttpClient(engine)).itemMediaSources(base, "tok", "u1", "item1")
 
         assertEquals(
             listOf(
-                SubtitleTrack(
-                    url = "$base/Videos/item1/ms1/Subtitles/2/Stream.vtt?api_key=tok",
-                    language = "eng",
-                    title = "English",
+                JellyfinMediaSource(
+                    id = "ms-first", name = "1080p", container = "mkv", width = 1920, height = 1080,
+                    videoCodec = "h264", audioCodec = "aac", audioChannels = 2, sizeBytes = 1000,
+                    subtitleTracks = listOf(SubtitleTrack("$base/Videos/item1/ms-first/Subtitles/4/Stream.vtt?api_key=tok", "eng", "English")),
+                ),
+                JellyfinMediaSource(
+                    id = "ms-second", name = "2160p", container = "mp4", width = 3840, height = 2160,
+                    videoCodec = "hevc", audioCodec = "dts", audioChannels = 6, sizeBytes = 2000,
+                    subtitleTracks = listOf(SubtitleTrack("$base/Videos/item1/ms-second/Subtitles/4/Stream.vtt?api_key=tok", "fra", "French")),
                 ),
             ),
-            tracks,
+            sources,
         )
     }
 
     @Test
-    fun itemSubtitleTracksKeepsStreamsPairedWithFirstMediaSource() = kotlinx.coroutines.test.runTest {
-        val json = """
-            {
-              "MediaSources": [
-                {
-                  "Id": "ms-first",
-                  "Protocol": "File",
-                  "Container": "mkv",
-                  "MediaStreams": [
-                    {"Index": 4, "Type": "Subtitle", "Language": "eng", "DisplayTitle": "English", "IsExternal": true}
-                  ]
-                },
-                {
-                  "Id": "ms-second",
-                  "Protocol": "File",
-                  "Container": "mp4",
-                  "MediaStreams": [
-                    {"Index": 4, "Type": "Subtitle", "Language": "fra", "DisplayTitle": "French", "IsExternal": true}
-                  ]
-                }
-              ],
-              "MediaStreams": [
-                {"Index": 4, "Type": "Subtitle", "Language": "fra", "DisplayTitle": "French", "IsExternal": true}
-              ]
-            }
-        """.trimIndent()
-        val engine = MockEngine {
+    fun oneMediaSourceUsesTopLevelSubtitleFallback() = kotlinx.coroutines.test.runTest {
+        val json = """{"MediaStreams":[{"Index":2,"Type":"Subtitle","Language":"eng","IsExternal":true}],"MediaSources":[{"Id":"ms1","Container":"mkv"}]}"""
+        val engine = MockEngine { respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
+
+        val sources = JellyfinClient(HttpClient(engine)).itemMediaSources(base, "tok", "u1", "item1")
+
+        assertEquals(1, sources.size)
+        assertEquals(
+            listOf(SubtitleTrack("$base/Videos/item1/ms1/Subtitles/2/Stream.vtt?api_key=tok", "eng", "eng")),
+            sources.single().subtitleTracks,
+        )
+    }
+
+    @Test
+    fun multipleMediaSourcesNeverBorrowTopLevelSubtitles() = kotlinx.coroutines.test.runTest {
+        val json = """{"MediaStreams":[{"Index":2,"Type":"Subtitle","Language":"eng","IsExternal":true}],"MediaSources":[{"Id":"ms1"},{"Id":"ms2"}]}"""
+        val engine = MockEngine { respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
+
+        val sources = JellyfinClient(HttpClient(engine)).itemMediaSources(base, "tok", "u1", "item1")
+
+        assertEquals(listOf("ms1", "ms2"), sources.map(JellyfinMediaSource::id))
+        assertTrue(sources.all { it.subtitleTracks.isEmpty() })
+    }
+    @Test
+    fun browseReturnsPageMetadataAndCountsRawEntries() = kotlinx.coroutines.test.runTest {
+        val requests = mutableListOf<io.ktor.http.Url>()
+        val json = """{"Items":[{"Id":"a","Name":"Movie","Type":"Movie","ProductionYear":2024},{"Id":"","Name":"skip","Type":"Video"},null],"TotalRecordCount":153}"""
+        val engine = MockEngine { request ->
+            requests += request.url
             respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
         }
 
-        val tracks = JellyfinClient(HttpClient(engine))
-            .itemSubtitleTracks(base, "tok", "u1", "item1")
-
-        assertEquals(
-            listOf(
-                SubtitleTrack(
-                    url = "$base/Videos/item1/ms-first/Subtitles/4/Stream.vtt?api_key=tok",
-                    language = "eng",
-                    title = "English",
-                ),
-            ),
-            tracks,
+        val page = JellyfinClient(HttpClient(engine)).browse(
+            base, "tok", "u1", "root", startIndex = 50, limit = 50, order = JellyfinBrowseOrder.EPISODE,
         )
+
+        assertEquals(listOf(JellyfinItem("a", "Movie", false, "Movie", 2024, null, null, null)), page.items)
+        assertEquals(153, page.totalRecordCount)
+        assertEquals(50, page.startIndex)
+        assertEquals(3, page.receivedCount)
+        assertEquals("/Items", requests.single().encodedPath)
+        assertEquals("u1", requests.single().parameters["UserId"])
+        assertEquals("root", requests.single().parameters["ParentId"])
+        assertEquals("50", requests.single().parameters["StartIndex"])
+        assertEquals("50", requests.single().parameters["Limit"])
+        assertEquals("ParentIndexNumber,IndexNumber,SortName", requests.single().parameters["SortBy"])
+    }
+
+    @Test
+    fun searchUsesSelectedTypeFilterAndTreatsMissingTotalAsUnknown() = kotlinx.coroutines.test.runTest {
+        val requests = mutableListOf<io.ktor.http.Url>()
+        val engine = MockEngine { request ->
+            requests += request.url
+            respond("""{"Items":[{"Id":"m1","Name":"Amélie","Type":"Movie"}]}""", HttpStatusCode.OK)
+        }
+
+        val page = JellyfinClient(HttpClient(engine)).search(
+            base, "tok", "u1", " Amélie & friends ", JellyfinSearchFilter.MOVIES, 0, 50,
+        )
+
+        assertEquals(listOf("m1"), page.items.map(JellyfinItem::id))
+        assertEquals(null, page.totalRecordCount)
+        assertEquals("Amélie & friends", requests.single().parameters["SearchTerm"])
+        assertEquals("Movie", requests.single().parameters["IncludeItemTypes"])
+        assertEquals("0", requests.single().parameters["StartIndex"])
+        assertEquals("50", requests.single().parameters["Limit"])
+    }
+
+    @Test
+    fun browseRejectsInvalidPagingAndBlankSearchDoesNotRequest() = kotlinx.coroutines.test.runTest {
+        var requestCount = 0
+        val engine = MockEngine {
+            requestCount++
+            respond("[]", HttpStatusCode.OK)
+        }
+        val client = JellyfinClient(HttpClient(engine))
+        assertFailsWith<IllegalArgumentException> {
+            client.browse(base, "tok", "u1", null, startIndex = -1, limit = 50, order = JellyfinBrowseOrder.NAME)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            client.search(base, "tok", "u1", "x", JellyfinSearchFilter.ALL, 0, 0)
+        }
+        assertEquals(0, client.search(base, "tok", "u1", " \n ", JellyfinSearchFilter.ALL, 0, 50).receivedCount)
+        assertEquals(0, requestCount)
     }
 }

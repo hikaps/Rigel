@@ -35,6 +35,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -139,13 +140,14 @@ class PlayerController(
         token: String,
         userId: String,
         itemId: String,
+        mediaSourceId: String,
     ): Boolean {
         val request = UrlIntake.parse(rawUrl) ?: return false
         loadRequest(
             request.copy(
                 title = title,
                 subtitleTracks = subtitleTracks,
-                jellyfinContext = JellyfinPlaybackContext(baseUrl, token, userId, itemId),
+                jellyfinContext = JellyfinPlaybackContext(baseUrl, token, userId, itemId, mediaSourceId),
             ),
         )
         return true
@@ -160,7 +162,8 @@ class PlayerController(
         val detachedStop = detachedTarget?.let(::stopDetachedReceiver)
         successCallbackUrl = request.successCallbackUrl
         val resolvedTitle = resolveTitle(request)
-        settings.addToLinkHistory(request.sourceUrl, resolvedTitle)
+        // Jellyfin's stream URL embeds the account token; generic URL history cannot safely replay it.
+        if (request.jellyfinContext == null) settings.addToLinkHistory(request.sourceUrl, resolvedTitle)
         directFallbackUsed = false
         currentRequest = request
         currentDestination = destinationOverride ?: outputSelection.snapshot().destination
@@ -581,15 +584,20 @@ class PlayerController(
             return
         }
         val startPositionTicks = JellyfinApi.startPositionTicks(_uiState.value.startPositionMs)
-        val sent = runCatching {
+        val sent = try {
             client.playToSession(
                 context.baseUrl,
                 context.token,
                 target.session.id,
                 listOf(context.itemId),
                 startPositionTicks,
+                context.mediaSourceId,
             )
-        }.getOrDefault(false)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
         if (!isCurrent(generation)) return
         if (sent) {
             _uiState.value = _uiState.value.copy(
