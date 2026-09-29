@@ -301,7 +301,7 @@ final class OpenSubtitlesClient {
             request.setValue(apiKey, forHTTPHeaderField: "Api-Key")
         }
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-        let redirectDelegate = RedirectDelegate(policy: .download(apiKey: sendsAPIKey ? apiKey : nil))
+        let redirectDelegate = RedirectDelegate(policy: .download(apiKey: apiKey))
         let (bytes, response) = try await session.bytes(for: request, delegate: redirectDelegate)
         guard let http = response as? HTTPURLResponse else {
             throw OpenSubtitlesError.invalidResponse
@@ -479,7 +479,7 @@ final class OpenSubtitlesClient {
 
     enum RedirectPolicy {
         case api(apiKey: String, token: String?)
-        case download(apiKey: String?)
+        case download(apiKey: String)
     }
 
     /// Applies the redirect trust boundary and rebuilds credentials for the
@@ -511,7 +511,7 @@ final class OpenSubtitlesClient {
             var redirected = request
             redirected.setValue(nil, forHTTPHeaderField: "Api-Key")
             redirected.setValue(nil, forHTTPHeaderField: "Authorization")
-            if let apiKey, isTrustedDownloadURL(url) {
+            if isTrustedDownloadURL(url) {
                 redirected.setValue(apiKey, forHTTPHeaderField: "Api-Key")
             }
             return redirected

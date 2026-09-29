@@ -176,6 +176,26 @@ class DevicesRepositoryTest {
         assertIs<CastTarget.Dlna>(found[0].target)
         assertEquals("Living Room TV", found[0].target.name)
     }
+
+    @Test
+    fun scanKeepsDistinctDlnaRenderersOnOneAuthority() = kotlinx.coroutines.test.runTest {
+        val engine = mockEngine { request ->
+            if (request.url.encodedPath.endsWith("/desc.xml")) respond(dlnaXml, HttpStatusCode.OK)
+            else respond("", HttpStatusCode.NotFound)
+        }
+        discovery.devices = listOf(
+            SsdpDevice("uuid:renderer-a", "http://10.0.0.5:1234/a/desc.xml", "TV A", "urn:schemas-upnp-org:device:MediaRenderer:1"),
+            SsdpDevice("uuid:renderer-b", "http://10.0.0.5:1234/b/desc.xml", "TV B", "urn:schemas-upnp-org:device:MediaRenderer:1"),
+        )
+
+        val found = repo(engine, SettingsStore(MapSettings(mutableMapOf()))).scan()
+        assertEquals(2, found.size)
+        assertEquals(
+            setOf("uuid:renderer-a", "uuid:renderer-b"),
+            found.map { (it.target as CastTarget.Dlna).device.usn }.toSet(),
+        )
+    }
+
     @Test
     fun scanFindsChromecastViaMdnsBridge() = kotlinx.coroutines.test.runTest {
         discovery.devices = emptyList()

@@ -15,11 +15,13 @@ struct RigelHTTPFramer {
 
     enum Event {
         case needMore
+        case continueRequestBody
         case frame(RigelHTTPFrame)
         case invalid
     }
 
     private var buffer = Data()
+    private var continueRequested = false
     /// Whether unread bytes remain after the last complete frame.
     var hasBufferedData: Bool { !buffer.isEmpty }
 
@@ -40,14 +42,18 @@ struct RigelHTTPFramer {
         let headerBytes = headerEnd + marker.count
         guard headerBytes <= Self.maxHeaderBytes,
               let headerText = String(data: Data(buffer.prefix(headerEnd)), encoding: .utf8),
-              let contentLength = Self.contentLength(in: headerText) else {
+              let framing = Self.contentLength(in: headerText) else {
             return .invalid
         }
-        let (bodyEnd, overflow) = headerBytes.addingReportingOverflow(contentLength)
-        guard !overflow, contentLength <= Self.maxBodyBytes, bodyEnd >= headerBytes else {
+        let (bodyEnd, overflow) = headerBytes.addingReportingOverflow(framing.contentLength)
+        guard !overflow, framing.contentLength <= Self.maxBodyBytes, bodyEnd >= headerBytes else {
             return .invalid
         }
         if buffer.count < bodyEnd {
+            if framing.contentLength > 0, framing.expectsContinue, !continueRequested {
+                continueRequested = true
+                return .continueRequestBody
+            }
             return .needMore
         }
 
@@ -56,13 +62,15 @@ struct RigelHTTPFramer {
             body: Data(buffer[headerBytes..<bodyEnd])
         )
         buffer.removeSubrange(0..<bodyEnd)
+        continueRequested = false
         return .frame(frame)
     }
 
-    private static func contentLength(in headerText: String) -> Int? {
+    private static func contentLength(in headerText: String) -> (contentLength: Int, expectsContinue: Bool)? {
         let lines = headerText.components(separatedBy: "\r\n")
         guard !lines.isEmpty, !lines[0].isEmpty else { return nil }
         var contentLength: Int?
+        var expectsContinue = false
         for line in lines.dropFirst() {
             guard !line.isEmpty, let separator = line.firstIndex(of: ":") else { return nil }
             let name = String(line[..<separator]).trimmingCharacters(in: .whitespaces).lowercased()
@@ -80,9 +88,12 @@ struct RigelHTTPFramer {
                 // Chunked framing is deliberately unsupported; accepting it
                 // would make the bounded Content-Length contract ambiguous.
                 return nil
+            } else if name == "expect" {
+                guard value.lowercased() == "100-continue" else { return nil }
+                expectsContinue = true
             }
         }
-        return contentLength ?? 0
+        return (contentLength ?? 0, expectsContinue)
     }
 }
 
@@ -384,6 +395,8 @@ final class RigelHttpServer {
             respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
         case .invalid:
             closeOnQueue(connection)
+        case .continueRequestBody:
+            sendContinue(connection)
         case .needMore:
             if state.inputClosed {
                 // EOF with an incomplete frame: nothing more can arrive.
@@ -410,6 +423,8 @@ final class RigelHttpServer {
                             self.respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
                         case .invalid:
                             self.closeOnQueue(connection)
+                        case .continueRequestBody:
+                            self.sendContinue(connection)
                         case .needMore:
                             if state.inputClosed && !state.framer.hasBufferedData {
                                 self.closeOnQueue(connection)
@@ -425,6 +440,21 @@ final class RigelHttpServer {
                 }
             }
         }
+    }
+
+    private func sendContinue(_ connection: NWConnection) {
+        let response = Data("HTTP/1.1 100 Continue\r\n\r\n".utf8)
+        connection.send(content: response, completion: .contentProcessed { [weak self, weak connection] error in
+            guard let self, let connection else { return }
+            self.queue.async {
+                guard self.connectionStates[ObjectIdentifier(connection)] != nil else { return }
+                if error != nil {
+                    self.closeOnQueue(connection)
+                } else {
+                    self.receiveRequest(connection)
+                }
+            }
+        })
     }
 
     private func respond(connection: NWConnection, frame: RigelHTTPFrame, halfClosed: Bool) {

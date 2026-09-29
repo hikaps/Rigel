@@ -221,7 +221,7 @@ private fun validatedManualParts(parts: List<String>): List<String>? {
 }
 
 private fun canonicalTargetKey(target: CastTarget): String = when (target) {
-    is CastTarget.Dlna -> "dlna|${canonicalAuthority(target.device.location) ?: target.identityKey}"
+    is CastTarget.Dlna -> "dlna|" + (canonicalAuthority(target.device.location) ?: target.identityKey) + "|" + target.device.usn.trim().lowercase()
     is CastTarget.Roku -> "roku|${canonicalAuthority(target.device.location) ?: target.identityKey}"
     is CastTarget.Kodi -> "kodi|${canonicalAuthority(target.device.endpoint) ?: target.identityKey}"
     is CastTarget.Chrome -> {

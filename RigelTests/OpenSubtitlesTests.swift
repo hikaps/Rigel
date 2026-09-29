@@ -324,6 +324,22 @@ final class OpenSubtitlesTests: XCTestCase {
         XCTAssertNil(redirected.value(forHTTPHeaderField: "Authorization"))
     }
 
+    func testTrustedCDNRedirectRetainsKeyForThirdPartyRedirectChain() throws {
+        let request = URLRequest(
+            url: try XCTUnwrap(URL(string: "https://dl.opensubtitles.com/subtitle.srt"))
+        )
+        let redirected = try XCTUnwrap(
+            OpenSubtitlesClient.redirectedRequest(
+                for: request,
+                policy: .download(apiKey: "app-key")
+            )
+        )
+
+        XCTAssertEqual(redirected.value(forHTTPHeaderField: "Api-Key"), "app-key")
+        XCTAssertNil(redirected.value(forHTTPHeaderField: "Authorization"))
+    }
+
+
     func testTrustedCDNRedirectRejectsHTTPDowngrade() throws {
         var request = URLRequest(
             url: try XCTUnwrap(URL(string: "http://signed.example/subtitle.srt"))

@@ -109,6 +109,25 @@ final class HttpServerTest: XCTestCase {
         XCTAssertEqual(RigelHttpServer.parseRequest(secondFrame.head)?.path, "/rootDesc.xml")
     }
 
+    func testFramerRequestsContinueOnceForIncompleteExpectedBody() {
+        var framer = RigelHTTPFramer()
+        let headers = Data(
+            "POST /ctl HTTP/1.1\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\n".utf8
+        )
+
+        guard case .continueRequestBody = framer.append(headers) else {
+            return XCTFail("complete Expect headers should request one interim response")
+        }
+        guard case .needMore = framer.next() else {
+            return XCTFail("the parser must wait for the body after the interim response")
+        }
+        guard case .frame(let frame) = framer.append(Data("hello".utf8)) else {
+            return XCTFail("the declared body should complete the frame")
+        }
+        XCTAssertEqual(String(data: frame.body, encoding: .utf8), "hello")
+    }
+
+
     func testFramerRejectsConflictingAndOversizedContentLengths() {
         var conflicting = RigelHTTPFramer()
         let conflict = Data("POST /ctl HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc".utf8)

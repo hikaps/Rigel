@@ -254,6 +254,7 @@ extension RigelHlsExporter {
         let maximumPendingPackets: Int
         private(set) var pending: [RemuxTimestamp] = []
         private(set) var lastDTS: Int64?
+        private(set) var lastDTSStep: Int64?
         private(set) var error: String?
 
         init(frameDuration: Int64, maximumPendingPackets: Int) {
@@ -276,6 +277,7 @@ extension RigelHlsExporter {
                 var ready = inferPending(before: dts)
                 ready.append(timestamp)
                 lastDTS = dts
+                lastDTSStep = step(for: timestamp)
                 return ready
             }
 
@@ -285,10 +287,11 @@ extension RigelHlsExporter {
             // Keep the queue bounded even when a source never emits a decode
             // timestamp. Releasing an unresolved packet is not success: the
             // terminal state below makes the exporter fail at the boundary.
-            if let lastDTS {
+            if let lastDTS, let lastDTSStep {
                 var unresolved = pending.removeFirst()
-                unresolved.dts = lastDTS + step(for: unresolved)
+                unresolved.dts = lastDTS + lastDTSStep
                 self.lastDTS = unresolved.dts
+                self.lastDTSStep = step(for: unresolved)
                 return [unresolved]
             }
             error = "video stream has no usable DTS anchor"
@@ -299,19 +302,21 @@ extension RigelHlsExporter {
         mutating func finish() -> [RemuxTimestamp] {
             guard error == nil else { return [] }
             guard !pending.isEmpty else { return [] }
-            guard var anchor = lastDTS else {
+            guard var anchor = lastDTS, var nextStep = lastDTSStep else {
                 error = "video stream has no usable DTS anchor"
                 return []
             }
             var ready: [RemuxTimestamp] = []
             ready.reserveCapacity(pending.count)
             for var timestamp in pending {
-                anchor += step(for: timestamp)
+                anchor += nextStep
                 timestamp.dts = anchor
                 ready.append(timestamp)
+                nextStep = step(for: timestamp)
             }
             pending.removeAll(keepingCapacity: false)
             lastDTS = anchor
+            lastDTSStep = nextStep
             return ready
         }
 

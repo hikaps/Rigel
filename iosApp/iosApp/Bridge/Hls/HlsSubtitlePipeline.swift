@@ -393,14 +393,21 @@ extension RigelHlsExporter {
             totalBytes += chunk.count
             guard totalBytes <= sourceWebVTTMaxBytes else { return .exceededBudget }
             pending.append(chunk)
-            guard pending.count <= sourceWebVTTMaxLineBytes else { return .exceededBudget }
-            while let newline = pending.firstIndex(of: 0x0A) {
-                let lineData = pending.subdata(in: pending.startIndex..<newline)
-                pending.removeSubrange(pending.startIndex..<pending.index(after: newline))
+            while let lineEnd = pending.firstIndex(where: { $0 == 0x0A || $0 == 0x0D }) {
+                let lineData = pending.subdata(in: pending.startIndex..<lineEnd)
+                let separator = pending[lineEnd]
+                var nextLineStart = pending.index(after: lineEnd)
+                if separator == 0x0D,
+                   nextLineStart < pending.endIndex,
+                   pending[nextLineStart] == 0x0A {
+                    nextLineStart = pending.index(after: nextLineStart)
+                }
+                pending.removeSubrange(pending.startIndex..<nextLineStart)
                 guard consumeLine(String(decoding: lineData, as: UTF8.self)) else {
                     return .exceededBudget
                 }
             }
+            guard pending.count <= sourceWebVTTMaxLineBytes else { return .exceededBudget }
         }
         if !pending.isEmpty {
             guard consumeLine(String(decoding: pending, as: UTF8.self)) else {
@@ -408,6 +415,7 @@ extension RigelHlsExporter {
             }
         }
         return .values(result)
+
     }
 
     private static func packetWebVTTSettings(_ packet: UnsafeMutablePointer<AVPacket>) -> String? {

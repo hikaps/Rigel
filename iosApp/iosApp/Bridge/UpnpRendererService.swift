@@ -309,6 +309,8 @@ final class UpnpRendererService {
             respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
         case .invalid:
             closeOnQueue(connection)
+        case .continueRequestBody:
+            sendContinue(connection)
         case .needMore:
             if state.inputClosed {
                 closeOnQueue(connection)
@@ -334,6 +336,8 @@ final class UpnpRendererService {
                             self.respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
                         case .invalid:
                             self.closeOnQueue(connection)
+                        case .continueRequestBody:
+                            self.sendContinue(connection)
                         case .needMore:
                             if state.inputClosed && !state.framer.hasBufferedData {
                                 self.closeOnQueue(connection)
@@ -349,6 +353,21 @@ final class UpnpRendererService {
                 }
             }
         }
+    }
+
+    private func sendContinue(_ connection: NWConnection) {
+        let response = Data("HTTP/1.1 100 Continue\r\n\r\n".utf8)
+        connection.send(content: response, completion: .contentProcessed { [weak self, weak connection] error in
+            guard let self, let connection else { return }
+            self.queue.async {
+                guard self.connectionStates[ObjectIdentifier(connection)] != nil else { return }
+                if error != nil {
+                    self.closeOnQueue(connection)
+                } else {
+                    self.receiveRequest(connection)
+                }
+            }
+        })
     }
 
     private func respond(connection: NWConnection, frame: RigelHTTPFrame, halfClosed: Bool) {

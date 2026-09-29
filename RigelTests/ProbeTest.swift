@@ -105,6 +105,24 @@ final class ProbeTest: XCTestCase {
         XCTAssertEqual(unanchored.error, "video stream has no usable DTS anchor")
     }
 
+    func testRemuxTrailingAndBoundedInferenceUsePrecedingPacketDuration() {
+        var trailing = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 8)
+        XCTAssertEqual(trailing.append(pts: 0, dts: 0, duration: 40).map(\.dts), [0])
+        XCTAssertTrue(trailing.append(pts: 40, dts: Int64.min, duration: 80).isEmpty)
+        XCTAssertTrue(trailing.append(pts: 120, dts: Int64.min, duration: 20).isEmpty)
+
+        let trailingPackets = trailing.finish()
+        XCTAssertEqual(trailingPackets.map(\.pts), [40, 120])
+        XCTAssertEqual(trailingPackets.map(\.dts), [40, 120])
+
+        var bounded = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 1)
+        XCTAssertEqual(bounded.append(pts: 0, dts: 0, duration: 40).map(\.dts), [0])
+        XCTAssertTrue(bounded.append(pts: 40, dts: Int64.min, duration: 80).isEmpty)
+        XCTAssertEqual(bounded.append(pts: 120, dts: Int64.min, duration: 20).map(\.dts), [40])
+        XCTAssertEqual(bounded.finish().map(\.dts), [120])
+    }
+
+
     func testHardwareFramesContextUsesBufferData() {
         let size = MemoryLayout<AVHWFramesContext>.size
         guard let frames = av_buffer_alloc(size) else {
@@ -936,6 +954,45 @@ final class ProbeTest: XCTestCase {
         XCTAssertEqual(values[0]?.count, 300)
         XCTAssertEqual(values[0]?.last, "position:299% align:start")
     }
+
+    func testSourceWebVTTSettingsScanHandlesCRLFVariantsAndChunkBoundary() throws {
+        let lineCount = 22_000
+        for (name, separator) in [("cr", "\r"), ("lf", "\n"), ("crlf", "\r\n")] {
+            let sidecar = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rigel-vtt-\(name)-\(UUID().uuidString).vtt")
+            defer { try? FileManager.default.removeItem(at: sidecar) }
+            let cues = (0..<lineCount).map { index in
+                "00:00:00.000 --> 00:00:01.000 position:\(index)% align:start\(separator)Caption\(index)"
+            }
+            let text = "WEBVTT\(separator)\(separator)" + cues.joined(separator: separator + separator)
+            XCTAssertGreaterThan(text.utf8.count, 1_048_576)
+            try text.write(to: sidecar, atomically: true, encoding: .utf8)
+
+            guard case .values(let values) = RigelHlsExporter.sourceWebVTTSettings(sidecar.absoluteString) else {
+                return XCTFail("\(name) line endings must not turn short cues into an oversized line")
+            }
+            XCTAssertEqual(values[0]?.count, lineCount, name)
+            XCTAssertEqual(values[0]?.last, "position:21999% align:start", name)
+        }
+
+        let boundarySidecar = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rigel-vtt-crlf-boundary-\(UUID().uuidString).vtt")
+        defer { try? FileManager.default.removeItem(at: boundarySidecar) }
+        let header = Data("WEBVTT\r\n".utf8)
+        let chunkSize = 64 * 1024
+        var boundaryData = header
+        boundaryData.append(Data(repeating: 0x78, count: chunkSize - header.count - 1))
+        boundaryData.append(0x0D)
+        boundaryData.append(0x0A)
+        boundaryData.append(Data("00:00:00.000 --> 00:00:01.000 position:80% align:start\r\nCaption\r\n".utf8))
+        try boundaryData.write(to: boundarySidecar)
+
+        guard case .values(let boundaryValues) = RigelHlsExporter.sourceWebVTTSettings(boundarySidecar.absoluteString) else {
+            return XCTFail("CRLF split across scan chunks must remain a line boundary")
+        }
+        XCTAssertEqual(boundaryValues[0], ["position:80% align:start"])
+    }
+
 
     func testOversizedSelectedWebVTTFailsBeforePublishing() throws {
         let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
