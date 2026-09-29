@@ -471,10 +471,22 @@ final class JellyfinViewModel: ObservableObject {
         let requestToken = token
         let requestUserId = userId
         searchTask = Task {
+            defer {
+                // Replacing an operation cancels its task before assigning the new one.
+                if !Task.isCancelled {
+                    searchBusy = false
+                    searchMoreBusy = false
+                    searchRequestIssued = false
+                    searchExecutionInput = nil
+                    searchTask = nil
+                }
+            }
             do {
                 if debounce {
                     try await searchDelay(300_000_000)
-                    guard !Task.isCancelled, currentSearchInput == input, searchPath.isEmpty else { return }
+                    guard !Task.isCancelled, currentSearchInput == input, searchPath.isEmpty,
+                          isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
+                    else { return }
                     searchRequestIssued = true
                 }
                 let page = try await jellyfin.searchAsync(
@@ -486,40 +498,25 @@ final class JellyfinViewModel: ObservableObject {
                     startIndex: startIndex,
                     limit: 50
                 )
-                guard !Task.isCancelled, currentSearchInput == input, searchPath.isEmpty else { return }
+                guard !Task.isCancelled, currentSearchInput == input, searchPath.isEmpty,
+                      isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
+                else { return }
                 let merged = Self.merge(page.items, into: append ? searchResults : [])
                 searchResults = merged.items
                 searchNextOffset = Self.nextOffset(startIndex, page.receivedCount)
                 searchLastReceivedCount = page.receivedCount
                 searchTotalRecordCount = page.totalRecordCount?.int32Value
                 searchStalled = page.receivedCount == 0 || (append && merged.addedCount == 0)
-                searchBusy = false
-                searchMoreBusy = false
-                searchRequestIssued = false
-                searchExecutionInput = nil
-                searchTask = nil
             } catch {
                 guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error),
                       currentSearchInput == input,
                       isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
                 else { return }
-                if JellyfinCancellation.isCancellation(error) {
-                    searchBusy = false
-                    searchMoreBusy = false
-                    searchRequestIssued = false
-                    searchExecutionInput = nil
-                    searchTask = nil
-                    return
-                }
+                if JellyfinCancellation.isCancellation(error) { return }
                 if JellyfinCancellation.httpStatusCode(error) == 401 {
                     expireSession(base: requestBase, token: requestToken, userId: requestUserId)
                     return
                 }
-                searchBusy = false
-                searchMoreBusy = false
-                searchRequestIssued = false
-                searchExecutionInput = nil
-                searchTask = nil
                 if append {
                     searchMoreError = Self.safeErrorMessage(error)
                 } else {
@@ -569,6 +566,13 @@ final class JellyfinViewModel: ObservableObject {
         let requestToken = token
         let requestUserId = userId
         browseTask = Task {
+            defer {
+                if !Task.isCancelled {
+                    browseBusy = false
+                    browseMoreBusy = false
+                    browseTask = nil
+                }
+            }
             do {
                 let page = try await jellyfin.browseAsync(
                     base: requestBase,
@@ -579,7 +583,9 @@ final class JellyfinViewModel: ObservableObject {
                     limit: 50,
                     order: order
                 )
-                guard !Task.isCancelled, target == activeBrowseTarget else { return }
+                guard !Task.isCancelled, target == activeBrowseTarget,
+                      isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
+                else { return }
                 let existing = target.isSearchFolder ? browseItems : libraryItems
                 let merged = Self.merge(page.items, into: append ? existing : [])
                 if target.isSearchFolder {
@@ -596,27 +602,16 @@ final class JellyfinViewModel: ObservableObject {
                     ?? (append ? browseTotalRecordCount : nil)
                 browseStalled = page.receivedCount == 0 || (append && merged.addedCount == 0)
                 browseLoadedOnce = true
-                browseBusy = false
-                browseMoreBusy = false
-                browseTask = nil
             } catch {
                 guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error),
                       target == activeBrowseTarget,
                       isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
                 else { return }
-                if JellyfinCancellation.isCancellation(error) {
-                    browseBusy = false
-                    browseMoreBusy = false
-                    browseTask = nil
-                    return
-                }
+                if JellyfinCancellation.isCancellation(error) { return }
                 if JellyfinCancellation.httpStatusCode(error) == 401 {
                     expireSession(base: requestBase, token: requestToken, userId: requestUserId)
                     return
                 }
-                browseBusy = false
-                browseMoreBusy = false
-                browseTask = nil
                 if append {
                     browseMoreError = Self.safeErrorMessage(error)
                 } else if target.isSearchFolder {

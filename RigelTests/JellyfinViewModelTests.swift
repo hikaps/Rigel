@@ -37,6 +37,8 @@ private final class ControlledJellyfin: JellyfinServing {
     private(set) var browseRequests: [(parentId: String?, startIndex: Int32, order: JellyfinBrowseOrder)] = []
     var browsePages: [String: JellyfinItemPage] = [:]
     var browseError: Error?
+    var deferBrowse = false
+    private var pendingBrowses: [Int: CheckedContinuation<JellyfinItemPage, Error>] = [:]
     private var pendingSearches: [Int: CheckedContinuation<JellyfinItemPage, Error>] = [:]
     private(set) var mediaSourceRequests: [String] = []
     private var pendingMediaSources: [String: CheckedContinuation<[JellyfinMediaSource], Error>] = [:]
@@ -65,7 +67,11 @@ private final class ControlledJellyfin: JellyfinServing {
         limit: Int32,
         order: JellyfinBrowseOrder
     ) async throws -> JellyfinItemPage {
+        let requestId = browseRequests.count
         browseRequests.append((parentId, startIndex, order))
+        if deferBrowse {
+            return try await withCheckedThrowingContinuation { pendingBrowses[requestId] = $0 }
+        }
         if let browseError { throw browseError }
         return browsePages[parentId ?? "<root>"] ?? JellyfinItemPage(
             items: [], totalRecordCount: nil, startIndex: startIndex, receivedCount: 0
@@ -107,6 +113,10 @@ private final class ControlledJellyfin: JellyfinServing {
         pendingMediaSources.removeValue(forKey: itemId)?.resume(returning: sources)
     }
 
+    func resolveBrowse(requestId: Int, result: Result<JellyfinItemPage, Error>) {
+        pendingBrowses.removeValue(forKey: requestId)?.resume(with: result)
+    }
+
     func failMediaSources(itemId: String, error: Error = CancellationError()) {
         pendingMediaSources.removeValue(forKey: itemId)?.resume(throwing: error)
     }
@@ -128,6 +138,10 @@ private final class ControlledJellyfin: JellyfinServing {
     }
 
     func cancelPending() {
+        for continuation in pendingBrowses.values {
+            continuation.resume(throwing: CancellationError())
+        }
+        pendingBrowses.removeAll()
         for continuation in pendingSearches.values {
             continuation.resume(throwing: CancellationError())
         }
@@ -725,6 +739,97 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertEqual(settings.jellyfinToken(), "replacement-token")
         XCTAssertNil(model.notice)
     }
+
+    func testCancelledRequestsCannotClearReplacementOperationBusyState() async {
+        let service = ControlledJellyfin()
+        service.deferBrowse = true
+        let (model, settings, saved, destination) = connectedModel(service)
+        defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+        model.loadLibraryIfNeeded()
+        await waitUntil { service.browseRequests.count == 1 }
+        model.refreshLibrary()
+        await waitUntil { service.browseRequests.count == 2 }
+        service.resolveBrowse(requestId: 0, result: .failure(CancellationError()))
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(model.browseBusy)
+        service.resolveBrowse(requestId: 1, result: .success(page([item("current", "Current library")], total: 1, start: 0, received: 1)))
+        await waitUntil { !model.browseBusy }
+        XCTAssertEqual(model.libraryItems.map(\.id), ["current"])
+
+        model.searchText = "older"
+        await waitUntil { service.searchRequests.count == 1 }
+        model.searchText = "newer"
+        await waitUntil { service.searchRequests.count == 2 }
+        service.failSearch(term: "older", startIndex: 0)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertTrue(model.searchBusy)
+        service.resolveSearch(term: "newer", startIndex: 0, page: page([item("current", "Current search")], total: 1, start: 0, received: 1))
+        await waitUntil { !model.searchBusy }
+        XCTAssertEqual(model.searchResults.map(\.id), ["current"])
+    }
+
+    func testReplacedAccountSearchDiscardsSuccessAndFailureAndAllowsRetry() async {
+        for succeeds in [true, false] {
+            let service = ControlledJellyfin()
+            let (model, settings, saved, destination) = connectedModel(service)
+            defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+            model.searchText = "shared query"
+            await waitUntil { service.searchRequests.count == 1 }
+            XCTAssertTrue(model.searchBusy)
+            settings.setJellyfinToken(v: "replacement-token")
+            if succeeds {
+                service.resolveSearch(term: "shared query", startIndex: 0, page: page([item("old", "Old account")], total: 1, start: 0, received: 1))
+            } else {
+                service.failSearch(term: "shared query", startIndex: 0, error: JellyfinInterop.shared.makeRequestException(statusCode: 401).asError())
+            }
+            await waitUntil { !model.searchBusy }
+            XCTAssertTrue(model.searchResults.isEmpty)
+            XCTAssertFalse(model.searchBusy)
+            XCTAssertFalse(model.searchMoreBusy)
+            XCTAssertNil(model.searchError)
+            XCTAssertNil(model.notice)
+            XCTAssertEqual(settings.jellyfinToken(), "replacement-token")
+            model.searchNow()
+            await waitUntil { service.searchRequests.count == 2 }
+            XCTAssertEqual(service.searchRequests.count, 2)
+            service.resolveSearch(term: "shared query", startIndex: 0, page: page([item("new", "Current account")], total: 1, start: 0, received: 1))
+            await waitUntil { !model.searchBusy }
+            XCTAssertEqual(model.searchResults.map(\.id), ["new"])
+        }
+    }
+
+    func testReplacedAccountBrowseDiscardsSuccessAndFailureAndAllowsRetry() async {
+        for succeeds in [true, false] {
+            let service = ControlledJellyfin()
+            service.deferBrowse = true
+            let (model, settings, saved, destination) = connectedModel(service)
+            defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+            model.loadLibraryIfNeeded()
+            await waitUntil { service.browseRequests.count == 1 }
+            XCTAssertTrue(model.browseBusy)
+            settings.setJellyfinUserId(v: "replacement-user")
+            let result: Result<JellyfinItemPage, Error> = succeeds
+                ? .success(page([item("old", "Old account")], total: 1, start: 0, received: 1))
+                : .failure(JellyfinInterop.shared.makeRequestException(statusCode: 401).asError())
+            service.resolveBrowse(requestId: 0, result: result)
+            await waitUntil { !model.browseBusy }
+            XCTAssertTrue(model.libraryItems.isEmpty)
+            XCTAssertFalse(model.loadedOnce)
+            XCTAssertFalse(model.browseBusy)
+            XCTAssertFalse(model.browseMoreBusy)
+            XCTAssertNil(model.libraryError)
+            XCTAssertNil(model.notice)
+            XCTAssertEqual(settings.jellyfinToken(), "test-token")
+            model.loadLibraryIfNeeded()
+            await waitUntil { service.browseRequests.count == 2 }
+            XCTAssertEqual(service.browseRequests.count, 2)
+            service.resolveBrowse(requestId: 1, result: .success(page([item("new", "Current account")], total: 1, start: 0, received: 1)))
+            await waitUntil { !model.browseBusy }
+            XCTAssertEqual(model.libraryItems.map(\.id), ["new"])
+        }
+    }
+
     func testKotlinCancellationDuringBrowseClearsBusyWithoutError() async {
         let service = ControlledJellyfin()
         service.browseError = JellyfinInterop.shared.makeCancellationThrowable().asError()
