@@ -592,6 +592,10 @@ final class RigelHttpServer {
         }
     }
 
+    static func isLanIPv4InterfaceName(_ name: String) -> Bool {
+        name == "en0" || name == "en1"
+    }
+
     /// First non-loopback IPv4 address (en0/en1) for TV-visible cast URLs.
     static func lanIPv4() -> String? {
         var address: String?
@@ -600,7 +604,9 @@ final class RigelHttpServer {
         defer { freeifaddrs(interfaces) }
         for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
             let flags = Int32(pointer.pointee.ifa_flags)
-            guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0,
+            let name = String(cString: pointer.pointee.ifa_name)
+            guard Self.isLanIPv4InterfaceName(name),
+                  flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0,
                   pointer.pointee.ifa_addr.pointee.sa_family == UInt8(AF_INET) else { continue }
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             let result = getnameinfo(pointer.pointee.ifa_addr, socklen_t(pointer.pointee.ifa_addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)

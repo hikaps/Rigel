@@ -122,6 +122,23 @@ final class ProbeTest: XCTestCase {
         XCTAssertEqual(bounded.finish().map(\.dts), [120])
     }
 
+    func testRemuxUsesPositivePacketDurationBeforeAverageFrameStep() {
+        var trailing = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 8)
+        XCTAssertEqual(trailing.append(pts: 0, dts: 0, duration: 20).map(\.dts), [0])
+        XCTAssertTrue(trailing.append(pts: 20, dts: Int64.min, duration: 20).isEmpty)
+
+        let trailingPackets = trailing.finish()
+        XCTAssertEqual(trailingPackets.map(\.pts), [20])
+        XCTAssertEqual(trailingPackets.map(\.dts), [20])
+
+        var bounded = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 1)
+        XCTAssertEqual(bounded.append(pts: 0, dts: 0, duration: 20).map(\.dts), [0])
+        XCTAssertTrue(bounded.append(pts: 20, dts: Int64.min, duration: 20).isEmpty)
+        XCTAssertEqual(bounded.append(pts: 40, dts: Int64.min, duration: 10).map(\.dts), [20])
+        XCTAssertEqual(bounded.finish().map(\.dts), [40])
+    }
+
+
 
     func testHardwareFramesContextUsesBufferData() {
         let size = MemoryLayout<AVHWFramesContext>.size

@@ -339,6 +339,28 @@ class DevicesRepositoryTest {
     }
 
     @Test
+    fun scanAcceptsResponderPinnedHexadecimalHostname() = kotlinx.coroutines.test.runTest {
+        discovery.devices = listOf(
+            SsdpDevice(
+                usn = "roku-cafe",
+                location = "http://cafe:8060/",
+                server = "Roku",
+                searchTarget = "roku:ecp",
+                responderAddress = "10.0.0.7",
+            ),
+        )
+        val engine = mockEngine { request ->
+            assertEquals("10.0.0.7", request.url.host)
+            respond(deviceInfoXml, HttpStatusCode.OK)
+        }
+
+        val found = repo(engine, SettingsStore(MapSettings(mutableMapOf()))).scan()
+        assertEquals(1, found.size)
+        assertEquals("http://10.0.0.7:8060/", (found.single().target as CastTarget.Roku).device.location)
+    }
+
+
+    @Test
     fun scanDeadlineReturnsFastEnrichmentWithoutWaitingForSlowEndpoint() = kotlinx.coroutines.test.runTest {
         discovery.devices = listOf(
             SsdpDevice("slow", "http://10.0.0.7:8060/", "Roku", "roku:ecp"),

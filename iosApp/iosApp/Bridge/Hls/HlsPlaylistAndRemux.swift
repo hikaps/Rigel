@@ -263,7 +263,7 @@ extension RigelHlsExporter {
         }
 
         private func step(for timestamp: RemuxTimestamp) -> Int64 {
-            max(timestamp.duration, frameDuration)
+            timestamp.duration > 0 ? timestamp.duration : frameDuration
         }
 
         mutating func append(

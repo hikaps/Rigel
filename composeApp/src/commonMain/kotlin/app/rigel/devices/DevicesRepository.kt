@@ -265,14 +265,13 @@ private fun safeNetworkLocation(
         locationHost.endsWith(".localhost", ignoreCase = true)
     ) return null
     val locationAddress = canonicalIpAddress(locationHost)
-    if (!allowHostname && locationAddress == null && looksNumericHost(locationHost)) return null
-
     val responder = responderAddress?.trim()?.takeIf { it.isNotEmpty() }
     val responderAddressValue = if (responder == null) {
         null
     } else {
         canonicalIpAddress(responder) ?: return null
     }
+    if (!allowHostname && responderAddressValue == null && locationAddress == null && looksNumericHost(locationHost)) return null
     val chosen = responderAddressValue ?: locationAddress
     if (chosen == null) return location.takeIf { allowHostname }
     if (chosen.isLoopbackOrUnspecified) return null

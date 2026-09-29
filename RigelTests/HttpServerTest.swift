@@ -143,4 +143,12 @@ final class HttpServerTest: XCTestCase {
         }
     }
 
+    func testLanIPv4InterfacePolicyRejectsCellularAndVPNInterfaces() {
+        XCTAssertTrue(RigelHttpServer.isLanIPv4InterfaceName("en0"))
+        XCTAssertTrue(RigelHttpServer.isLanIPv4InterfaceName("en1"))
+        XCTAssertFalse(RigelHttpServer.isLanIPv4InterfaceName("pdp_ip0"))
+        XCTAssertFalse(RigelHttpServer.isLanIPv4InterfaceName("utun5"))
+        XCTAssertFalse(RigelHttpServer.isLanIPv4InterfaceName("lo0"))
+    }
+
 }
