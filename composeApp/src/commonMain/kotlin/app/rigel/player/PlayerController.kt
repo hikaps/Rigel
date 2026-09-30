@@ -616,12 +616,13 @@ class PlayerController(
             val currentAccount = requestFailure.statusCode == 401 &&
                 JellyfinApi.normalizeServerBase(settings.jellyfinServer()) == requestBase &&
                 settings.jellyfinToken() == context.token && settings.jellyfinUserId() == context.userId
-            if (currentAccount) {
-                settings.setJellyfinToken("")
+            val accountCleared = currentAccount && settings.setJellyfinToken("")
+            if (accountCleared) {
                 outputSelection.clearJellyfinServer(requestBase)
             }
             val error = when {
-                currentAccount -> "Jellyfin session expired. Sign in again."
+                currentAccount && !accountCleared -> "Unable to securely clear Jellyfin credentials"
+                accountCleared -> "Jellyfin session expired. Sign in again."
                 requestFailure.statusCode == 403 -> "You do not have permission to start this item on " + target.name
                 else -> "Jellyfin request failed (" + requestFailure.statusCode + ")"
             }

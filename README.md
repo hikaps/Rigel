@@ -21,7 +21,7 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 ## Sources
 
-- **Jellyfin** — connect to your server, browse and search the library, play on this device, or push a library item to a logged-in client session. The access token is stored in the iOS Keychain.
+- **Jellyfin** — connect to your server, browse and search the library, play on this device, or push a library item to a logged-in client session. The access token is stored in the iOS Keychain. Failed credential removal preserves the account and selected destination and reports a secure-storage error.
 - Switching Jellyfin accounts resets cached pages and folder navigation before browsing or searching resumes, and discards in-flight responses and version lookups from the previous account without leaving playback stuck busy.
 - Search and library browsing can continue past pages with no usable entries when more records remain.
 

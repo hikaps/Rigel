@@ -14,11 +14,13 @@ import app.rigel.cast.RokuDevice
 
 import app.rigel.gateway.PlaybackRoute
 import app.rigel.output.PlaybackDestination
+import app.rigel.output.OutputSelection
 import app.rigel.intake.IntakeRequest
 import app.rigel.intake.JellyfinPlaybackContext
 import app.rigel.settings.LinkHistoryEntry
 import app.rigel.settings.RouteOverride
 import app.rigel.settings.SettingsStore
+import app.rigel.settings.JellyfinTokenStore
 import app.rigel.source.jellyfin.JellyfinClient
 import app.rigel.source.jellyfin.JellyfinSession
 import com.russhwolf.settings.MapSettings
@@ -964,6 +966,69 @@ class PlayerControllerTest {
         assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
         assertEquals("Jellyfin session expired. Sign in again.", c.uiState.value.error)
     }
+    @Test
+    fun unauthorizedJellyfinSessionPlayPreservesDestinationWhenTokenClearFails() = runTest(dispatcher.scheduler) {
+        for (throwOnFailure in listOf(false, true)) {
+            val jfBase = "http://jf:8096"
+            val token = "expired-protected-token"
+            var canClear = false
+            val tokenStore = object : JellyfinTokenStore {
+                private var stored: String? = token
+                override val persistsAcrossInstances = true
+                override fun read(): String? = stored
+                override fun write(value: String): Boolean { stored = value; return true }
+                override fun clear(): Boolean {
+                    if (!canClear) {
+                        if (throwOnFailure) throw IllegalStateException("secure deletion failed")
+                        return false
+                    }
+                    stored = null
+                    return true
+                }
+            }
+            val settings = SettingsStore(MapSettings(mutableMapOf()), tokenStore)
+            settings.setJellyfinServer(jfBase)
+            settings.setJellyfinUserId("u1")
+            val output = OutputSelection()
+            val target = CastTarget.JellyfinSessionTarget(JellyfinSession("session-1", "TV", "Jellyfin Web", jfBase))
+            output.selectReceiver(target)
+            val engineDispatcher = dispatcher
+            val http = HttpClient(MockEngine) {
+                engine {
+                    dispatcher = engineDispatcher
+                    addHandler { respond("", HttpStatusCode.Unauthorized) }
+                }
+            }
+            try {
+                val c = PlayerController(settings, outputSelection = output, jellyfin = JellyfinClient(http))
+                val sourceId = "version-1"
+                val jellyfinRequest = request.copy(
+                    sourceUrl = "$jfBase/Videos/item1/stream?Static=true&MediaSourceId=$sourceId&api_key=$token",
+                    jellyfinContext = JellyfinPlaybackContext(jfBase, token, "u1", "item1", sourceId),
+                )
+                c.loadRequest(jellyfinRequest)
+                advanceUntilIdle()
+                assertEquals(token, settings.jellyfinToken())
+                assertEquals(PlaybackDestination.Receiver(target), output.snapshot().destination)
+                assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+                assertFalse(c.uiState.value.remotePlayback)
+                assertFalse(c.uiState.value.castActive)
+                val clearFailure = assertNotNull(c.uiState.value.error)
+                assertFalse(token in clearFailure)
+
+                canClear = true
+                c.loadRequest(jellyfinRequest)
+                advanceUntilIdle()
+                assertEquals("", settings.jellyfinToken())
+                assertEquals(PlaybackDestination.Local, output.snapshot().destination)
+                assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+                assertTrue(assertNotNull(c.uiState.value.error) != clearFailure)
+            } finally {
+                http.close()
+            }
+        }
+    }
+
     @Test
     fun forbiddenJellyfinSessionPlayKeepsAccountAndShowsPermissionError() = runTest(dispatcher.scheduler) {
         val jfBase = "http://jf:8096"
