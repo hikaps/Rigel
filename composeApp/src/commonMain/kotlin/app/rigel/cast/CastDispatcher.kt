@@ -17,6 +17,8 @@ interface CastDispatching {
     suspend fun cast(target: CastTarget, media: PreparedCastMedia): CastResult
     suspend fun recastIfActive(target: CastTarget, media: PreparedCastMedia): CastResult?
     suspend fun seekActive(positionMs: Long, durationMs: Long): Boolean
+    suspend fun position(target: CastTarget): Long?
+    suspend fun positionActive(): Long?
     fun detachActive(): CastTarget?
     suspend fun stopDetached(target: CastTarget): Boolean
 }
@@ -53,6 +55,24 @@ object CastDispatcher : CastDispatching {
     suspend fun seekActive(positionMs: Long, durationMs: Long, client: HttpClient): Boolean {
         val target = session.activeTarget() ?: return false
         return ReceiverRegistry.adapterFor(target).seek(target, positionMs, durationMs, client)
+    }
+
+    /** Query a target directly; callers may use this before detaching the session. */
+    override suspend fun position(target: CastTarget): Long? =
+        position(target, requireClient())
+
+    suspend fun position(target: CastTarget, client: HttpClient): Long? = runCatching {
+        ReceiverRegistry.adapterFor(target).position(target, client)
+    }.getOrNull()
+
+    /** Query the active target, discarding a response from a superseded session. */
+    override suspend fun positionActive(): Long? =
+        positionActive(requireClient())
+
+    suspend fun positionActive(client: HttpClient): Long? {
+        val snapshot = session.activeSnapshot() ?: return null
+        val position = position(snapshot.target, client)
+        return if (session.isCurrent(snapshot)) position else null
     }
 
     suspend fun pauseActive(): Boolean = pauseActive(requireClient())
@@ -116,8 +136,12 @@ object CastDispatcher : CastDispatching {
         }
         val attempt = session.beginAttempt()
         val result = ReceiverRegistry.adapterFor(target).cast(target, media, client)
-        if (result is CastResult.Sent && session.commitActive(target, attempt)) {
-            playbackPort?.setCastActive(true)
+        if (result is CastResult.Sent) {
+            if (session.commitActive(target, attempt)) {
+                playbackPort?.setCastActive(true)
+            } else {
+                return CastResult.Rejected("Cast attempt superseded")
+            }
         }
         return result
     }
@@ -135,8 +159,12 @@ object CastDispatcher : CastDispatching {
         ) return CastResult.Rejected("Receiver cannot fetch the source URL")
         val attempt = session.beginAttemptFor(target) ?: return null
         val result = ReceiverRegistry.adapterFor(target).cast(target, media, client)
-        if (result is CastResult.Sent && session.commitActive(target, attempt)) {
-            playbackPort?.setCastActive(true)
+        if (result is CastResult.Sent) {
+            if (session.commitActive(target, attempt)) {
+                playbackPort?.setCastActive(true)
+            } else {
+                return CastResult.Rejected("Cast attempt superseded")
+            }
         }
         return result
     }

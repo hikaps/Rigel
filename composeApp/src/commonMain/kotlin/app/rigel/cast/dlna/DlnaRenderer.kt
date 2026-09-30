@@ -20,7 +20,7 @@ import io.ktor.http.Url
  * controlURL used for volume. Pure function — unit-testable.
  */
 object DlnaDeviceDescription {
-    fun parse(usn: String, location: String, deviceXml: String): DlnaDevice? {
+    fun parse(usn: String, location: String, deviceXml: String, trustedBase: String? = null): DlnaDevice? {
         val friendlyName = Regex("""<friendlyName>\s*([^<]+?)\s*</friendlyName>""")
             .find(deviceXml)?.groupValues?.get(1)?.trim() ?: return null
         val servicesBlock = Regex(
@@ -60,31 +60,44 @@ object DlnaDeviceDescription {
         }
 
         val control = avControlUrl ?: return null
+        val resolvedControl = resolveControlUrl(location, control, trustedBase) ?: return null
+        val resolvedRendering = renderingControlUrl?.let { resolveControlUrl(location, it, trustedBase) ?: return null }
+        val resolvedConnectionManager = connectionManagerUrl?.let { resolveControlUrl(location, it, trustedBase) ?: return null }
         fun text(tag: String): String? = Regex("""<$tag>\s*([^<]+?)\s*</$tag>""")
             .find(deviceXml)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
         return DlnaDevice(
             usn = usn,
             location = location,
             friendlyName = friendlyName,
-            controlUrl = resolveUrl(location, control),
-            renderingControlUrl = renderingControlUrl?.let { resolveUrl(location, it) },
+            controlUrl = resolvedControl,
+            renderingControlUrl = resolvedRendering,
             eventSubUrl = eventSubUrl,
             manufacturer = text("manufacturer"),
             modelName = text("modelName"),
             modelNumber = text("modelNumber"),
-            connectionManagerUrl = connectionManagerUrl?.let { resolveUrl(location, it) },
+            connectionManagerUrl = resolvedConnectionManager,
         )
     }
 
     /** controlURL is often relative; resolve against the LOCATION origin. */
     internal fun resolveUrl(location: String, controlUrl: String): String {
-        if (controlUrl.startsWith("http://") || controlUrl.startsWith("https://")) return controlUrl
+        if (controlUrl.startsWith("http://", ignoreCase = true) || controlUrl.startsWith("https://", ignoreCase = true)) return controlUrl
         return if (controlUrl.startsWith("/")) {
             val scheme = if (location.startsWith("https")) "https" else "http"
             "$scheme://${location.removePrefix("http://").removePrefix("https://").substringBefore('/')}$controlUrl"
         } else {
             location.substringBeforeLast('/', location) + "/" + controlUrl
         }
+    }
+
+    /** Restrict responder-provided absolute service URLs to the trusted host. */
+    private fun resolveControlUrl(location: String, controlUrl: String, trustedBase: String?): String? {
+        val resolved = resolveUrl(location, controlUrl)
+        val base = trustedBase ?: return resolved
+        val url = runCatching { Url(resolved) }.getOrNull() ?: return null
+        val trustedUrl = runCatching { Url(base) }.getOrNull() ?: return null
+        if (url.protocol.name.lowercase() !in setOf("http", "https")) return null
+        return resolved.takeIf { url.host.equals(trustedUrl.host, ignoreCase = true) }
     }
 
     internal fun sameOrigin(first: String, second: String): Boolean {
@@ -97,15 +110,27 @@ object DlnaDeviceDescription {
 }
 
 /** DLNA renderer control over UPnP AVTransport (playback) and RenderingControl (volume) SOAP. */
-class DlnaRenderer(private val client: HttpClient) {
+class DlnaRenderer(
+    private val client: HttpClient,
+    private val trustedBase: String? = null,
+) {
     private val tag = "DlnaRenderer"
     private val capabilityClient = client.config { followRedirects = false }
 
-    suspend fun fetchDeviceDescription(usn: String, location: String): DlnaDevice? {
+    suspend fun fetchDeviceDescription(
+        usn: String,
+        location: String,
+        trustedBase: String? = this.trustedBase,
+    ): DlnaDevice? {
         val xml = runCatching { client.get(location).bodyAsText() }.getOrNull() ?: return null
-        return DlnaDeviceDescription.parse(usn, location, xml)
+        return DlnaDeviceDescription.parse(usn, location, xml, trustedBase)
     }
 
+    /** DLNA renderer control over UPnP AVTransport (playback) and RenderingControl (volume) SOAP.
+ * Every control POST (AVTransport/RenderingControl/ConnectionManager) goes through
+ * [capabilityClient], a no-redirect client: a hostile renderer must not be able to
+ * bounce a SOAP action to another host via a 3xx response.
+ */
     suspend fun sinkProtocolInfo(device: DlnaDevice): String? {
         val url = device.connectionManagerUrl ?: return null
         if (!DlnaDeviceDescription.sameOrigin(device.location, url)) return null
@@ -121,7 +146,7 @@ class DlnaRenderer(private val client: HttpClient) {
     }
 
     suspend fun setAvTransportUri(device: DlnaDevice, media: PreparedCastMedia): Boolean = runCatching {
-        val response = client.post(device.controlUrl) {
+        val response = capabilityClient.post(device.controlUrl) {
             contentType(ContentType.Text.Xml)
             userAgent("Rigel/1.0")
             header("SOAPACTION", "\"${DlnaSoap.SERVICE_TYPE}#SetAVTransportURI\"")
@@ -133,7 +158,7 @@ class DlnaRenderer(private val client: HttpClient) {
     suspend fun setAvTransportUri(device: DlnaDevice, uri: String, title: String?): Boolean {
         val body = DlnaSoap.setAvTransportUriBody(uri, title)
         return runCatching {
-            val resp = client.post(device.controlUrl) {
+            val resp = capabilityClient.post(device.controlUrl) {
                 contentType(ContentType.Text.Xml)
                 userAgent("Rigel/1.0")
                 header("SOAPACTION", "\"${DlnaSoap.SERVICE_TYPE}#SetAVTransportURI\"")
@@ -219,7 +244,7 @@ class DlnaRenderer(private val client: HttpClient) {
         action: String,
         body: String,
         deviceName: String,
-        requestClient: HttpClient = client,
+        requestClient: HttpClient = capabilityClient,
     ): String? {
         return runCatching {
             val response = requestClient.post(serviceUrl) {

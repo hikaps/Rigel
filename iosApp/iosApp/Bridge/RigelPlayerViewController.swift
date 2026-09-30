@@ -863,8 +863,8 @@ final class RigelPlayerViewController: UIViewController {
                     self.reconcileSubtitlePresentation(
                         externalPlaybackActive: self.player?.isExternalPlaybackActive ?? false
                     )
-                case .failure(let error):
-                    NSLog("[RigelPlayer] media selection metadata failed: %@", error.localizedDescription)
+                case .failure:
+                    NSLog("[RigelPlayer] media selection metadata failed")
                     self.audioGroup = nil
                     self.subtitleGroup = nil
                     self.selectedExternalSubtitleOption = nil
@@ -1054,7 +1054,7 @@ final class RigelPlayerViewController: UIViewController {
     ) {
         let limitedTracks = Array(tracks.prefix(16))
         if tracks.count > limitedTracks.count {
-            NSLog("[RigelPlayer] ignoring %ld sidecar subtitle URLs over the limit", tracks.count - limitedTracks.count)
+            NSLog("[RigelPlayer] ignoring %ld sidecar subtitles over the limit", tracks.count - limitedTracks.count)
         }
         let generation = sidecarGeneration
         for track in limitedTracks {
@@ -1062,12 +1062,12 @@ final class RigelPlayerViewController: UIViewController {
             nextSidecarOrder += 1
             let rawURL = track.url
             guard let url = URL(string: rawURL) else {
-                NSLog("[RigelPlayer] sidecar %@ failed: invalid URL", rawURL)
+                NSLog("[RigelPlayer] sidecar %ld failed: invalid URL", sidecarOrder)
                 continue
             }
             let extensionName = url.pathExtension.lowercased()
             if extensionName == "ass" {
-                NSLog("[RigelPlayer] sidecar %@ skipped: ASS is unsupported", rawURL)
+                NSLog("[RigelPlayer] sidecar %ld skipped: ASS is unsupported", sidecarOrder)
                 continue
             }
             if url.isFileURL {
@@ -1090,8 +1090,8 @@ final class RigelPlayerViewController: UIViewController {
                       let http = response as? HTTPURLResponse,
                       (200..<300).contains(http.statusCode),
                       let data else {
-                    let detail = error?.localizedDescription ?? "HTTP request failed"
-                    NSLog("[RigelPlayer] sidecar %@ failed: %@", rawURL, detail)
+                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    NSLog("[RigelPlayer] sidecar %ld failed: HTTP status=%ld", sidecarOrder, statusCode)
                     return
                 }
                 guard let cues = Self.decodeSidecarCues(
@@ -1110,7 +1110,7 @@ final class RigelPlayerViewController: UIViewController {
                         cues: cues,
                         onLoaded: onLoaded
                     )
-                    NSLog("[RigelPlayer] sidecar %@ ok", rawURL)
+                    NSLog("[RigelPlayer] sidecar %ld ok", sidecarOrder)
                 }
             }.resume()
         }
@@ -1130,7 +1130,7 @@ final class RigelPlayerViewController: UIViewController {
     ) {
         DispatchQueue.global().async { [weak self] in
             guard let data = try? Data(contentsOf: url) else {
-                NSLog("[RigelPlayer] sidecar %@ failed: file not readable", rawURL)
+                NSLog("[RigelPlayer] sidecar %ld failed: file not readable", order)
                 return
             }
             guard let cues = RigelPlayerViewController.decodeSidecarCues(
@@ -1149,7 +1149,7 @@ final class RigelPlayerViewController: UIViewController {
                     cues: cues,
                     onLoaded: onLoaded
                 )
-                NSLog("[RigelPlayer] sidecar %@ ok", rawURL)
+                NSLog("[RigelPlayer] sidecar %ld ok", order)
             }
         }
     }
@@ -1163,7 +1163,7 @@ final class RigelPlayerViewController: UIViewController {
         rawURL: String
     ) -> [SubtitleParser.Cue]? {
         guard let text = SubtitleParser.decode(data: data, encodingName: encodingName) else {
-            NSLog("[RigelPlayer] sidecar %@ failed: unsupported text encoding", rawURL)
+            NSLog("[RigelPlayer] sidecar failed: unsupported text encoding")
             return nil
         }
         var cues = extensionName == "vtt"
@@ -1171,7 +1171,7 @@ final class RigelPlayerViewController: UIViewController {
             : SubtitleParser.parseSRT(text)
         cues.sort { $0.start < $1.start }
         guard !cues.isEmpty else {
-            NSLog("[RigelPlayer] sidecar %@ failed: no valid cues", rawURL)
+            NSLog("[RigelPlayer] sidecar failed: no valid cues")
             return nil
         }
         return cues
@@ -1234,7 +1234,7 @@ final class RigelPlayerViewController: UIViewController {
         isProxy: Bool = false,
         startOffsetSeconds: Double = 0
     ) {
-        NSLog("[RigelPlayer] load %@ longFormVideo=%d", url, longFormVideoAirPlayEligible ? 1 : 0)
+        NSLog("[RigelPlayer] load longFormVideo=%d", longFormVideoAirPlayEligible ? 1 : 0)
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedTitle = trimmedTitle?.isEmpty == false
             ? trimmedTitle!
@@ -1261,7 +1261,7 @@ final class RigelPlayerViewController: UIViewController {
                 Self.audioSessionLock.unlock()
             }
         } catch {
-            NSLog("[RigelPlayer] audio session setup failed: %@", error.localizedDescription)
+            NSLog("[RigelPlayer] audio session setup failed")
         }
 
         disposed = false
@@ -1587,7 +1587,12 @@ final class RigelPlayerViewController: UIViewController {
         guard seconds.isFinite, seconds >= 0 else { return nil }
         return Int64((seconds * 1000).rounded(.down))
     }
+
     private func tearDownPlayer() {
+        // A replacement or dismantle ends the old item's buffering state. The
+        // host tags this callback with the active replacement generation, so a
+        // late teardown from an old controller cannot clear a new item.
+        reportNativeBuffering(false)
         externalPlaybackObservation?.invalidate()
         externalPlaybackObservation = nil
         subtitleCustomizationHost?.dismiss(animated: false)
@@ -1660,7 +1665,7 @@ final class RigelPlayerViewController: UIViewController {
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         } catch {
-            NSLog("[RigelPlayer] audio session deactivation failed: %@", error.localizedDescription)
+            NSLog("[RigelPlayer] audio session deactivation failed")
         }
     }
 
@@ -1710,7 +1715,7 @@ final class RigelPlayerViewController: UIViewController {
             }
             let nsErr = item.error as NSError?
             let detail = nsErr?.localizedDescription ?? "Playback failed"
-            NSLog("[RigelPlayer] item failed: %@ (domain=%@ code=%ld)", detail, nsErr?.domain ?? "?", nsErr?.code ?? -1)
+            NSLog("[RigelPlayer] item failed (domain=%@ code=%ld)", nsErr?.domain ?? "?", nsErr?.code ?? -1)
             // One-shot: stop polling so a `.failed` is delivered exactly once.
             // PlayerController may be auto-falling back to the proxy; repeated
             // delivery would race the proxy build and force an error screen.

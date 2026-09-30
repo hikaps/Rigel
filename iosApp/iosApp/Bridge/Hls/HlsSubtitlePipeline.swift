@@ -1,6 +1,21 @@
 import Foundation
 
 extension RigelHlsExporter {
+    enum SourceWebVTTSettingsResult {
+        case unavailable
+        case values([Int64: [String]])
+        case exceededBudget
+    }
+
+    // Subtitle metadata is authored input. Keep the scan complete for normal
+    // files, but make both its transient line buffer and retained fallback
+    // index explicitly bounded rather than allowing one malformed file to
+    // consume the exporter process.
+    private static let sourceWebVTTChunkBytes = 64 * 1024
+    private static let sourceWebVTTMaxBytes = 64 * 1024 * 1024
+    private static let sourceWebVTTMaxLineBytes = 1 * 1024 * 1024
+    private static let sourceWebVTTMaxMetadataBytes = 8 * 1024 * 1024
+    private static let sourceWebVTTMaxMetadataEntries = 100_000
     private enum SubtitlePacketResult {
         case cue(SubtitleCue)
         case skipped
@@ -133,6 +148,16 @@ extension RigelHlsExporter {
             chain?.release()
             return nil
         }
+        let settingsByStartMs: [Int64: [String]]
+        switch sourceWebVTTSettings(input.sourceURL) {
+        case .unavailable:
+            settingsByStartMs = [:]
+        case .values(let values):
+            settingsByStartMs = values
+        case .exceededBudget:
+            chain?.release()
+            return nil
+        }
         let rendition = SubtitleRendition(
             input: input,
             ordinal: ordinal,
@@ -143,7 +168,7 @@ extension RigelHlsExporter {
             language: input.language,
             title: input.title,
             isSelectedExternal: isSelectedExternal,
-            settingsByStartMs: sourceWebVTTSettings(input.sourceURL)
+            settingsByStartMs: settingsByStartMs
         )
         initializeSubtitlePlaylist(rendition)
         return rendition
@@ -152,30 +177,64 @@ extension RigelHlsExporter {
     static func writeSubtitlePacket(
         _ rendition: SubtitleRendition,
         packet: UnsafeMutablePointer<AVPacket>,
-        sidecarOffsetUs: Int64
+        sidecarOffsetUs: Int64,
+        sourceTimestampOrigin90k: Int64
     ) {
         guard let inputStream = rendition.input.context.pointee.streams[Int(rendition.input.streamIndex)] else {
             return
         }
         let shiftedPacket = packet
-        if rendition.input.sourceID != 0, sidecarOffsetUs > 0,
+        let sourceOriginUs = rendition.input.sourceID == 0
+            ? av_rescale_q(
+                sourceTimestampOrigin90k,
+                AVRational(num: 1, den: 90_000),
+                AVRational(num: 1, den: AV_TIME_BASE)
+            )
+            : 0
+        let totalOffsetUs = sidecarOffsetUs.addingReportingOverflow(sourceOriginUs)
+        let offsetUs = totalOffsetUs.overflow
+            ? (sourceOriginUs >= 0 ? Int64.max : Int64.min)
+            : totalOffsetUs.partialValue
+        // Embedded cues use the source media epoch; sidecars are authored
+        // relative to content start. The playlist map separately accounts
+        // for the requested seek and the encoder output epoch.
+        if offsetUs != 0,
            packet.pointee.pts != Int64.min {
             let inputTimeBase = subtitleTimeBase(inputStream)
             let offsetInInput = av_rescale_q(
-                sidecarOffsetUs,
+                offsetUs,
                 AVRational(num: 1, den: AV_TIME_BASE),
                 inputTimeBase
             )
-            let end = packet.pointee.duration > 0
-                ? packet.pointee.pts + packet.pointee.duration
-                : packet.pointee.pts
-            guard end > offsetInInput else { return }
-            shiftedPacket.pointee.pts = max(0, packet.pointee.pts - offsetInInput)
+            // shiftedPacket aliases packet. Capture the original interval
+            // before changing PTS; otherwise duration reads the shifted PTS
+            // and extends clipped cues.
+            let originalPTS = packet.pointee.pts
+            let originalDuration = packet.pointee.duration
+            let end = originalDuration > 0
+                ? originalPTS.addingReportingOverflow(originalDuration)
+                : (partialValue: originalPTS, overflow: false)
+            guard !end.overflow else { return }
+            if originalDuration > 0 {
+                let clippedStart = max(originalPTS, offsetInInput)
+                guard end.partialValue > clippedStart else { return }
+                shiftedPacket.pointee.duration = end.partialValue - clippedStart
+            }
+            let shiftedPTS: Int64
+            if offsetInInput > 0 {
+                shiftedPTS = originalPTS > offsetInInput
+                    ? originalPTS - offsetInInput
+                    : 0
+            } else if offsetInInput < 0,
+                      offsetInInput != Int64.min {
+                let increased = originalPTS.addingReportingOverflow(-offsetInInput)
+                shiftedPTS = increased.overflow ? Int64.max : max(0, increased.partialValue)
+            } else {
+                shiftedPTS = originalPTS
+            }
+            shiftedPacket.pointee.pts = shiftedPTS
             if shiftedPacket.pointee.dts != Int64.min {
                 shiftedPacket.pointee.dts = shiftedPacket.pointee.pts
-            }
-            if packet.pointee.duration > 0 {
-                shiftedPacket.pointee.duration = end - max(offsetInInput, packet.pointee.pts)
             }
         }
 
@@ -291,24 +350,72 @@ extension RigelHlsExporter {
             )
         )
     }
-    private static func sourceWebVTTSettings(_ sourceURL: String?) -> [Int64: [String]] {
+    static func sourceWebVTTSettings(_ sourceURL: String?) -> SourceWebVTTSettingsResult {
         guard let sourceURL,
               let url = URL(string: sourceURL),
               url.isFileURL,
-              let raw = try? String(contentsOf: url, encoding: .utf8) else {
-            return [:]
+              let file = try? FileHandle(forReadingFrom: url) else {
+            return .unavailable
         }
+        defer { try? file.close() }
+
         var result: [Int64: [String]] = [:]
-        for line in raw.components(separatedBy: .newlines) where line.contains("-->") {
-            let parts = line.components(separatedBy: "-->")
-            guard parts.count == 2 else { continue }
-            let start = parts[0].trimmingCharacters(in: .whitespaces)
-            let rhs = parts[1].trimmingCharacters(in: .whitespaces)
+        var totalBytes = 0
+        var metadataBytes = 0
+        var metadataEntries = 0
+        func consumeLine(_ line: String) -> Bool {
+            guard line.contains("-->") else { return true }
+            let parts = line.split(separator: "-->", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return true }
+            let start = String(parts[0]).trimmingCharacters(in: .whitespaces)
+            let rhs = String(parts[1]).trimmingCharacters(in: .whitespaces)
             let fields = rhs.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-            guard fields.count > 1, let startMs = parseVTTTimestamp(start) else { continue }
-            result[startMs, default: []].append(String(fields[1]))
+            guard fields.count > 1, let startMs = parseVTTTimestamp(start) else { return true }
+            let setting = String(fields[1])
+            let settingBytes = setting.utf8.count
+            guard settingBytes <= sourceWebVTTMaxMetadataBytes,
+                  metadataEntries < sourceWebVTTMaxMetadataEntries,
+                  metadataBytes <= sourceWebVTTMaxMetadataBytes - settingBytes else {
+                return false
+            }
+            metadataEntries += 1
+            metadataBytes += settingBytes
+            result[startMs, default: []].append(setting)
+            return true
         }
-        return result
+
+        var pending = Data()
+        while true {
+            let remainingLineBytes = sourceWebVTTMaxLineBytes + 1 - pending.count
+            guard remainingLineBytes > 0 else { return .exceededBudget }
+            let chunk = file.readData(ofLength: min(sourceWebVTTChunkBytes, remainingLineBytes))
+            if chunk.isEmpty { break }
+            totalBytes += chunk.count
+            guard totalBytes <= sourceWebVTTMaxBytes else { return .exceededBudget }
+            pending.append(chunk)
+            while let lineEnd = pending.firstIndex(where: { $0 == 0x0A || $0 == 0x0D }) {
+                let lineData = pending.subdata(in: pending.startIndex..<lineEnd)
+                let separator = pending[lineEnd]
+                var nextLineStart = pending.index(after: lineEnd)
+                if separator == 0x0D,
+                   nextLineStart < pending.endIndex,
+                   pending[nextLineStart] == 0x0A {
+                    nextLineStart = pending.index(after: nextLineStart)
+                }
+                pending.removeSubrange(pending.startIndex..<nextLineStart)
+                guard consumeLine(String(decoding: lineData, as: UTF8.self)) else {
+                    return .exceededBudget
+                }
+            }
+            guard pending.count <= sourceWebVTTMaxLineBytes else { return .exceededBudget }
+        }
+        if !pending.isEmpty {
+            guard consumeLine(String(decoding: pending, as: UTF8.self)) else {
+                return .exceededBudget
+            }
+        }
+        return .values(result)
+
     }
 
     private static func packetWebVTTSettings(_ packet: UnsafeMutablePointer<AVPacket>) -> String? {

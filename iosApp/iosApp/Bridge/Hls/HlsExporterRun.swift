@@ -1,6 +1,27 @@
 import Foundation
 
 extension RigelHlsExporter {
+    private static let subtitleMpegTSModulus: Int64 = 1 << 33
+
+    static func subtitleTimestampMapMpegTS(
+        mode: String,
+        sourceOrigin90k: Int64,
+        requestedOffsetMs: Int64,
+        encoderOrigin90k: Int64
+    ) -> Int64 {
+        let requestedOffset90k = av_rescale_q(
+            requestedOffsetMs,
+            AVRational(num: 1, den: 1_000),
+            AVRational(num: 1, den: 90_000)
+        )
+        let epoch = sourceOrigin90k.addingReportingOverflow(requestedOffset90k).partialValue
+        let outputClock = mode == "remux"
+            ? epoch
+            : epoch.subtractingReportingOverflow(encoderOrigin90k).partialValue
+        let wrapped = outputClock % subtitleMpegTSModulus
+        return wrapped >= 0 ? wrapped : wrapped + subtitleMpegTSModulus
+    }
+
     static func run(
         session: Session,
         sessionId: String,
@@ -27,6 +48,7 @@ extension RigelHlsExporter {
         var terminalError: String?
         func reportFailure(_ message: String) {
             guard !isCancelled(session) else { return }
+            terminalError = terminalError ?? message
             if notified {
                 DispatchQueue.main.async { onError(message) }
             } else {
@@ -36,6 +58,12 @@ extension RigelHlsExporter {
         }
 
         defer {
+            let shouldDelete = terminalError != nil && !isCancelled(session)
+            if shouldDelete {
+                lock.lock()
+                session.cleanupPending = true
+                lock.unlock()
+            }
             let wasCancelled = finishSession(session, sessionId: sessionId)
             if !notified && !wasCancelled {
                 notified = true
@@ -54,18 +82,14 @@ extension RigelHlsExporter {
                 subtitleInputs: subtitleInputs,
                 subtitleRenditions: subtitleRenditions
             )
+            if shouldDelete && !wasCancelled {
+                deleteSessionDir(sessionId: sessionId, session: session, writerQueue: session.queue)
+            }
         }
 
-        guard openInput(url: sourceUrl, headers: headers, fmt: &ifmt), let ctx = ifmt else {
+        guard openInput(url: sourceUrl, headers: headers, watchdog: session.inputWatchdog, fmt: &ifmt), let ctx = ifmt else {
             reportFailure("failed to open source: \(sourceUrl)")
             return
-        }
-        if session.startOffsetMs > 0 {
-            let targetUs = session.startOffsetMs.multipliedReportingOverflow(by: 1_000).partialValue
-            let seekResult = avformat_seek_file(ctx, -1, 0, targetUs, Int64.max, 0)
-            if seekResult < 0 {
-                NSLog("[RigelPlayer] failed to seek source to %lld ms", session.startOffsetMs)
-            }
         }
         let inCount = Int(ctx.pointee.nb_streams)
         var selectedVideoIndex: Int32?
@@ -76,6 +100,7 @@ extension RigelHlsExporter {
         for (offset, track) in session.subtitleTracks.enumerated() {
             var subtitleFmt: UnsafeMutablePointer<AVFormatContext>? = nil
             let watchdog = InputWatchdog(timeoutSeconds: 10)
+            session.retainSidecarWatchdog(watchdog)
             guard openSidecarInput(url: track.url, headers: [:], watchdog: watchdog, fmt: &subtitleFmt),
                   let subtitleCtx = subtitleFmt else {
                 closeInput(&subtitleFmt)
@@ -159,6 +184,30 @@ extension RigelHlsExporter {
         } else {
             outputAudioIndices = selectedAudioIndices
         }
+        if session.startOffsetMs > 0 {
+            let seekOrigin90k = sourceTimestampOrigin90k(
+                ctx,
+                videoIndex: selectedVideoIndex,
+                audioIndices: outputAudioIndices
+            )
+            let seekOriginUs = av_rescale_q(
+                seekOrigin90k,
+                AVRational(num: 1, den: 90_000),
+                AVRational(num: 1, den: AV_TIME_BASE)
+            )
+            let requestedOffsetUs = session.startOffsetMs.multipliedReportingOverflow(by: 1_000)
+            let targetUs = seekOriginUs.addingReportingOverflow(requestedOffsetUs.partialValue)
+            guard !requestedOffsetUs.overflow, !targetUs.overflow else {
+                reportFailure("invalid HLS seek offset")
+                return
+            }
+            session.inputWatchdog.touch()
+            let seekResult = avformat_seek_file(ctx, -1, 0, targetUs.partialValue, Int64.max, 0)
+            if seekResult < 0 {
+                NSLog("[RigelPlayer] failed to seek source to %lld ms", session.startOffsetMs)
+            }
+        }
+
         let hasMasterPlaylist = selectedVideoIndex != nil
         let baseMasterPath = outDir.appendingPathComponent("base.m3u8").path
         let playlistPath = hasMasterPlaylist
@@ -247,6 +296,12 @@ extension RigelHlsExporter {
             }
         }
 
+        let subtitleMapMpegTS = subtitleTimestampMapMpegTS(
+            mode: mode,
+            sourceOrigin90k: timestampOrigin90k,
+            requestedOffsetMs: session.startOffsetMs,
+            encoderOrigin90k: mediaTimestampOrigin90k
+        )
         var primarySubtitleOutputs: [Int32: SubtitleRendition] = [:]
         var externalSubtitleOutputs: [Int: SubtitleRendition] = [:]
         if mainVideoOutput != nil {
@@ -284,7 +339,7 @@ extension RigelHlsExporter {
                     ordinal: subtitleRenditions.count,
                     outDir: outDir,
                     chain: chain,
-                    timestampMapMpegTS: timestampOrigin90k,
+                    timestampMapMpegTS: subtitleMapMpegTS,
                     isSelectedExternal: isSelectedExternal
                 ) else {
                     if isSelectedExternal {
@@ -363,9 +418,11 @@ extension RigelHlsExporter {
             primingLoop: while !chain.initialized && !isCancelled(session) {
                 var primePacket = AVPacket()
                 av_init_packet(&primePacket)
+                session.inputWatchdog.touch()
                 let readRet = av_read_frame(ctx, &primePacket)
                 switch classifyPrimingRead(readRet) {
                 case .ok:
+                    session.inputWatchdog.touch()
                     break
                 case .again:
                     // Non-blocking source: transient, not EOF. Yield briefly
@@ -444,7 +501,12 @@ extension RigelHlsExporter {
                         audioChain.timestampOrigin90k = ringHeadPTS
                     }
                     for rendition in subtitleRenditions {
-                        rendition.timestampMapMpegTS = ringHeadPTS
+                        rendition.timestampMapMpegTS = subtitleTimestampMapMpegTS(
+                            mode: mode,
+                            sourceOrigin90k: timestampOrigin90k,
+                            requestedOffsetMs: session.startOffsetMs,
+                            encoderOrigin90k: ringHeadPTS
+                        )
                     }
                 }
             }
@@ -473,41 +535,105 @@ extension RigelHlsExporter {
                 if let chain = audioChains[inIdx] {
                     writeTranscodedAudio(chain: chain, packet: buffered, out: out, outStream: outStream)
                 } else if passthroughAudioIndices.contains(inIdx) {
-                    writeRemuxPacket(buffered, inStream: inStream, outStream: outStream, out: out)
+                    let writeRet = writeRemuxPacket(buffered, inStream: inStream, outStream: outStream, out: out)
+                    if writeRet < 0 {
+                        terminalError = "audio packet write failed: \(avErrorString(writeRet))"
+                    }
                 }
             }
             var bufferedPointer: UnsafeMutablePointer<AVPacket>? = buffered
             av_packet_free(&bufferedPointer)
         }
         pendingAudioPackets.removeAll()
+        if let writeError = terminalError ?? audioChains.values.compactMap({ $0.error }).first {
+            let trailerRet = av_write_trailer(out)
+            let failure = trailerRet < 0
+                ? "HLS write trailer failed: \(avErrorString(trailerRet))"
+                : writeError
+            reportFailure(failure)
+            return
+        }
         /// Sidecar subtitle files keep absolute timestamps; after a proxy seek
         /// the primary input's timeline is shifted by the same offset.
         let sidecarOffsetUs = session.startOffsetMs.multipliedReportingOverflow(by: 1_000).partialValue
 
-
         var primaryEnded = false
+        let readRetryLimit = 100
+        var primaryReadRetryCount = 0
+        var externalReadRetryCounts: [Int: Int] = [:]
         var endedExternalSources = Set<Int>()
         var lastReadinessCheck = DispatchTime(uptimeNanoseconds: 0)
         var lastInputUs: Int64 = 0
         let externalSourceCount = externalSubtitleOutputs.count
-        let remuxVideoFrameDuration: Int64? = {
+        var remuxVideoBuffer: RemuxVideoPacketBuffer? = {
             guard mode == "remux", let videoIndex = selectedVideoIndex,
                   let videoStream = ctx.pointee.streams[Int(videoIndex)] else { return nil }
-            return remuxFrameDuration(inputStream: videoStream)
+            return RemuxVideoPacketBuffer(
+                frameDuration: remuxFrameDuration(inputStream: videoStream),
+                maximumPendingPackets: remuxTimestampBufferLimit(inputStream: videoStream)
+            )
         }()
-        var nextRemuxVideoTimestamp: Int64?
-        while true {
+        defer {
+            remuxVideoBuffer?.release()
+        }
+        func writeBufferedRemuxPackets(
+            _ ready: [RemuxReadyPacket],
+            inStream: UnsafeMutablePointer<AVStream>,
+            outStream: UnsafeMutablePointer<AVStream>
+        ) -> String? {
+            for (index, readyPacket) in ready.enumerated() {
+                readyPacket.packet.pointee.pts = readyPacket.timestamps.pts
+                readyPacket.packet.pointee.dts = readyPacket.timestamps.dts
+                let writeRet = writeRemuxPacket(
+                    readyPacket.packet,
+                    inStream: inStream,
+                    outStream: outStream,
+                    out: out
+                )
+                var packetPointer: UnsafeMutablePointer<AVPacket>? = readyPacket.packet
+                av_packet_free(&packetPointer)
+                if writeRet < 0 {
+                    for remaining in ready.dropFirst(index + 1) {
+                        var remainingPointer: UnsafeMutablePointer<AVPacket>? = remaining.packet
+                        av_packet_free(&remainingPointer)
+                    }
+                    return "HLS video packet write failed: \(avErrorString(writeRet))"
+                }
+            }
+            return nil
+        }
+        packetLoop: while true {
             if isCancelled(session) { break }
             paceExport(session: session, exportedUs: lastInputUs)
             var didRead = false
             if !primaryEnded {
                 var primaryPacket = AVPacket()
                 av_init_packet(&primaryPacket)
+                session.inputWatchdog.touch()
                 let readRet = av_read_frame(ctx, &primaryPacket)
-                if readRet < 0 {
-                    primaryEnded = true
-                } else {
+                switch classifyPrimingRead(readRet) {
+                case .ok:
+                    primaryReadRetryCount = 0
+                    session.inputWatchdog.touch()
                     didRead = true
+                case .eof:
+                    av_packet_unref(&primaryPacket)
+                    primaryEnded = true
+                case .again:
+                    av_packet_unref(&primaryPacket)
+                    if primaryReadRetryCount < readRetryLimit {
+                        primaryReadRetryCount += 1
+                        usleep(1_000)
+                        continue packetLoop
+                    }
+                    terminalError = "primary read error: \(avErrorString(readRet))"
+                    break packetLoop
+                case .readError(let message):
+                    av_packet_unref(&primaryPacket)
+                    terminalError = message
+                    break packetLoop
+                }
+                if didRead {
                     let inIdx = primaryPacket.stream_index
                     lastInputUs = max(
                         lastInputUs,
@@ -532,31 +658,29 @@ extension RigelHlsExporter {
                         case AVMEDIA_TYPE_VIDEO:
                             if let chain = videoChain, chain.inputIndex == inIdx {
                                 writeTranscodedVideo(chain: chain, packet: &primaryPacket, out: out, outStream: outStream)
-                            } else {
-                                if let frameDuration = remuxVideoFrameDuration {
-                                    let repaired = repairedRemuxTimestamps(
-                                        pts: primaryPacket.pts,
-                                        dts: primaryPacket.dts,
-                                        duration: primaryPacket.duration,
-                                        nextTimestamp: nextRemuxVideoTimestamp,
-                                        frameDuration: frameDuration
+                            } else if var buffer = remuxVideoBuffer {
+                                switch buffer.append(&primaryPacket) {
+                                case .failure(let message):
+                                    terminalError = message
+                                case .ready(let ready):
+                                    terminalError = writeBufferedRemuxPackets(
+                                        ready,
+                                        inStream: inStream,
+                                        outStream: outStream
                                     )
-                                    primaryPacket.pts = repaired.pts
-                                    primaryPacket.dts = repaired.dts
-                                    nextRemuxVideoTimestamp = repaired.nextTimestamp
                                 }
-                                writeRemuxPacket(
-                                    &primaryPacket,
-                                    inStream: inStream,
-                                    outStream: outStream,
-                                    out: out
-                                )
+                                remuxVideoBuffer = buffer
+                            } else {
+                                terminalError = "failed to initialize video timestamp buffer"
                             }
                         case AVMEDIA_TYPE_AUDIO:
                             if let chain = audioChains[inIdx] {
                                 writeTranscodedAudio(chain: chain, packet: &primaryPacket, out: out, outStream: outStream)
                             } else if passthroughAudioIndices.contains(inIdx) {
-                                writeRemuxPacket(&primaryPacket, inStream: inStream, outStream: outStream, out: out)
+                                let writeRet = writeRemuxPacket(&primaryPacket, inStream: inStream, outStream: outStream, out: out)
+                                if writeRet < 0 {
+                                    terminalError = "audio packet write failed: \(avErrorString(writeRet))"
+                                }
                             }
                         default:
                             break
@@ -565,8 +689,13 @@ extension RigelHlsExporter {
                         writeSubtitlePacket(
                             subtitleOutput,
                             packet: &primaryPacket,
-                            sidecarOffsetUs: sidecarOffsetUs
+                            sidecarOffsetUs: sidecarOffsetUs,
+                            sourceTimestampOrigin90k: timestampOrigin90k
                         )
+                    }
+                    if terminalError != nil {
+                        av_packet_unref(&primaryPacket)
+                        break packetLoop
                     }
                     av_packet_unref(&primaryPacket)
                 }
@@ -577,18 +706,46 @@ extension RigelHlsExporter {
                 guard !endedExternalSources.contains(sourceID) else { continue }
                 var subtitlePacket = AVPacket()
                 av_init_packet(&subtitlePacket)
+                subtitleOutput.input.ioWatchdog?.touch()
                 let readRet = av_read_frame(subtitleOutput.input.context, &subtitlePacket)
-                if readRet < 0 {
-                    endedExternalSources.insert(sourceID)
-                } else {
+                switch classifyPrimingRead(readRet) {
+                case .ok:
+                    externalReadRetryCounts[sourceID] = 0
                     subtitleOutput.input.ioWatchdog?.touch()
                     didRead = true
                     writeSubtitlePacket(
                         subtitleOutput,
                         packet: &subtitlePacket,
-                        sidecarOffsetUs: sidecarOffsetUs
+                        sidecarOffsetUs: sidecarOffsetUs,
+                        sourceTimestampOrigin90k: timestampOrigin90k
                     )
                     av_packet_unref(&subtitlePacket)
+                case .eof:
+                    av_packet_unref(&subtitlePacket)
+                    endedExternalSources.insert(sourceID)
+                case .again:
+                    av_packet_unref(&subtitlePacket)
+                    let retries = externalReadRetryCounts[sourceID, default: 0]
+                    if retries < readRetryLimit {
+                        externalReadRetryCounts[sourceID] = retries + 1
+                        usleep(1_000)
+                        continue
+                    }
+                    endedExternalSources.insert(sourceID)
+                    let message = "subtitle read error: \(avErrorString(readRet))"
+                    if subtitleOutput.isSelectedExternal {
+                        terminalError = message
+                        break
+                    }
+                    NSLog("[RigelHlsExporter] dropping unselected subtitle source %d: %@", sourceID, message)
+                case .readError(let message):
+                    av_packet_unref(&subtitlePacket)
+                    endedExternalSources.insert(sourceID)
+                    if subtitleOutput.isSelectedExternal {
+                        terminalError = message
+                        break
+                    }
+                    NSLog("[RigelHlsExporter] dropping unselected subtitle source %d: %@", sourceID, message)
                 }
             }
 
@@ -596,15 +753,22 @@ extension RigelHlsExporter {
                 (primaryEnded && endedExternalSources.count == externalSourceCount) {
                 break
             }
+            if terminalError != nil {
+                break
+            }
             if let videoError = videoChain?.error {
                 terminalError = videoError
+                break
+            }
+            if let audioError = audioChains.values.compactMap({ $0.error }).first {
+                terminalError = audioError
                 break
             }
             // Warmup waits until the main and subtitle playlists reference
             // files that already exist; the public master is then immutable
             // until the final trailer pass.
             // Finite AirPlay playback waits for the final VOD playlist instead of exposing EVENT media.
-            if !notified && !session.waitForCompletion {
+            if !notified && !session.waitForCompletion && (remuxVideoBuffer?.hasDTSAnchor ?? true) {
                 let now = DispatchTime.now()
                 if now.uptimeNanoseconds - lastReadinessCheck.uptimeNanoseconds >= 100_000_000 {
                     lastReadinessCheck = now
@@ -642,7 +806,24 @@ extension RigelHlsExporter {
                 }
             }
         }
-
+        if terminalError == nil && !isCancelled(session),
+           var buffer = remuxVideoBuffer,
+           let videoIndex = selectedVideoIndex,
+           let outIndex = streamMap[videoIndex],
+           let inStream = ctx.pointee.streams[Int(videoIndex)],
+           let outStream = out.pointee.streams[Int(outIndex)] {
+            switch buffer.finish() {
+            case .failure(let message):
+                terminalError = message
+            case .ready(let ready):
+                terminalError = writeBufferedRemuxPackets(
+                    ready,
+                    inStream: inStream,
+                    outStream: outStream
+                )
+            }
+            remuxVideoBuffer = buffer
+        }
         if terminalError == nil && !isCancelled(session) {
             for audioIndex in outputAudioIndices {
                 guard let chain = audioChains[audioIndex],
@@ -659,17 +840,28 @@ extension RigelHlsExporter {
         if let videoError = videoChain?.error {
             terminalError = terminalError ?? videoError
         }
+        if let audioError = audioChains.values.compactMap({ $0.error }).first {
+            terminalError = terminalError ?? audioError
+        }
         if terminalError == nil,
            subtitleRenditions.contains(where: { $0.isSelectedExternal && $0.decodeFailed }) {
             terminalError = "Could not prepare the selected subtitle"
         }
         if let terminalError {
-            av_write_trailer(out)
+            let trailerRet = av_write_trailer(out)
+            let failure = trailerRet < 0
+                ? "HLS write trailer failed: \(avErrorString(trailerRet))"
+                : terminalError
             subtitleRenditions.forEach(finishSubtitleRendition)
-            reportFailure(terminalError)
+            reportFailure(failure)
             return
         }
-        av_write_trailer(out)
+        let trailerRet = av_write_trailer(out)
+        if trailerRet < 0 {
+            subtitleRenditions.forEach(finishSubtitleRendition)
+            reportFailure("HLS write trailer failed: \(avErrorString(trailerRet))")
+            return
+        }
         subtitleRenditions.forEach(finishSubtitleRendition)
         let finalReady: Bool
         if hasMasterPlaylist {

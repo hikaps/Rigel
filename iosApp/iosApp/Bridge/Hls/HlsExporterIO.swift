@@ -1,11 +1,8 @@
 import Foundation
 
-/// Bounds blocking FFmpeg I/O for external sidecar subtitle inputs. FFmpeg's
-/// network stack has no default request timeout: a remote sidecar whose
-/// server accepts the connection and then goes silent would block the
-/// session queue forever, leaving playback stuck in "preparing". All reads
-/// for one input happen on that session's serial queue, so plain fields are
-/// sufficient (the C interrupt callback runs on the same thread).
+/// Bounds blocking FFmpeg I/O for external sidecar subtitle inputs and native
+/// probes. The state is shared with AVIOInterruptCB, so every read of the
+/// deadline/cancellation state is synchronized with callers on other queues.
 final class InputWatchdog {
     private enum Phase {
         /// Connect + probe must complete within the total budget.
@@ -13,8 +10,10 @@ final class InputWatchdog {
         /// While reading, any single blocked read longer than the budget
         /// aborts; the budget resets after every successful read.
         case reading(idleLimit: DispatchTimeInterval, lastActivity: DispatchTime)
+        case cancelled
     }
 
+    private let lock = NSLock()
     private var phase: Phase
     private let budget: DispatchTimeInterval
 
@@ -24,7 +23,11 @@ final class InputWatchdog {
     }
 
     func shouldAbort() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
         switch phase {
+        case .cancelled:
+            return true
         case let .opening(until):
             return DispatchTime.now() >= until
         case let .reading(idleLimit, lastActivity):
@@ -32,29 +35,65 @@ final class InputWatchdog {
         }
     }
 
+    func cancel() {
+        lock.lock()
+        phase = .cancelled
+        lock.unlock()
+    }
+
     /// Called once after a successful open: switches to the per-read idle
     /// policy used for the rest of the session.
     func startReading() {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .cancelled = phase { return }
         phase = .reading(idleLimit: budget, lastActivity: .now())
     }
 
     /// Called after every successful read so active transfers never abort.
     func touch() {
+        lock.lock()
+        defer { lock.unlock() }
         if case let .reading(idleLimit, _) = phase {
             phase = .reading(idleLimit: idleLimit, lastActivity: .now())
         }
     }
 }
 
+private let rigelInputTimeoutMicroseconds: Int64 = 10_000_000
+
 extension RigelHlsExporter {
     static func closeInput(_ fmt: inout UnsafeMutablePointer<AVFormatContext>?) {
         avformat_close_input(&fmt)
     }
 
-    static func openInput(url: String, headers: [String: String], fmt: inout UnsafeMutablePointer<AVFormatContext>?) -> Bool {
+    /// Opens a source with bounded FFmpeg I/O. A caller-owned watchdog adds
+    /// cancellation/deadline interrupts; nil keeps the primary-source API
+    /// usable before Session wiring while rw_timeout still bounds blocking I/O.
+    static func openInput(
+        url: String,
+        headers: [String: String],
+        watchdog: InputWatchdog? = nil,
+        fmt: inout UnsafeMutablePointer<AVFormatContext>?
+    ) -> Bool {
+        guard let allocated = avformat_alloc_context() else {
+            return false
+        }
+        var context: UnsafeMutablePointer<AVFormatContext>? = allocated
+        if let watchdog {
+            allocated.pointee.interrupt_callback = AVIOInterruptCB(
+                callback: { opaque in
+                    guard let opaque else { return 0 }
+                    let watchdog = Unmanaged<InputWatchdog>.fromOpaque(opaque).takeUnretainedValue()
+                    return watchdog.shouldAbort() ? 1 : 0
+                },
+                opaque: Unmanaged.passUnretained(watchdog).toOpaque()
+            )
+        }
         var opened = false
         url.withCString { cstr in
             var opts: OpaquePointer? = nil
+            defer { if opts != nil { av_dict_free(&opts) } }
             for (key, value) in headers {
                 key.withCString { k in
                     value.withCString { v in
@@ -65,18 +104,28 @@ extension RigelHlsExporter {
             // Match the probe's analysis cap so session open does not pay the
             // default 5 s budget again on network sources.
             av_dict_set(&opts, "analyzeduration", "2000000", 0)
-            let ret = avformat_open_input(&fmt, cstr, nil, &opts)
-            if ret < 0 { return }
-            if avformat_find_stream_info(fmt, nil) < 0 {
-                closeInput(&fmt)
+            av_dict_set(&opts, "rw_timeout", String(rigelInputTimeoutMicroseconds), 0)
+            let ret = avformat_open_input(&context, cstr, nil, &opts)
+            guard ret >= 0, context != nil else {
+                closeInput(&context)
+                return
+            }
+            if avformat_find_stream_info(context, nil) < 0 {
+                closeInput(&context)
                 return
             }
             opened = true
         }
-        return opened
+        guard opened, let openedContext = context else {
+            closeInput(&context)
+            return false
+        }
+        watchdog?.startReading()
+        fmt = openedContext
+        return true
     }
 
-    /// openInput for external sidecar sources, bounded by `watchdog`:
+    /// openInput for external sidecar sources, bounded by watchdog:
     /// connect+probe must finish within the budget, and a stalled read later
     /// in the session aborts that sidecar (drops its cues) instead of
     /// freezing the whole session.
@@ -95,7 +144,7 @@ extension RigelHlsExporter {
             url = rawURL
         }
         guard let allocated = avformat_alloc_context() else {
-            return openInput(url: url, headers: headers, fmt: &fmt)
+            return false
         }
         var context: UnsafeMutablePointer<AVFormatContext>? = allocated
         allocated.pointee.interrupt_callback = AVIOInterruptCB(
@@ -109,6 +158,7 @@ extension RigelHlsExporter {
         var opened = false
         url.withCString { cstr in
             var opts: OpaquePointer? = nil
+            defer { if opts != nil { av_dict_free(&opts) } }
             for (key, value) in headers {
                 key.withCString { k in
                     value.withCString { v in
@@ -116,21 +166,26 @@ extension RigelHlsExporter {
                     }
                 }
             }
-            // On failure avformat_open_input frees the context and nulls it.
+            av_dict_set(&opts, "analyzeduration", "2000000", 0)
+            av_dict_set(&opts, "rw_timeout", String(rigelInputTimeoutMicroseconds), 0)
             let ret = avformat_open_input(&context, cstr, nil, &opts)
-            if opts != nil { av_dict_free(&opts) }
-            guard ret >= 0, context != nil else { return }
+            guard ret >= 0, context != nil else {
+                closeInput(&context)
+                return
+            }
             if avformat_find_stream_info(context, nil) < 0 {
                 closeInput(&context)
                 return
             }
             opened = true
         }
-        if opened {
-            watchdog.startReading()
-            fmt = context
+        guard opened, let openedContext = context else {
+            closeInput(&context)
+            return false
         }
-        return opened
+        watchdog.startReading()
+        fmt = openedContext
+        return true
     }
 
     static func cleanup(

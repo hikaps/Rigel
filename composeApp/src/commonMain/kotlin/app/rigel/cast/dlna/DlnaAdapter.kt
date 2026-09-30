@@ -114,6 +114,10 @@ object DlnaAdapter : ReceiverAdapter {
         DlnaRenderer(client).seek((target as CastTarget.Dlna).device, positionMs)
     }.getOrDefault(false)
 
+    override suspend fun position(target: CastTarget, client: HttpClient): Long? = runCatching {
+        DlnaRenderer(client).position((target as CastTarget.Dlna).device)?.first
+    }.getOrNull()
+
     override suspend fun pause(target: CastTarget, client: HttpClient): Boolean = runCatching {
         DlnaRenderer(client).pause((target as CastTarget.Dlna).device)
     }.getOrDefault(false)
@@ -147,7 +151,8 @@ object DlnaAdapter : ReceiverAdapter {
         if (!device.searchTarget.contains("MediaRenderer")) return null
         val xml = runCatching { client.get(device.location).bodyAsText() }.getOrNull()
             ?: return null
-        val d = DlnaDeviceDescription.parse(device.usn, device.location, xml) ?: return null
+        val d = DlnaDeviceDescription.parse(device.usn, device.location, xml, trustedBase = device.location)
+            ?: return null
         return CastTarget.Dlna(d)
     }
 

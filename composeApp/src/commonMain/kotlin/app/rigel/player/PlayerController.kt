@@ -91,6 +91,7 @@ class PlayerController(
     private val outputSelection: OutputSelection = OutputSelection(),
     private val capabilityResolver: OutputCapabilityResolver = DefaultOutputCapabilityResolver,
     private val jellyfin: JellyfinClient? = null,
+    private val fireSuccess: (String) -> Unit = { UrlIntake.fireSuccess(it) },
 ) : CastPlaybackPort {
     private val tag = "PlayerController"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -119,7 +120,10 @@ class PlayerController(
     ): Boolean {
         val request = UrlIntake.parse(rawUrl)
         if (request == null) {
+            stopJellyfinIfActive()
             invalidatePendingWork()
+            CastDispatcher.detachActive()?.let(::stopDetachedReceiver)
+            clearPlaybackContext()
             _uiState.value = PlayerUiState(phase = PlayerPhase.ERROR, error = "Unrecognized URL: $rawUrl")
             return false
         }
@@ -208,19 +212,64 @@ class PlayerController(
         }
         val request = currentRequest ?: return
         val current = _uiState.value
+        val previousDestination = currentDestination
+        val activeTarget = CastDispatcher.activeTarget()
+        val handoffTarget = if (
+            current.remotePlayback &&
+            previousDestination is PlaybackDestination.Receiver &&
+            activeTarget?.identityKey == previousDestination.target.identityKey
+        ) activeTarget else null
+
+        // Cancel pending work, but leave the active receiver attached until its
+        // position query completes. The fallback is the caller's native input
+        // position; unsupported receiver position is represented by null.
+        val pendingReceiverStop = invalidatePendingWork()
+        val queryGeneration = loadGeneration
+        pendingJob = scope.launch {
+            val remotePosition = if (handoffTarget != null) {
+                runCatching { CastDispatcher.positionActive() }.getOrNull()
+            } else {
+                null
+            }
+            if (!isCurrent(queryGeneration) || currentRequest !== request) return@launch
+            if (handoffTarget != null &&
+                CastDispatcher.activeTarget()?.identityKey != handoffTarget.identityKey
+            ) return@launch
+
+            val latest = _uiState.value
+            val resume = remotePosition
+                ?.let { receiverPositionForHandoff(latest, it) }
+                ?: positionMs
+            // migrateDestination owns the replacement job; this query job must
+            // not be treated as pending work by its invalidation path.
+            pendingJob = null
+            migrateDestination(destination, request, resume, pendingReceiverStop)
+        }
+    }
+
+    private fun migrateDestination(
+        destination: PlaybackDestination,
+        request: IntakeRequest,
+        positionMs: Long,
+        pendingReceiverStop: Job?,
+    ) {
+        val current = _uiState.value
         val probe = current.probe
-        // Leaving a Jellyfin destination must stop that session too; both
+        // Leaving a Jellyfin destination must stop that session too; all
         // superseded stops complete before replacement playback is issued.
         val outstandingStop = jellyfinStopJob
         val outstandingReceiverStop = receiverStopJob
         val staleStop = stopJellyfinIfActive()
         val detachedStop = CastDispatcher.detachActive()
             ?.let(::stopDetachedReceiver)
-        val pendingReceiverStop = invalidatePendingWork()
         currentDestination = destination
         currentOutputProfile = null
         val duration = probe?.durationMs
-        val resume = if (duration != null && duration > 0) positionMs.coerceIn(0, duration) else positionMs.coerceAtLeast(0)
+        val resume = if (duration != null && duration > 0) {
+            positionMs.coerceIn(0, duration)
+        } else {
+            positionMs.coerceAtLeast(0)
+        }
         val generation = loadGeneration
         _uiState.value = current.copy(
             phase = PlayerPhase.PROBING,
@@ -249,6 +298,12 @@ class PlayerController(
         }
     }
 
+    private fun receiverPositionForHandoff(state: PlayerUiState, receiverPositionMs: Long): Long {
+        val relative = receiverPositionMs.coerceAtLeast(0)
+        if (state.proxyUrl == null) return relative
+        val offset = state.startPositionMs.coerceAtLeast(0)
+        return if (relative > Long.MAX_VALUE - offset) Long.MAX_VALUE else offset + relative
+    }
     override fun setCastActive(active: Boolean) {
         _uiState.value = _uiState.value.copy(castActive = active)
     }
@@ -415,6 +470,8 @@ class PlayerController(
             restartProxyAt(target)
         } else if (current.castActive) {
             scope.launch { CastDispatcher.seekActive(target, duration ?: 0) }
+        } else if (current.route == PlaybackRoute.DIRECT) {
+            _uiState.value = current.copy(startPositionMs = target)
         }
     }
 
@@ -488,6 +545,16 @@ class PlayerController(
     }
 
     private fun isCurrent(generation: Long): Boolean = generation == loadGeneration
+
+    private fun clearPlaybackContext() {
+        currentRequest = null
+        currentDestination = PlaybackDestination.Local
+        currentPassthroughAudioCodecs = OutputMediaProfiles.local.directAudioCodecs
+        currentOutputProfile = null
+        directFallbackUsed = false
+        pendingReceiverTarget = null
+        successCallbackUrl = null
+    }
     private suspend fun playJellyfin(
         request: IntakeRequest,
         generation: Long,
@@ -996,7 +1063,6 @@ class PlayerController(
         return job
     }
 
-
     private fun stopJellyfinIfActive(): Job? {
         val target = (currentDestination as? PlaybackDestination.Receiver)?.target
             as? CastTarget.JellyfinSessionTarget ?: return null
@@ -1023,12 +1089,13 @@ class PlayerController(
         val stopJob = stopJellyfinIfActive()
         if (stopJob != null) jellyfinStopJob = stopJob
         invalidatePendingWork()
+        val callbackUrl = successCallbackUrl
+        clearPlaybackContext()
         _uiState.value = PlayerUiState()
         val detachedTarget = CastDispatcher.detachActive()
         detachedTarget?.let(::stopDetachedReceiver)
         Bridges.stopHttpServer()
-        UrlIntake.fireSuccess(successCallbackUrl)
-        successCallbackUrl = null
+        callbackUrl?.let(fireSuccess)
     }
 
     private fun airPlayFallbackDecision(probe: ProbeResult): RouteDecision.Playable? =
@@ -1047,7 +1114,7 @@ class PlayerController(
      * while local playback uses a full TRANSCODE fallback. Proxy failures
      * surface as errors (no infinite loop).
      */
-    fun reportError(message: String) {
+    fun reportError(message: String, nativePositionMs: Long? = null) {
         val current = _uiState.value
         // Errors from the player being replaced must not clobber an in-flight
         // proxy build. prepareProxy owns the eventual success/failure state.
@@ -1055,6 +1122,7 @@ class PlayerController(
             current.phase == PlayerPhase.PROBING ||
             current.phase == PlayerPhase.BUFFERING
         ) return
+        val nativePosition = nativePositionMs?.coerceAtLeast(0) ?: current.startPositionMs
         val airPlayProbe = current.probe
         if (currentDestination is PlaybackDestination.AirPlay &&
             !directFallbackUsed &&
@@ -1078,6 +1146,7 @@ class PlayerController(
                 phase = PlayerPhase.PREPARING_PROXY,
                 route = fallback.route,
                 proxyUrl = null,
+                startPositionMs = nativePosition,
                 error = null,
                 planDetail = fallback.detail,
             )
@@ -1091,7 +1160,12 @@ class PlayerController(
         ) {
             directFallbackUsed = true
             val generation = loadGeneration
-            _uiState.value = current.copy(phase = PlayerPhase.PREPARING_PROXY, route = PlaybackRoute.TRANSCODE, error = null)
+            _uiState.value = current.copy(
+                phase = PlayerPhase.PREPARING_PROXY,
+                route = PlaybackRoute.TRANSCODE,
+                startPositionMs = nativePosition,
+                error = null,
+            )
             pendingJob = scope.launch {
                 prepareProxy(current.probe!!, PlaybackRoute.TRANSCODE, generation)
             }

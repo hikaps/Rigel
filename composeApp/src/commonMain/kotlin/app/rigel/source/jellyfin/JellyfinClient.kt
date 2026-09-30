@@ -1,6 +1,5 @@
 package app.rigel.source.jellyfin
 
-import co.touchlab.kermit.Logger
 import app.rigel.bridge.SubtitleTrack
 
 import io.ktor.client.HttpClient
@@ -118,8 +117,30 @@ object JellyfinApi {
     fun startPositionTicks(positionMs: Long): Long =
         positionMs.coerceAtLeast(0).coerceAtMost(Long.MAX_VALUE / 10_000L) * 10_000L
 
-    fun jsonEscape(s: String): String =
-        s.replace("\\", "\\\\").replace("\"", "\\\"")
+    fun jsonEscape(s: String): String = buildString(s.length) {
+        val hex = "0123456789ABCDEF"
+        for (char in s) {
+            when (char) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\b' -> append("\\b")
+                '\t' -> append("\\t")
+                '\n' -> append("\\n")
+                '\u000C' -> append("\\f")
+                '\r' -> append("\\r")
+                else -> {
+                    if (char.code < 0x20) {
+                        val code = char.code
+                        append("\\u00")
+                        append(hex[code ushr 4])
+                        append(hex[code and 0x0F])
+                    } else {
+                        append(char)
+                    }
+                }
+            }
+        }
+    }
 
     private fun encodeUrlComponent(value: String): String {
         val hex = "0123456789ABCDEF"
@@ -141,22 +162,23 @@ object JellyfinApi {
 
 /** Jellyfin client operations (ktor). */
 class JellyfinClient(private val http: HttpClient) {
-    private val tag = "JellyfinClient"
-
     suspend fun authenticate(base: String, username: String, password: String, deviceId: String): JellyfinAuth? {
         val body = JellyfinApi.authBody(username, password)
-        val resp = runCatching {
+        val resp = try {
             http.post(base.trimEnd('/') + "/Users/AuthenticateByName") {
                 contentType(ContentType.Application.Json)
                 header("X-Emby-Authorization", JellyfinApi.embyAuthHeader(deviceId))
                 setBody(body)
             }.bodyAsText()
-        }.getOrNull() ?: return null
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            return null
+        }
         val token = Regex(""""AccessToken":"([^"]+)"""").find(resp)?.groupValues?.get(1)
         val userId = Regex(""""User":\{[^}]*?"Id":"([^"]+)"""").find(resp)?.groupValues?.get(1)
             ?: Regex(""""Id":"([^"]+)"""").find(resp)?.groupValues?.get(1)
         if (token == null || userId == null) {
-            Logger.w(tag) { "auth failed: $resp" }
             return null
         }
         return JellyfinAuth(token, userId)
@@ -278,21 +300,29 @@ class JellyfinClient(private val http: HttpClient) {
         itemIds: List<String>,
         startPositionTicks: Long = 0,
     ): Boolean {
-        val resp = runCatching {
+        val resp = try {
             http.post(JellyfinApi.playUrl(base, sessionId, itemIds, startPositionTicks = startPositionTicks)) {
                 header("X-Emby-Token", token)
             }.status.value
-        }.getOrNull()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            null
+        }
         return resp != null && resp in 200..299
     }
 
     /** Remote stop command for a client session (Playing/Stopped is the client-side report endpoint; it does not stop playback). */
     suspend fun stopSession(base: String, token: String, sessionId: String): Boolean {
-        val resp = runCatching {
+        val resp = try {
             http.post(base.trimEnd('/') + "/Sessions/$sessionId/Playing/Stop") {
                 header("X-Emby-Token", token)
             }.status.value
-        }.getOrNull()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            null
+        }
         return resp != null && resp in 200..299
     }
 

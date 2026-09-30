@@ -155,8 +155,11 @@ targets:
     platform: iOS
     sources:
       - path: ../RigelTests
+        createIntermediateGroups: false
+      - path: ShareExtension/ShareViewController.swift
     resources:
       - path: ../RigelTests/Fixtures
+        createIntermediateGroups: false
     dependencies:
       - target: Rigel
     settings:

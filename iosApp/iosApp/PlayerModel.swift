@@ -137,18 +137,22 @@ final class PlayerModel: ObservableObject {
     }
 
     func selectDestinationLocal() {
-        let positionMs = SwiftPlayer.shared.currentPositionMs()
-        SwiftPlayer.shared.selectLocal(positionMs: positionMs)
+        SwiftPlayer.shared.selectLocal(positionMs: SwiftPlayer.shared.currentPositionMs())
     }
 
     func selectDestinationAirPlay(routeId: String, name: String) {
-        let positionMs = SwiftPlayer.shared.currentPositionMs()
-        SwiftPlayer.shared.selectAirPlay(routeId: routeId, name: name, positionMs: positionMs)
+        SwiftPlayer.shared.selectAirPlay(
+            routeId: routeId,
+            name: name,
+            positionMs: SwiftPlayer.shared.currentPositionMs()
+        )
     }
 
     func selectDestinationReceiver(_ target: CastTarget) {
-        let positionMs = SwiftPlayer.shared.currentPositionMs()
-        SwiftPlayer.shared.selectReceiver(target: target, positionMs: positionMs)
+        SwiftPlayer.shared.selectReceiver(
+            target: target,
+            positionMs: SwiftPlayer.shared.currentPositionMs()
+        )
     }
 
     func seek(positionSeconds: Double, durationSeconds: Double) {
@@ -177,6 +181,10 @@ final class PlayerModel: ObservableObject {
     }
 
     func reportError(_ message: String) {
-        SwiftPlayer.shared.reportError(message: message)
+        // Capture the native playhead before Kotlin starts replacing the item.
+        SwiftPlayer.shared.reportError(
+            message: message,
+            positionMs: SwiftPlayer.shared.currentPositionMs()
+        )
     }
 }

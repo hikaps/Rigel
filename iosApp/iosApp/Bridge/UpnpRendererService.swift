@@ -10,54 +10,143 @@ import ComposeApp
 final class UpnpRendererService {
     private var listener: NWListener?
     private var connections: [NWConnection] = []
+    private var connectionStates: [ObjectIdentifier: RigelHTTPConnectionState] = [:]
     private var events: RendererEvents?
     private let queue = DispatchQueue(label: "rigel-upnp-renderer")
     private let ssdpQueue = DispatchQueue(label: "rigel-upnp-ssdp")
+    private let queueKey = DispatchSpecificKey<Void>()
+    private let stateLock = NSLock()
     private var currentUri: String?
-    private(set) var port: UInt16 = 0
+    private var portValue: UInt16 = 0
+    private var runningValue = false
     private let deviceUuid = "uuid:rigel-renderer-0001"
     private var ssdpSocket: Int32 = -1
+    private static let maxConnections = 16
+    private static let headerTimeout: DispatchTimeInterval = .seconds(10)
+    private static let idleTimeout: DispatchTimeInterval = .seconds(30)
+
+    var port: UInt16 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return portValue
+    }
+
+    var isRunning: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return runningValue
+    }
+
+    init() {
+        queue.setSpecific(key: queueKey, value: ())
+    }
+
+    private func setPort(_ value: UInt16) {
+        stateLock.lock()
+        portValue = value
+        stateLock.unlock()
+    }
+
+    private func setRunning(_ value: Bool) {
+        stateLock.lock()
+        runningValue = value
+        stateLock.unlock()
+    }
 
     // MARK: - Lifecycle
 
-    /// Returns nil on success, or an error message.
+    /// Returns nil on success, or an error message. TCP and SSDP startup is
+    /// transactional: a failed multicast setup rolls back the TCP listener.
     func start(events: RendererEvents) -> String? {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return startOnQueue(events: events)
+        }
+        var result: String?
+        queue.sync { result = self.startOnQueue(events: events) }
+        return result
+    }
+
+    private func startOnQueue(events: RendererEvents) -> String? {
+        guard listener == nil else { return "UPnP renderer is already running" }
         self.events = events
+        setPort(0)
         do {
-            let listener = try NWListener(using: .tcp, on: 0)
-            self.listener = listener
-            listener.newConnectionHandler = { [weak self] connection in
-                self?.handle(connection)
+            let newListener = try NWListener(using: .tcp, on: 0)
+            listener = newListener
+            setRunning(true)
+            newListener.newConnectionHandler = { [weak self] connection in
+                self?.queue.async { [weak self] in self?.acceptOnQueue(connection) }
             }
-            listener.stateUpdateHandler = { [weak self] state in
-                if case .ready = state {
-                    self?.port = listener.port?.rawValue ?? 0
-                    NSLog("[RigelRenderer] http ready on port %d", self?.port ?? 0)
-                    self?.announceAlive()
-                } else if case .failed(let error) = state {
-                    NSLog("[RigelRenderer] listener failed: %@", error.localizedDescription)
+            newListener.stateUpdateHandler = { [weak self, weak newListener] state in
+                self?.queue.async { [weak self, weak newListener] in
+                    guard let self, let newListener else { return }
+                    self.listenerStateOnQueue(newListener, state: state)
                 }
             }
-            listener.start(queue: queue)
+            newListener.start(queue: queue)
         } catch {
+            rollbackOnQueue()
             return error.localizedDescription
         }
-        return startSsdpResponder()
+        if let error = startSsdpResponder() {
+            rollbackOnQueue()
+            return error
+        }
+        return nil
+    }
+
+    private func listenerStateOnQueue(_ candidate: NWListener, state: NWListener.State) {
+        guard listener === candidate else { return }
+        switch state {
+        case .ready:
+            let readyPort = candidate.port?.rawValue ?? 0
+            setPort(readyPort)
+            NSLog("[RigelRenderer] http ready on port %d", readyPort)
+            announceAlive()
+        case .failed(let error):
+            NSLog("[RigelRenderer] listener failed: %@", error.localizedDescription)
+            rollbackOnQueue()
+        default:
+            break
+        }
     }
 
     func stop() {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            stopOnQueue()
+        } else {
+            queue.sync { self.stopOnQueue() }
+        }
+    }
+
+    private func stopOnQueue() {
         listener?.cancel()
         listener = nil
-        for connection in connections { connection.cancel() }
-        connections.removeAll()
+        setRunning(false)
+        setPort(0)
+        closeAllConnectionsOnQueue()
+        closeSsdpOnQueue()
+        currentUri = nil
+        events = nil
+    }
+
+    private func rollbackOnQueue() {
+        listener?.cancel()
+        listener = nil
+        setRunning(false)
+        setPort(0)
+        closeAllConnectionsOnQueue()
+        closeSsdpOnQueue()
+        currentUri = nil
+        events = nil
+    }
+
+    private func closeSsdpOnQueue() {
         if ssdpSocket >= 0 {
             close(ssdpSocket)
             ssdpSocket = -1
         }
-        currentUri = nil
     }
-
-    var isRunning: Bool { listener != nil }
 
     // MARK: - SSDP responder (multicast join → entitlement)
 
@@ -153,83 +242,229 @@ final class UpnpRendererService {
 
     // MARK: - HTTP + SOAP
 
-    private func handle(_ connection: NWConnection) {
+    private func acceptOnQueue(_ connection: NWConnection) {
+        guard listener != nil, connections.count < Self.maxConnections else {
+            connection.cancel()
+            return
+        }
+        let state = RigelHTTPConnectionState()
+        let id = ObjectIdentifier(connection)
         connections.append(connection)
-        // Control points poll over fresh connections; prune dead ones or the
-        // array grows without bound while the service runs.
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            switch state {
-            case .cancelled, .failed:
-                self.queue.async { self.connections.removeAll { $0 === connection } }
-            default:
-                break
+        connectionStates[id] = state
+        connection.stateUpdateHandler = { [weak self, weak connection] newState in
+            self?.queue.async { [weak self, weak connection] in
+                guard let self, let connection else { return }
+                if case .cancelled = newState { self.removeOnQueue(connection) }
+                if case .failed = newState { self.removeOnQueue(connection) }
             }
         }
         connection.start(queue: queue)
-        var received = Data()
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, isComplete, error in
-            if let data, !data.isEmpty { received.append(data) }
-            if let error {
-                connection.cancel()
+        scheduleTimeout(state, connection: connection, interval: Self.headerTimeout)
+        receiveRequest(connection)
+    }
+
+    private func removeOnQueue(_ connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        connectionStates.removeValue(forKey: id)?.cancelTimer()
+        connections.removeAll { $0 === connection }
+    }
+
+    private func closeOnQueue(_ connection: NWConnection) {
+        removeOnQueue(connection)
+        connection.cancel()
+    }
+
+    private func closeAllConnectionsOnQueue() {
+        for connection in connections { connection.cancel() }
+        for state in connectionStates.values { state.cancelTimer() }
+        connections.removeAll()
+        connectionStates.removeAll()
+    }
+
+    private func scheduleTimeout(
+        _ state: RigelHTTPConnectionState,
+        connection: NWConnection,
+        interval: DispatchTimeInterval
+    ) {
+        state.cancelTimer()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + interval)
+        timer.setEventHandler { [weak self, weak connection, weak state] in
+            guard let self, let connection, let state,
+                  self.connectionStates[ObjectIdentifier(connection)] === state else { return }
+            self.closeOnQueue(connection)
+        }
+        state.timer = timer
+        timer.resume()
+    }
+
+    private func receiveRequest(_ connection: NWConnection) {
+        guard let state = connectionStates[ObjectIdentifier(connection)], !state.processing else { return }
+        // EOF only prevents future reads. Complete frames already buffered
+        // by the final receive still need to be served in order.
+        switch state.framer.next() {
+        case .frame(let frame):
+            state.cancelTimer()
+            state.processing = true
+            respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
+        case .invalid:
+            closeOnQueue(connection)
+        case .continueRequestBody:
+            sendContinue(connection)
+        case .needMore:
+            if state.inputClosed {
+                closeOnQueue(connection)
                 return
             }
-            if isComplete || received.count > 0 {
-                self?.respond(connection: connection, request: received)
+            if state.timer == nil {
+                scheduleTimeout(state, connection: connection, interval: Self.headerTimeout)
+            }
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self, weak connection] data, _, isComplete, error in
+                self?.queue.async { [weak self, weak connection] in
+                    guard let self, let connection,
+                          let state = self.connectionStates[ObjectIdentifier(connection)] else { return }
+                    if error != nil {
+                        self.closeOnQueue(connection)
+                        return
+                    }
+                    if isComplete { state.inputClosed = true }
+                    if let data, !data.isEmpty {
+                        switch state.framer.append(data) {
+                        case .frame(let frame):
+                            state.cancelTimer()
+                            state.processing = true
+                            self.respond(connection: connection, frame: frame, halfClosed: state.inputClosed && !state.framer.hasBufferedData)
+                        case .invalid:
+                            self.closeOnQueue(connection)
+                        case .continueRequestBody:
+                            self.sendContinue(connection)
+                        case .needMore:
+                            if state.inputClosed && !state.framer.hasBufferedData {
+                                self.closeOnQueue(connection)
+                            } else {
+                                self.receiveRequest(connection)
+                            }
+                        }
+                    } else if state.inputClosed {
+                        self.closeOnQueue(connection)
+                    } else {
+                        self.receiveRequest(connection)
+                    }
+                }
             }
         }
     }
 
-    private func respond(connection: NWConnection, request: Data) {
-        guard let text = String(data: request, encoding: .utf8),
-              let line = text.components(separatedBy: "\r\n").first else {
-            connection.cancel()
+    private func sendContinue(_ connection: NWConnection) {
+        let response = Data("HTTP/1.1 100 Continue\r\n\r\n".utf8)
+        connection.send(content: response, completion: .contentProcessed { [weak self, weak connection] error in
+            guard let self, let connection else { return }
+            self.queue.async {
+                guard self.connectionStates[ObjectIdentifier(connection)] != nil else { return }
+                if error != nil {
+                    self.closeOnQueue(connection)
+                } else {
+                    self.receiveRequest(connection)
+                }
+            }
+        })
+    }
+
+    private func respond(connection: NWConnection, frame: RigelHTTPFrame, halfClosed: Bool) {
+        guard let head = String(data: frame.head, encoding: .utf8),
+              let line = head.components(separatedBy: "\r\n").first else {
+            closeOnQueue(connection)
             return
         }
         let parts = line.split(separator: " ")
         guard parts.count >= 2 else {
-            connection.cancel()
+            closeOnQueue(connection)
             return
         }
         let method = String(parts[0])
         let path = String(parts[1])
+        let requestWantsClose = head
+            .components(separatedBy: "\r\n")
+            .dropFirst()
+            .contains { headerLine in
+                guard let separator = headerLine.firstIndex(of: ":") else { return false }
+                let name = headerLine[..<separator].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = headerLine[headerLine.index(after: separator)...].lowercased()
+                return name == "connection" && value.split(separator: ",").contains {
+                    $0.trimmingCharacters(in: .whitespaces) == "close"
+                }
+            }
         let body: String
+        let status: String
         switch (method, path) {
         case ("GET", "/rootDesc.xml"):
             body = deviceDescription()
+            status = "200 OK"
         case ("GET", "/AVTransport.xml"):
             body = scpd()
+            status = "200 OK"
         case ("POST", "/ctl"):
-            body = handleSoap(requestText: text)
+            var requestData = frame.head
+            requestData.append(frame.body)
+            guard let requestText = String(data: requestData, encoding: .utf8) else {
+                closeOnQueue(connection)
+                return
+            }
+            body = handleSoap(requestText: requestText)
+            status = body.contains("<s:Fault>") ? "500 Internal Server Error" : "200 OK"
         default:
-            body = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            send(body: body, connection: connection)
+            send(body: "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", connection: connection, keepAlive: false)
             return
         }
-        let response = "HTTP/1.1 200 OK\r\n" +
+        let keepAlive = !halfClosed && !requestWantsClose
+        let response = "HTTP/1.1 \(status)\r\n" +
             "Content-Type: text/xml; charset=\"utf-8\"\r\n" +
             "Content-Length: \(body.utf8.count)\r\n" +
-            "Connection: close\r\n\r\n" + body
-        send(body: response, connection: connection)
+            "Connection: \(keepAlive ? "keep-alive" : "close")\r\n\r\n" + body
+        send(body: response, connection: connection, keepAlive: keepAlive)
     }
 
-    private func send(body: String, connection: NWConnection) {
+    private func send(body: String, connection: NWConnection, keepAlive: Bool) {
+        if let state = connectionStates[ObjectIdentifier(connection)] {
+            scheduleTimeout(state, connection: connection, interval: Self.idleTimeout)
+        }
         let data = Data(body.utf8)
-        connection.send(content: data, completion: .contentProcessed { _ in
-            connection.cancel()
+        connection.send(content: data, completion: .contentProcessed { [weak self] error in
+            guard let self, error == nil else {
+                connection.cancel()
+                return
+            }
+            self.finish(connection, keepAlive: keepAlive)
         })
+    }
+
+    private func finish(_ connection: NWConnection, keepAlive: Bool) {
+        guard let state = connectionStates[ObjectIdentifier(connection)] else {
+            closeOnQueue(connection)
+            return
+        }
+        state.processing = false
+        if keepAlive {
+            scheduleTimeout(state, connection: connection, interval: Self.idleTimeout)
+            receiveRequest(connection)
+        } else {
+            closeOnQueue(connection)
+        }
     }
 
     private func handleSoap(requestText: String) -> String {
         let action = soapAction(requestText)
         switch action {
         case "SetAVTransportURI":
-            if let uri = extractTag(requestText, "CurrentURI") {
-                currentUri = uri
-                let title = extractTag(requestText, "dc:title")
-                let events = self.events
-                DispatchQueue.main.async { events?.onSetUri(uri: uri, title: title) }
+            guard let rawUri = extractTag(requestText, "CurrentURI"),
+                  rawUri.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+                return soapFault(errorCode: 402, errorDescription: "Invalid Args")
             }
+            let uri = rawUri
+            currentUri = uri
+            let title = extractTag(requestText, "dc:title")
+            let events = self.events
+            DispatchQueue.main.async { events?.onSetUri(uri: uri, title: title) }
             return soapResponse("SetAVTransportURIResponse")
         case "Play":
             let events = self.events
@@ -245,17 +480,11 @@ final class UpnpRendererService {
             DispatchQueue.main.async { events?.onStop() }
             return soapResponse("StopResponse")
         case "GetPositionInfo":
-            return soapResponse(
-                "GetPositionInfoResponse",
-                "<TrackDuration>00:00:00</TrackDuration><RelTime>00:00:00</RelTime>"
-            )
+            return soapResponse("GetPositionInfoResponse", "<TrackDuration>00:00:00</TrackDuration><RelTime>00:00:00</RelTime>")
         case "GetTransportInfo":
-            return soapResponse(
-                "GetTransportInfoResponse",
-                "<CurrentTransportState>PLAYING</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus>"
-            )
+            return soapResponse("GetTransportInfoResponse", "<CurrentTransportState>PLAYING</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus>")
         default:
-            return soapFault()
+            return soapFault(errorCode: 401, errorDescription: "Invalid Action")
         }
     }
 
@@ -285,13 +514,13 @@ final class UpnpRendererService {
             "</u:\(action)></s:Body></s:Envelope>"
     }
 
-    private func soapFault() -> String {
+    private func soapFault(errorCode: Int, errorDescription: String) -> String {
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
             "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">" +
             "<s:Body><s:Fault><faultcode>s:Client</faultcode>" +
             "<faultstring>UPnPError</faultstring>" +
-            "<detail><UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>401</errorCode>" +
-            "<errorDescription>Invalid Action</errorDescription></UPnPError></detail>" +
+            "<detail><UPnPError xmlns=\"urn:schemas-upnp-org:control-1-0\"><errorCode>\(errorCode)</errorCode>" +
+            "<errorDescription>\(errorDescription)</errorDescription></UPnPError></detail>" +
             "</s:Fault></s:Body></s:Envelope>"
     }
 

@@ -9,12 +9,27 @@ final class RigelDiscoveryBridge: NSObject, DiscoveryBridge {
     }
 }
 
+final class RigelProbeOperation: NSObject, ProbeOperation {
+    private let watchdog: InputWatchdog
+
+    init(watchdog: InputWatchdog) {
+        self.watchdog = watchdog
+    }
+
+    func cancel() {
+        watchdog.cancel()
+    }
+}
+
 final class RigelProbeBridge: NSObject, ProbeBridge {
-    func probe(url: String, headers: [String: String], onResult: @escaping (ProbeResult?, String?) -> Void) {
+    func probe(url: String, headers: [String: String], onResult: @escaping (ProbeResult?, String?) -> Void) -> ProbeOperation {
+        let watchdog = InputWatchdog(timeoutSeconds: 10)
+        let operation = RigelProbeOperation(watchdog: watchdog)
         DispatchQueue.global(qos: .userInitiated).async {
-            let (result, error) = RigelProbe.probe(url: url, headers: headers)
+            let (result, error) = RigelProbe.probe(url: url, headers: headers, watchdog: watchdog)
             DispatchQueue.main.async { onResult(result, error) }
         }
+        return operation
     }
 }
 

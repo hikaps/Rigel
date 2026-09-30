@@ -27,12 +27,13 @@ object Bridges {
 
     suspend fun probe(url: String, headers: Map<String, String>): Pair<ProbeResult?, String?> {
         val bridge = requireBridge("Probe", RigelBridgeFactory.probe)
-        // No cancel seam on ProbeBridge: the probe runs to completion;
-        // late results are dropped.
         return suspendCancellableCoroutine { cont ->
-            bridge.probe(url, headers) { result, error ->
+            val operation = bridge.probe(url, headers) { result, error ->
                 if (cont.isActive) cont.resume(result to error)
             }
+            // invokeOnCancellation invokes immediately when cancellation won
+            // the race with synchronous completion/handle installation.
+            cont.invokeOnCancellation { operation.cancel() }
         }
     }
 

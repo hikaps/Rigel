@@ -59,6 +59,7 @@ object SwiftPlayer {
     fun seek(positionMs: Long, durationMs: Long) =
         RigelCore.controller.seek(positionMs, durationMs)
 
-    /** Native player (AVPlayerViewController poll) reports item failure. */
-    fun reportError(message: String) = RigelCore.controller.reportError(message)
+    /** Native player reports item failure with its playhead captured before teardown. */
+    fun reportError(message: String, positionMs: Long) =
+        RigelCore.controller.reportError(message, positionMs)
 }

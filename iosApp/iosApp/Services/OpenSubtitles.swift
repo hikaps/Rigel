@@ -131,7 +131,7 @@ enum OpenSubtitlesError: LocalizedError {
     case httpStatus(Int, String?)
     case missingDownloadLink
     case unsupportedFile
-
+    case fileTooLarge
     var errorDescription: String? {
         switch self {
         case .missingCredentials:
@@ -147,6 +147,8 @@ enum OpenSubtitlesError: LocalizedError {
             return "OpenSubtitles did not provide a subtitle download link."
         case .unsupportedFile:
             return "The downloaded subtitle file is not a supported text format."
+        case .fileTooLarge:
+            return "The downloaded subtitle file is too large."
         }
     }
 }
@@ -156,6 +158,15 @@ final class OpenSubtitlesClient {
 
     private static let apiRoot = URL(string: "https://api.opensubtitles.com/api/v1")!
     private static let userAgent = "Rigel iOS player/1.0"
+    static let maximumSubtitleBytes = 10 * 1024 * 1024
+
+    private static let apiAuthorities: Set<String> = [
+        "api.opensubtitles.com",
+        "vip-api.opensubtitles.com",
+    ]
+    private static let downloadAuthorities: Set<String> = [
+        "dl.opensubtitles.com",
+    ]
 
     private let store: OpenSubtitlesCredentialStore
     private let session: URLSession
@@ -176,10 +187,12 @@ final class OpenSubtitlesClient {
             apiKey: apiKey,
             body: try JSONEncoder().encode(body)
         )
-        let (data, response) = try await session.data(for: request)
+        let redirectDelegate = RedirectDelegate(policy: .api(apiKey: apiKey, token: nil))
+        let (data, response) = try await session.data(for: request, delegate: redirectDelegate)
         try Self.validate(response: response, data: data)
         let decoded = try JSONDecoder().decode(LoginResponse.self, from: data)
-        guard !decoded.token.isEmpty, !decoded.baseURL.isEmpty else {
+        guard !decoded.token.isEmpty,
+              Self.validatedAPIBaseURL(decoded.baseURL) != nil else {
             throw OpenSubtitlesError.invalidResponse
         }
         return OpenSubtitlesSession(token: decoded.token, baseURL: decoded.baseURL)
@@ -205,7 +218,8 @@ final class OpenSubtitlesClient {
         }
         guard let requestURL = components?.url else { throw OpenSubtitlesError.invalidResponse }
         let request = try makeRequest(url: requestURL, apiKey: apiKey, token: token)
-        let (data, response) = try await session.data(for: request)
+        let redirectDelegate = RedirectDelegate(policy: .api(apiKey: apiKey, token: token))
+        let (data, response) = try await session.data(for: request, delegate: redirectDelegate)
         try Self.validate(response: response, data: data)
         let decoded = try JSONDecoder().decode(SearchResponse.self, from: data)
         return decoded.data.flatMap { entry in
@@ -252,10 +266,11 @@ final class OpenSubtitlesClient {
             token: token,
             body: body
         )
-        let (data, response) = try await session.data(for: request)
+        let redirectDelegate = RedirectDelegate(policy: .api(apiKey: apiKey, token: token))
+        let (data, response) = try await session.data(for: request, delegate: redirectDelegate)
         try Self.validate(response: response, data: data)
         let decoded = try JSONDecoder().decode(DownloadResponse.self, from: data)
-        guard let link = URL(string: decoded.link), link.scheme == "https" || link.scheme == "http" else {
+        guard let link = Self.validatedSubtitleURL(decoded.link) else {
             throw OpenSubtitlesError.missingDownloadLink
         }
         return try await Self.fetchSubtitleFile(
@@ -274,12 +289,26 @@ final class OpenSubtitlesClient {
         session: URLSession,
         directory: URL?
     ) async throws -> URL {
+        guard let link = validatedSubtitleURL(link) else {
+            throw OpenSubtitlesError.missingDownloadLink
+        }
         var request = URLRequest(url: link)
         request.timeoutInterval = 30
-        // The download CDN rejects requests without the account's Api-Key.
-        request.setValue(apiKey, forHTTPHeaderField: "Api-Key")
+        // The official download CDN rejects requests without the account's
+        // Api-Key. Signed links hosted elsewhere must stay credential-free.
+        let sendsAPIKey = isTrustedDownloadURL(link)
+        if sendsAPIKey {
+            request.setValue(apiKey, forHTTPHeaderField: "Api-Key")
+        }
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await session.data(for: request)
+        let redirectDelegate = RedirectDelegate(policy: .download(apiKey: apiKey))
+        let (bytes, response) = try await session.bytes(for: request, delegate: redirectDelegate)
+        var didFinishReading = false
+        defer {
+            if !didFinishReading {
+                bytes.task.cancel()
+            }
+        }
         guard let http = response as? HTTPURLResponse else {
             throw OpenSubtitlesError.invalidResponse
         }
@@ -289,6 +318,21 @@ final class OpenSubtitlesClient {
                 HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
             )
         }
+        if http.expectedContentLength > Int64(maximumSubtitleBytes) {
+            throw OpenSubtitlesError.fileTooLarge
+        }
+
+        var data = Data()
+        if http.expectedContentLength > 0 {
+            data.reserveCapacity(min(Int(http.expectedContentLength), maximumSubtitleBytes))
+        }
+        for try await byte in bytes {
+            guard data.count < maximumSubtitleBytes else {
+                throw OpenSubtitlesError.fileTooLarge
+            }
+            data.append(byte)
+        }
+        didFinishReading = true
         // Reject archives/gzip, require decodable text with at least one cue,
         // then save normalized UTF-8: FFmpeg's SRT demuxer only reads
         // byte-oriented text, unlike the overlay parser.
@@ -349,6 +393,9 @@ final class OpenSubtitlesClient {
         token: String? = nil,
         body: Data? = nil
     ) throws -> URLRequest {
+        guard Self.isTrustedAPIURL(url) else {
+            throw OpenSubtitlesError.invalidResponse
+        }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
@@ -367,14 +414,133 @@ final class OpenSubtitlesClient {
     private static func endpoint(_ baseURL: String, path: String) -> URL? {
         let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return nil }
-        let withScheme = raw.hasPrefix("http://") || raw.hasPrefix("https://")
+        let lowercased = raw.lowercased()
+        let withScheme = lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://")
             ? raw
             : "https://\(raw)"
-        guard let base = URL(string: withScheme) else { return nil }
-        let root = base.path.hasSuffix("/api/v1")
+        guard let base = validatedAPIBaseURL(withScheme) else { return nil }
+        let root = base.path == "/api/v1" || base.path == "/api/v1/"
             ? base
             : base.appendingPathComponent("api/v1")
         return root.appendingPathComponent(path)
+    }
+
+    private static func validatedAPIBaseURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowercased = trimmed.lowercased()
+        let withScheme = lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://")
+            ? trimmed
+            : "https://\(trimmed)"
+        guard let url = URL(string: withScheme), isTrustedAPIURL(url) else { return nil }
+        guard url.path.isEmpty || url.path == "/" || url.path == "/api/v1" || url.path == "/api/v1/" else {
+            return nil
+        }
+        guard url.query == nil, url.fragment == nil else { return nil }
+        return url
+    }
+
+    private static func validatedSubtitleURL(_ raw: String) -> URL? {
+        guard let url = URL(string: raw) else { return nil }
+        return validatedSubtitleURL(url)
+    }
+
+    private static func validatedSubtitleURL(_ url: URL) -> URL? {
+        guard isSecureURL(url), let host = normalizedHost(url), !isOpenSubtitlesLookalike(host) else {
+            return nil
+        }
+        return url
+    }
+
+    private static func isTrustedAPIURL(_ url: URL) -> Bool {
+        guard isSecureURL(url), let host = normalizedHost(url) else { return false }
+        return apiAuthorities.contains(host)
+    }
+
+    private static func isTrustedDownloadURL(_ url: URL) -> Bool {
+        guard isSecureURL(url), let host = normalizedHost(url) else { return false }
+        return downloadAuthorities.contains(host)
+    }
+
+    private static func isSecureURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.host != nil,
+              components.user == nil,
+              components.password == nil,
+              components.port == nil || components.port == 443,
+              components.fragment == nil else {
+            return false
+        }
+        return true
+    }
+
+    private static func normalizedHost(_ url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?.host?.lowercased()
+    }
+
+    private static func isOpenSubtitlesLookalike(_ host: String) -> Bool {
+        guard host.contains("opensubtitles") else { return false }
+        return !apiAuthorities.contains(host) && !downloadAuthorities.contains(host)
+    }
+
+    enum RedirectPolicy {
+        case api(apiKey: String, token: String?)
+        case download(apiKey: String)
+    }
+
+    /// Applies the redirect trust boundary and rebuilds credentials for the
+    /// destination. Keeping this policy pure makes the URLSession delegate
+    /// and deterministic tests share exactly the same security decision.
+    static func redirectedRequest(for request: URLRequest, policy: RedirectPolicy) -> URLRequest? {
+        guard let url = request.url else {
+            return nil
+        }
+
+        switch policy {
+        case let .api(apiKey, token):
+            guard isTrustedAPIURL(url) else {
+                return nil
+            }
+            var redirected = request
+            redirected.setValue(apiKey, forHTTPHeaderField: "Api-Key")
+            if let token {
+                redirected.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            } else {
+                redirected.setValue(nil, forHTTPHeaderField: "Authorization")
+            }
+            return redirected
+
+        case let .download(apiKey):
+            guard validatedSubtitleURL(url) != nil else {
+                return nil
+            }
+            var redirected = request
+            redirected.setValue(nil, forHTTPHeaderField: "Api-Key")
+            redirected.setValue(nil, forHTTPHeaderField: "Authorization")
+            if isTrustedDownloadURL(url) {
+                redirected.setValue(apiKey, forHTTPHeaderField: "Api-Key")
+            }
+            return redirected
+        }
+    }
+
+    private final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
+        private let policy: RedirectPolicy
+
+        init(policy: RedirectPolicy) {
+            self.policy = policy
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            completionHandler(OpenSubtitlesClient.redirectedRequest(for: request, policy: policy))
+        }
     }
 
     private static func validate(response: URLResponse, data: Data) throws {

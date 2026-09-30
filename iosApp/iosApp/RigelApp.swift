@@ -83,7 +83,7 @@ struct RigelApp: App {
         RigelIntake.shared.attach(controller: RigelCore.shared.controller)
         for arg in ProcessInfo.processInfo.arguments {
             if arg.hasPrefix("rigel://") {
-                NSLog("[RigelApp] launch-arg %@", arg)
+                NSLog("[RigelApp] launch deeplink received")
                 _ = RigelIntake.shared.handle(url: arg)
             }
             if arg == "-rigel-renderer" {
@@ -99,7 +99,7 @@ struct RigelApp: App {
             RootView()
                 .environmentObject(player)
                 .onOpenURL { url in
-                    NSLog("[RigelApp] openURL %@", url.absoluteString)
+                    NSLog("[RigelApp] openURL received")
                     let handled = RigelIntake.shared.handle(url: url.absoluteString)
                     NSLog("[RigelApp] handle -> %@", handled ? "true" : "false")
                 }

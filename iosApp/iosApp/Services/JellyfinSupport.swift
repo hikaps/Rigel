@@ -11,7 +11,7 @@ enum JellyfinCancellation {
     static func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         let ns = error as NSError
-        if ns.domain.contains("CancellationException") { return true }
+        guard ns.domain == "KotlinException" else { return false }
         let throwable = ns.kotlinException ?? ns.userInfo["KotlinException"]
         guard let kotlinThrowable = throwable as? KotlinThrowable else {
             return false

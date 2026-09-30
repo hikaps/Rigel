@@ -3,6 +3,7 @@ package app.rigel.cast
 import app.rigel.bridge.DiscoveryBridge
 import app.rigel.bridge.HttpServerBridge
 import app.rigel.bridge.ProbeBridge
+import app.rigel.bridge.ProbeOperation
 import app.rigel.bridge.ProbeResult
 import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.bridge.SsdpDevice
@@ -22,7 +23,12 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -37,7 +43,10 @@ import kotlin.test.assertTrue
 private class FakeBridges(private val lan: String?) :
     DiscoveryBridge, ProbeBridge, TranscodeBridge, HttpServerBridge {
     override fun ssdpSearch(searchTargets: List<String>, timeoutMs: Int, onResult: (List<SsdpDevice>) -> Unit) = Unit
-    override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit) = Unit
+    override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation =
+        object : ProbeOperation {
+            override fun cancel() = Unit
+        }
     override fun startHlsSession(
         sessionId: String,
         sourceUrl: String,
@@ -73,6 +82,7 @@ private class RecordingPort : CastPlaybackPort {
     }
 }
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class CastDispatcherTest {
     private val withLan = FakeBridges(lan = "http://192.168.1.5:8080")
     private val port = RecordingPort()
@@ -533,5 +543,230 @@ class CastDispatcherTest {
         assertFalse(stopped)
         assertTrue(port.stopRequested)
         assertNull(CastDispatcher.activeTarget())
+    }
+    @Test
+    fun dlnaPositionIsReturnedInMilliseconds() {
+        val engine = MockEngine {
+            respond(
+                content = """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetPositionInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><TrackDuration>00:10:05.678</TrackDuration><RelTime>00:01:02.345</RelTime></u:GetPositionInfoResponse></s:Body></s:Envelope>""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/xml"),
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Dlna(DlnaDevice("position-dlna", "http://10.0.0.9/rootDesc.xml", "TV", "http://10.0.0.9/ctl"))
+
+        assertEquals(62_345L, runBlocking { CastDispatcher.position(target, client) })
+        assertEquals(1, engine.requestHistory.size)
+        assertTrue(engine.requestHistory.single().headers["SOAPACTION"]!!.contains("#GetPositionInfo"))
+    }
+
+    @Test
+    fun kodiPositionIsReturnedInMilliseconds() {
+        val engine = MockEngine {
+            respond(
+                content = """{"jsonrpc":"2.0","id":1,"result":{"time":{"hours":0,"minutes":1,"seconds":2,"milliseconds":345},"totaltime":{"hours":0,"minutes":10,"seconds":5,"milliseconds":678}}}""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Kodi(KodiDevice("position-kodi", "http://10.0.0.7:8080", "Kodi"))
+
+        assertEquals(62_345L, runBlocking { CastDispatcher.position(target, client) })
+        assertEquals("http://10.0.0.7:8080/jsonrpc", engine.requestHistory.single().url.toString())
+    }
+
+    @Test
+    fun positionReturnsNullForUnsupportedReceiver() {
+        val engine = MockEngine { respond("unexpected", HttpStatusCode.OK) }
+        val client = HttpClient(engine)
+        val target = CastTarget.Roku(RokuDevice("position-roku", "http://10.0.0.8:8060/", "Roku"))
+
+        assertNull(runBlocking { CastDispatcher.position(target, client) })
+        assertEquals(0, engine.requestHistory.size)
+    }
+    @Test
+    fun positionActiveDoesNotSupersedeAnInFlightCast() = runTest {
+        val positionResponse = """{"jsonrpc":"2.0","id":1,"result":{"time":{"hours":0,"minutes":1,"seconds":2,"milliseconds":345},"totaltime":{"hours":0,"minutes":10,"seconds":5,"milliseconds":678}}}"""
+        val castStarted = CompletableDeferred<Unit>()
+        var delayCast = false
+        val engine = MockEngine { request ->
+            val body = (request.body as? TextContent)?.text.orEmpty()
+            if (body.contains("Player.Open")) {
+                if (delayCast) {
+                    castStarted.complete(Unit)
+                    delay(1_000)
+                }
+                respond("""{"jsonrpc":"2.0","id":1,"result":"OK"}""", HttpStatusCode.OK)
+            } else {
+                respond(positionResponse, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+            }
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Kodi(KodiDevice("active-position", "http://10.0.0.7:8080", "Kodi"))
+
+        assertNull(CastDispatcher.positionActive(client))
+        assertTrue(CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) is CastResult.Sent)
+        delayCast = true
+        val inFlight = async { CastDispatcher.cast(target, "http://origin/recast.mp4", "Recast", client) }
+        castStarted.await()
+
+        assertEquals(62_345L, CastDispatcher.positionActive(client))
+        assertTrue(inFlight.await() is CastResult.Sent)
+        assertEquals(target, CastDispatcher.activeTarget())
+    }
+
+    @Test
+    fun delayedPositionQueryIsDiscardedAfterDetach() = runTest {
+        val started = CompletableDeferred<Unit>()
+        val positionResponse = """{"jsonrpc":"2.0","id":1,"result":{"time":{"hours":0,"minutes":1,"seconds":2,"milliseconds":345},"totaltime":{"hours":0,"minutes":10,"seconds":5,"milliseconds":678}}}"""
+        val engine = MockEngine { request ->
+            val body = (request.body as? TextContent)?.text.orEmpty()
+            if (body.contains("Player.GetProperties")) {
+                started.complete(Unit)
+                delay(1_000)
+                respond(positionResponse, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+            } else {
+                respond("""{"jsonrpc":"2.0","id":1,"result":"OK"}""", HttpStatusCode.OK)
+            }
+        }
+        val client = HttpClient(engine)
+        val target = CastTarget.Kodi(KodiDevice("detach-position", "http://10.0.0.7:8080", "Kodi"))
+
+        assertTrue(CastDispatcher.cast(target, "http://origin/v.mp4", "Movie", client) is CastResult.Sent)
+        val query = async { CastDispatcher.positionActive(client) }
+        started.await()
+        assertEquals(target, CastDispatcher.detachActive())
+        assertNull(query.await())
+        assertNull(CastDispatcher.activeTarget())
+    }
+
+    @Test
+    fun delayedPositionQueryIsDiscardedAfterNewCast() = runTest {
+        val started = CompletableDeferred<Unit>()
+        val positionResponse = """{"jsonrpc":"2.0","id":1,"result":{"time":{"hours":0,"minutes":1,"seconds":2,"milliseconds":345},"totaltime":{"hours":0,"minutes":10,"seconds":5,"milliseconds":678}}}"""
+        val engine = MockEngine { request ->
+            val body = (request.body as? TextContent)?.text.orEmpty()
+            if (body.contains("Player.GetProperties")) {
+                started.complete(Unit)
+                delay(1_000)
+                respond(positionResponse, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+            } else {
+                respond("""{"jsonrpc":"2.0","id":1,"result":"OK"}""", HttpStatusCode.OK)
+            }
+        }
+        val client = HttpClient(engine)
+        val first = CastTarget.Kodi(KodiDevice("old-position", "http://10.0.0.7:8080", "Kodi"))
+        val replacement = CastTarget.Kodi(KodiDevice("new-position", "http://10.0.0.8:8080", "Kodi"))
+
+        assertTrue(CastDispatcher.cast(first, "http://origin/old.mp4", "Old", client) is CastResult.Sent)
+        val query = async { CastDispatcher.positionActive(client) }
+        started.await()
+        assertTrue(CastDispatcher.cast(replacement, "http://origin/new.mp4", "New", client) is CastResult.Sent)
+        assertNull(query.await())
+        assertEquals(replacement, CastDispatcher.activeTarget())
+    }
+
+    @Test
+    fun supersededCastReturnsRejectedRatherThanSent() = runTest {
+        val firstStarted = CompletableDeferred<Unit>()
+        val engine = MockEngine { request ->
+            if (request.url.toString().contains("10.0.0.1")) {
+                firstStarted.complete(Unit)
+                delay(1_000)
+            }
+            respond("""{"jsonrpc":"2.0","id":1,"result":"OK"}""", HttpStatusCode.OK)
+        }
+        val client = HttpClient(engine)
+        val firstTarget = CastTarget.Kodi(KodiDevice("superseded-first", "http://10.0.0.1:8080", "Kodi 1"))
+        val secondTarget = CastTarget.Kodi(KodiDevice("superseding-second", "http://10.0.0.2:8080", "Kodi 2"))
+
+        val stale = async { CastDispatcher.cast(firstTarget, "http://origin/first.mp4", "First", client) }
+        firstStarted.await()
+
+        val current = CastDispatcher.cast(secondTarget, "http://origin/second.mp4", "Second", client)
+
+        assertTrue(current is CastResult.Sent)
+        assertTrue(stale.await() is CastResult.Rejected)
+        assertEquals(secondTarget, CastDispatcher.activeTarget())
+    }
+
+    @Test
+    fun supersededRecastReturnsRejectedRatherThanSent() = runTest {
+        var delayFirst = false
+        val recastStarted = CompletableDeferred<Unit>()
+        val engine = MockEngine { request ->
+            if (delayFirst && request.url.toString().contains("10.0.0.1")) {
+                recastStarted.complete(Unit)
+                delay(1_000)
+            }
+            respond("""{"jsonrpc":"2.0","id":1,"result":"OK"}""", HttpStatusCode.OK)
+        }
+        val client = HttpClient(engine)
+        val active = CastTarget.Kodi(KodiDevice("recast-first", "http://10.0.0.1:8080", "Kodi 1"))
+        val replacement = CastTarget.Kodi(KodiDevice("recast-second", "http://10.0.0.2:8080", "Kodi 2"))
+
+        assertTrue(CastDispatcher.cast(active, "http://origin/first.mp4", "First", client) is CastResult.Sent)
+        delayFirst = true
+        val stale = async { CastDispatcher.recastIfActive(active, "http://origin/recast.mp4", "Recast", client) }
+        recastStarted.await()
+        val current = CastDispatcher.cast(replacement, "http://origin/second.mp4", "Second", client)
+        val staleResult = stale.await()
+
+        assertTrue(current is CastResult.Sent)
+        assertNotNull(staleResult)
+        assertTrue(staleResult is CastResult.Rejected)
+        assertEquals(replacement, CastDispatcher.activeTarget())
+    }
+    @Test
+    fun delayedCastIsRejectedWhenCommitVoidedByDetach() = runTest {
+        val started = CompletableDeferred<Unit>()
+        var delayStale = false
+        val engine = MockEngine { request ->
+            if (delayStale && request.url.toString().contains("10.0.0.1")) {
+                started.complete(Unit)
+                delay(1_000)
+            }
+            respond("""{"jsonrpc":"2.0","id":1,"result":"OK"}""", HttpStatusCode.OK)
+        }
+        val client = HttpClient(engine)
+        val stale = CastTarget.Kodi(KodiDevice("voided-first", "http://10.0.0.1:8080", "Kodi 1"))
+
+        assertTrue(CastDispatcher.cast(stale, "http://origin/first.mp4", "First", client) is CastResult.Sent)
+        delayStale = true
+        val inFlight = async { CastDispatcher.cast(stale, "http://origin/recast.mp4", "Recast", client) }
+        started.await()
+        assertNotNull(CastDispatcher.detachActive())
+
+        assertTrue(inFlight.await() is CastResult.Rejected)
+        assertNull(CastDispatcher.activeTarget())
+        assertFalse(port.active)
+    }
+
+    @Test
+    fun delayedCastIsRejectedWhenCommitVoidedByNewCast() = runTest {
+        val started = CompletableDeferred<Unit>()
+        var delayStale = false
+        val engine = MockEngine { request ->
+            if (delayStale && request.url.toString().contains("10.0.0.1")) {
+                started.complete(Unit)
+                delay(1_000)
+            }
+            respond("""{"jsonrpc":"2.0","id":1,"result":"OK"}""", HttpStatusCode.OK)
+        }
+        val client = HttpClient(engine)
+        val stale = CastTarget.Kodi(KodiDevice("voided-old", "http://10.0.0.1:8080", "Kodi 1"))
+        val replacement = CastTarget.Kodi(KodiDevice("voided-new", "http://10.0.0.2:8080", "Kodi 2"))
+
+        assertTrue(CastDispatcher.cast(stale, "http://origin/first.mp4", "First", client) is CastResult.Sent)
+        delayStale = true
+        val inFlight = async { CastDispatcher.cast(stale, "http://origin/recast.mp4", "Recast", client) }
+        started.await()
+        assertTrue(CastDispatcher.cast(replacement, "http://origin/new.mp4", "New", client) is CastResult.Sent)
+
+        assertTrue(inFlight.await() is CastResult.Rejected)
+        assertEquals(replacement, CastDispatcher.activeTarget())
+        assertTrue(port.active)
     }
 }

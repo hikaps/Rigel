@@ -14,9 +14,39 @@ import kotlin.test.assertTrue
 
 class SettingsStoreTest {
 
-    private fun store(): SettingsStore {
-        val map = MapSettings(mutableMapOf())
-        return SettingsStore(map)
+    private class FakeJellyfinTokenStore(
+        private var stored: String? = null,
+        private val writesSucceed: Boolean = true,
+        private val clearsSucceed: Boolean = true,
+    ) : JellyfinTokenStore {
+        override val persistsAcrossInstances = true
+        var writeAttempts = 0
+            private set
+        var clearAttempts = 0
+            private set
+
+        override fun read(): String? = stored
+
+        override fun write(value: String): Boolean {
+            writeAttempts++
+            if (!writesSucceed) return false
+            stored = value
+            return true
+        }
+
+        override fun clear(): Boolean {
+            clearAttempts++
+            if (!clearsSucceed) return false
+            stored = null
+            return true
+        }
+    }
+
+    private fun store(
+        settings: MapSettings = MapSettings(mutableMapOf()),
+        tokenStore: JellyfinTokenStore = FakeJellyfinTokenStore(),
+    ): SettingsStore {
+        return SettingsStore(settings, tokenStore)
     }
 
     @Test
@@ -28,13 +58,95 @@ class SettingsStoreTest {
         assertEquals("", s.jellyfinUsername())
 
         s.setJellyfinServer("http://jf:8096")
-        s.setJellyfinToken("tok")
+        assertTrue(s.setJellyfinToken("tok"))
         s.setJellyfinUserId("u1")
         s.setJellyfinUsername("alice")
         assertEquals("http://jf:8096", s.jellyfinServer())
         assertEquals("tok", s.jellyfinToken())
         assertEquals("u1", s.jellyfinUserId())
         assertEquals("alice", s.jellyfinUsername())
+    }
+
+    @Test
+    fun defaultTokenStoresAreIsolatedPerSettingsInstance() {
+        val first = SettingsStore(MapSettings(mutableMapOf()))
+        val second = SettingsStore(MapSettings(mutableMapOf()))
+
+        assertTrue(first.setJellyfinToken("first-token"))
+        assertEquals("first-token", first.jellyfinToken())
+        assertEquals("", second.jellyfinToken())
+    }
+    @Test
+    fun volatileDefaultTokenStoreKeepsLegacyCredentialAcrossInstances() {
+        val settings = MapSettings(mutableMapOf())
+        settings.putString("jellyfin_token", "legacy-token")
+
+        val first = SettingsStore(settings)
+        assertEquals("legacy-token", first.jellyfinToken())
+        assertTrue(first.setJellyfinToken("volatile-token"))
+        assertEquals("volatile-token", first.jellyfinToken())
+
+        val second = SettingsStore(settings)
+        assertEquals("legacy-token", second.jellyfinToken())
+    }
+
+    @Test
+    fun jellyfinTokenMigrationRemovesPlaintextOnlyAfterSecureWrite() {
+        val settings = MapSettings(mutableMapOf())
+        settings.putString("jellyfin_token", "legacy-token")
+        val tokenStore = FakeJellyfinTokenStore(writesSucceed = true)
+
+        val s = store(settings, tokenStore)
+
+        assertEquals("legacy-token", s.jellyfinToken())
+        assertEquals("", settings.getString("jellyfin_token", ""))
+        assertEquals(1, tokenStore.writeAttempts)
+    }
+
+    @Test
+    fun jellyfinTokenMigrationKeepsPlaintextWhenSecureWriteFails() {
+        val settings = MapSettings(mutableMapOf())
+        settings.putString("jellyfin_token", "legacy-token")
+        val tokenStore = FakeJellyfinTokenStore(writesSucceed = false)
+
+        val s = store(settings, tokenStore)
+
+        assertEquals("legacy-token", s.jellyfinToken())
+        assertEquals("legacy-token", settings.getString("jellyfin_token", ""))
+        assertEquals(1, tokenStore.writeAttempts)
+    }
+
+    @Test
+    fun disconnectClearsSecureToken() {
+        val tokenStore = FakeJellyfinTokenStore(stored = "secure-token")
+        val s = store(tokenStore = tokenStore)
+
+        assertTrue(s.setJellyfinToken(""))
+
+        assertEquals("", s.jellyfinToken())
+        assertEquals(1, tokenStore.clearAttempts)
+    }
+
+    @Test
+    fun secureWriteFailurePreservesExistingLogicalCredential() {
+        val settings = MapSettings(mutableMapOf())
+        settings.putString("jellyfin_token", "legacy-token")
+        val tokenStore = FakeJellyfinTokenStore(writesSucceed = false)
+        val s = store(settings, tokenStore)
+
+        assertFalse(s.setJellyfinToken("new-token"))
+        assertEquals("legacy-token", s.jellyfinToken())
+        assertEquals("legacy-token", settings.getString("jellyfin_token", ""))
+    }
+
+    @Test
+    fun secureClearFailurePreservesExistingLogicalCredential() {
+        val tokenStore = FakeJellyfinTokenStore(stored = "secure-token", clearsSucceed = false)
+        val s = store(tokenStore = tokenStore)
+
+        assertFalse(s.setJellyfinToken(""))
+        assertEquals("secure-token", s.jellyfinToken())
+        assertEquals(1, tokenStore.clearAttempts)
     }
 
     @Test
@@ -173,6 +285,85 @@ class SettingsStoreTest {
         val s = store()
         s.addToLinkHistory("http://h/a|b", null)
         assertEquals(listOf(LinkHistoryEntry("http://h/a|b", null)), s.linkHistory())
+    }
+    @Test
+    fun linkHistoryRedactsCredentialQueryValuesAndLegacyRows() {
+        val settings = MapSettings(mutableMapOf())
+        settings.putString(
+            "link_history",
+            "Legacy|https://jf.example/items/1?api_key=old-secret&foo=bar&access_token=also-secret#play",
+        )
+        val s = store(settings)
+
+        assertEquals(
+            listOf(LinkHistoryEntry("https://jf.example/items/1?foo=bar#play", "Legacy")),
+            s.linkHistory(),
+        )
+        val persisted = settings.getString("link_history", "")
+        assertFalse(persisted.contains("api_key"))
+        assertFalse(persisted.contains("old-secret"))
+        assertFalse(persisted.contains("access_token"))
+        assertFalse(persisted.contains("also-secret"))
+        assertTrue(persisted.contains("foo=bar"))
+    }
+
+    @Test
+    fun linkHistoryRedactsPercentEncodedCredentialQueryNames() {
+        val settings = MapSettings(mutableMapOf())
+        settings.putString(
+            "link_history",
+            "Encoded|https://jf.example/items/1?api%5Fkey=old-secret&access%5Ftoken=also-secret&quality=full",
+        )
+
+        val s = store(settings)
+
+        assertEquals(
+            listOf(LinkHistoryEntry("https://jf.example/items/1?quality=full", "Encoded")),
+            s.linkHistory(),
+        )
+        val persisted = settings.getString("link_history", "")
+        assertFalse(persisted.contains("old-secret"))
+        assertFalse(persisted.contains("also-secret"))
+        assertFalse(persisted.contains("api%5Fkey"))
+        assertFalse(persisted.contains("access%5Ftoken"))
+        assertTrue(persisted.contains("quality=full"))
+    }
+
+    @Test
+    fun linkHistoryPreservesMalformedNonsensitiveQueryNames() {
+        val s = store()
+
+        s.addToLinkHistory("https://example.com/video?quality%ZZ=full", null)
+
+        assertEquals(
+            listOf(LinkHistoryEntry("https://example.com/video?quality%ZZ=full", null)),
+            s.linkHistory(),
+        )
+    }
+
+    @Test
+    fun linkHistoryRedactsCredentialsWhenAddingEntry() {
+        val settings = MapSettings(mutableMapOf())
+        val s = store(settings)
+
+        s.addToLinkHistory("https://jf.example/video?X-Emby-Token=secret&quality=full", "Video")
+
+        assertEquals(
+            listOf(LinkHistoryEntry("https://jf.example/video?quality=full", "Video")),
+            s.linkHistory(),
+        )
+        assertFalse(settings.getString("link_history", "").contains("secret"))
+    }
+
+    @Test
+    fun linkHistoryLeavesOrdinaryUrlUnchanged() {
+        val s = store()
+        s.addToLinkHistory("https://example.com/video.mp4?quality=full", "Video")
+
+        assertEquals(
+            listOf(LinkHistoryEntry("https://example.com/video.mp4?quality=full", "Video")),
+            s.linkHistory(),
+        )
     }
 
     @Test

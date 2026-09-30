@@ -61,6 +61,17 @@ class CastSession {
     private var active: CastTarget? = null
     private var epoch = 0L
 
+    data class ActiveSnapshot(
+        val target: CastTarget,
+        val epoch: Long,
+    )
+
+    fun activeSnapshot(): ActiveSnapshot? =
+        active?.let { ActiveSnapshot(it, epoch) }
+
+    fun isCurrent(snapshot: ActiveSnapshot): Boolean =
+        epoch == snapshot.epoch && active?.identityKey == snapshot.target.identityKey
+
     fun activeTarget(): CastTarget? = active
 
     fun beginAttempt(): Long {

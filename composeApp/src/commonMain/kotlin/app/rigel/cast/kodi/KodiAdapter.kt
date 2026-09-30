@@ -60,6 +60,10 @@ object KodiAdapter : ReceiverAdapter {
             ?: false
     }
 
+    override suspend fun position(target: CastTarget, client: HttpClient): Long? = runCatching {
+        KodiRenderer(client).position((target as CastTarget.Kodi).device.endpoint)?.first
+    }.getOrNull()
+
     override suspend fun pause(target: CastTarget, client: HttpClient): Boolean = runCatching {
         KodiRenderer(client).pause((target as CastTarget.Kodi).device.endpoint)
     }.getOrDefault(false)

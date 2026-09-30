@@ -4,13 +4,41 @@ import ComposeApp
 /// Stream probing via libavformat. Normalizes container/codec names for
 /// FormatRouter (matroska/mp4/m3u8, h264/hevc/dts/...).
 final class RigelProbe {
-    static func probe(url: String, headers: [String: String]) -> (ProbeResult?, String?) {
-        var fmt: UnsafeMutablePointer<AVFormatContext>? = nil
+    private static let timeoutSeconds = 10
+    private static let timeoutMicroseconds: Int64 = 10_000_000
+
+    /// Synchronous API retained for existing callers and tests. The optional
+    /// caller-owned watchdog lets the bridge interrupt this same operation.
+    static func probe(
+        url: String,
+        headers: [String: String],
+        watchdog: InputWatchdog? = nil
+    ) -> (ProbeResult?, String?) {
+        let watchdog = watchdog ?? InputWatchdog(timeoutSeconds: timeoutSeconds)
+        guard let allocated = avformat_alloc_context() else {
+            return (nil, "probe open failed: no context")
+        }
+        var fmt: UnsafeMutablePointer<AVFormatContext>? = allocated
+        allocated.pointee.interrupt_callback = AVIOInterruptCB(
+            callback: { opaque in
+                guard let opaque else { return 0 }
+                let watchdog = Unmanaged<InputWatchdog>.fromOpaque(opaque).takeUnretainedValue()
+                return watchdog.shouldAbort() ? 1 : 0
+            },
+            opaque: Unmanaged.passUnretained(watchdog).toOpaque()
+        )
         var result: ProbeResult? = nil
         var error: String? = nil
 
+        defer {
+            // FFmpeg keeps the opaque interrupt pointer until its input is closed.
+            withExtendedLifetime(watchdog) {
+                avformat_close_input(&fmt)
+            }
+        }
         url.withCString { cstr in
             var opts: OpaquePointer? = nil
+            defer { if opts != nil { av_dict_free(&opts) } }
             for (key, value) in headers {
                 key.withCString { k in
                     value.withCString { v in
@@ -21,20 +49,15 @@ final class RigelProbe {
             // Bound stream analysis: the default 5 s budget is pure startup
             // latency on network sources.
             av_dict_set(&opts, "analyzeduration", "2000000", 0)
-            var timeoutDict: OpaquePointer? = opts
-            let ret = avformat_open_input(&fmt, cstr, nil, &timeoutDict)
-            if ret < 0 {
-                error = "probe open failed: \(avErrorString(ret))"
-                return
-            }
-            guard let ctx = fmt else {
-                error = "probe open failed: no context"
+            av_dict_set(&opts, "rw_timeout", String(timeoutMicroseconds), 0)
+            let ret = avformat_open_input(&fmt, cstr, nil, &opts)
+            guard ret >= 0, let ctx = fmt else {
+                error = "probe open failed: " + avErrorString(ret)
                 return
             }
             let infoRet = avformat_find_stream_info(ctx, nil)
             if infoRet < 0 {
-                error = "probe stream info failed: \(avErrorString(infoRet))"
-                avformat_close_input(&fmt)
+                error = "probe stream info failed: " + avErrorString(infoRet)
                 return
             }
 
@@ -117,7 +140,6 @@ final class RigelProbe {
                 bitRate: videoBitRate.map { KotlinLong(longLong: $0) },
                 maxAudioChannels: maxAudioChannels
             )
-            avformat_close_input(&fmt)
         }
         return (result, error)
     }

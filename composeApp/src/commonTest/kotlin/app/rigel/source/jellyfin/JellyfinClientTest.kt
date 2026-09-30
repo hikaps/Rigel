@@ -198,6 +198,13 @@ class JellyfinClientTest {
             JellyfinClient(HttpClient(engine)).browse(base, "tok", "u1", null)
         }
     }
+    @Test
+    fun authenticatePropagatesCancellation() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { throw CancellationException("cancelled") }
+        assertFailsWith<CancellationException> {
+            JellyfinClient(HttpClient(engine)).authenticate(base, "user", "pass", "device")
+        }
+    }
 
     @Test
     fun sessionsFilterControllableClientsAndIgnorePropertyOrder() = kotlinx.coroutines.test.runTest {
@@ -242,6 +249,13 @@ class JellyfinClientTest {
         val engine = MockEngine { respond("", HttpStatusCode.InternalServerError) }
         assertFalse(JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("a")))
     }
+    @Test
+    fun playToSessionPropagatesCancellation() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { throw CancellationException("cancelled") }
+        assertFailsWith<CancellationException> {
+            JellyfinClient(HttpClient(engine)).playToSession(base, "tok", "s1", listOf("a"))
+        }
+    }
 
     @Test
     fun stopSessionPostsStopCommand() = kotlinx.coroutines.test.runTest {
@@ -259,6 +273,13 @@ class JellyfinClientTest {
     fun stopSessionFalseOnNon2xx() = kotlinx.coroutines.test.runTest {
         val engine = MockEngine { respond("", HttpStatusCode.InternalServerError) }
         assertFalse(JellyfinClient(HttpClient(engine)).stopSession(base, "tok", "s1"))
+    }
+    @Test
+    fun stopSessionPropagatesCancellation() = kotlinx.coroutines.test.runTest {
+        val engine = MockEngine { throw CancellationException("cancelled") }
+        assertFailsWith<CancellationException> {
+            JellyfinClient(HttpClient(engine)).stopSession(base, "tok", "s1")
+        }
     }
 
     @Test
