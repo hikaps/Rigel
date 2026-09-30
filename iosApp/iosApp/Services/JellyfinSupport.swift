@@ -11,11 +11,21 @@ enum JellyfinCancellation {
     static func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         let ns = error as NSError
-        guard ns.domain == "KotlinException" else { return false }
+        if ns.domain.contains("CancellationException") { return true }
+        guard let throwable = kotlinThrowable(error) else { return false }
+        return JellyfinInterop.shared.isCancellation(throwable: throwable)
+    }
+
+    static func httpStatusCode(_ error: Error) -> Int? {
+        guard let throwable = kotlinThrowable(error),
+              let statusCode = JellyfinInterop.shared.httpStatusCode(throwable: throwable)
+        else { return nil }
+        return statusCode.intValue
+    }
+
+    private static func kotlinThrowable(_ error: Error) -> KotlinThrowable? {
+        let ns = error as NSError
         let throwable = ns.kotlinException ?? ns.userInfo["KotlinException"]
-        guard let kotlinThrowable = throwable as? KotlinThrowable else {
-            return false
-        }
-        return JellyfinInterop.shared.isCancellation(throwable: kotlinThrowable)
+        return throwable as? KotlinThrowable
     }
 }

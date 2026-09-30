@@ -59,6 +59,7 @@
 		CB22D82E6C31833D12C59ED4 /* HttpServerTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1904A6D0892EE70A9E7C8B07 /* HttpServerTest.swift */; };
 		CE96A7957AD6EED370D54E87 /* OpenSubtitles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDF70300D69370704A14D9A /* OpenSubtitles.swift */; };
 		CEF57BDA41A823F25B6532D3 /* HttpServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 878B4928504043449C4FF196 /* HttpServer.swift */; };
+		D12F167AD5FEB3A0E8A07A84 /* JellyfinWorkflowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C48440E2919BF020921FCA05 /* JellyfinWorkflowUITests.swift */; };
 		D1A5D38AA8D9FFC447BB5A1F /* JellyfinViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACF3C792497D8C06AD94EDBF /* JellyfinViewModelTests.swift */; };
 		D9AD1C07F00D2DAC29388632 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D6CDACA6CCC4472CAD24AD5 /* SettingsView.swift */; };
 		E0784072F4F3A2C9B610467F /* Probe.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8CE17963A2289F4B9263B94 /* Probe.swift */; };
@@ -85,6 +86,13 @@
 			remoteInfo = RigelShare;
 		};
 		87F4C4A9A0130EDFC7D4E2D3 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7C5559907686F918164C77E8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 459E6C4A49D670774E68737C;
+			remoteInfo = Rigel;
+		};
+		B426E4586C6676F1675D1809 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 7C5559907686F918164C77E8 /* Project object */;
 			proxyType = 1;
@@ -133,6 +141,7 @@
 		447A68C1A13FE16EF24829F3 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4B16AFB99926EEE212E46D53 /* fixture_sub_fr.srt */ = {isa = PBXFileReference; path = fixture_sub_fr.srt; sourceTree = "<group>"; };
 		4C441C2B991587F00FB44566 /* OpenSubtitlesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenSubtitlesTests.swift; sourceTree = "<group>"; };
+		4CA6B770DCC301AA7AD838CA /* RigelUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = RigelUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4E20CC30AFCA65D53397B118 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		4F66FCF2113C925E1D49A8DE /* SubtitleParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleParser.swift; sourceTree = "<group>"; };
 		500AD4648B5224FBCEF6AB40 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -172,6 +181,7 @@
 		AD09AB63F5771E7ACEFB345F /* JellyfinAsyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinAsyncTests.swift; sourceTree = "<group>"; };
 		AE601FA4AE0C0908D4745F69 /* RigelFfmpeg.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RigelFfmpeg.h; sourceTree = "<group>"; };
 		AF5AE7D1F6263C9B396A58B0 /* fixture.mp4 */ = {isa = PBXFileReference; path = fixture.mp4; sourceTree = "<group>"; };
+		C48440E2919BF020921FCA05 /* JellyfinWorkflowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinWorkflowUITests.swift; sourceTree = "<group>"; };
 		C8CE17963A2289F4B9263B94 /* Probe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Probe.swift; sourceTree = "<group>"; };
 		DC43E506FA9974EFA8872E6C /* TrackPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackPickerSheet.swift; sourceTree = "<group>"; };
 		EFB95112E586DE9EC94C62B3 /* UpnpRendererService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpnpRendererService.swift; sourceTree = "<group>"; };
@@ -220,6 +230,7 @@
 				8CD86059649C881D0505229A /* Rigel.app */,
 				FD75F9EC70ED2AC5CF7CE1EC /* RigelShare.appex */,
 				1B5E4D4358F621D7071B678A /* RigelTests.xctest */,
+				4CA6B770DCC301AA7AD838CA /* RigelUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -239,6 +250,7 @@
 			children = (
 				09227488A7AC723922D57628 /* iosApp */,
 				E545B5D5956369A0DDCA5CE0 /* RigelTests */,
+				5EF207BB3B9E1FA45181A6F1 /* RigelUITests */,
 				C10DF0B81F118DE425D1BE43 /* ShareExtension */,
 				135EE4CB7FEBAB9B54444423 /* Products */,
 			);
@@ -299,6 +311,15 @@
 			path = Hls;
 			sourceTree = "<group>";
 		};
+		5EF207BB3B9E1FA45181A6F1 /* RigelUITests */ = {
+			isa = PBXGroup;
+			children = (
+				C48440E2919BF020921FCA05 /* JellyfinWorkflowUITests.swift */,
+			);
+			name = RigelUITests;
+			path = ../RigelUITests;
+			sourceTree = "<group>";
+		};
 		99AE06FA26661543CBC21682 /* Services */ = {
 			isa = PBXGroup;
 			children = (
@@ -343,6 +364,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		2B7CF91ABC8BAD11B799D136 /* RigelUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 27CD88404F4E7E60BDA1151E /* Build configuration list for PBXNativeTarget "RigelUITests" */;
+			buildPhases = (
+				F30A02C741ABC1FA1EDA1E61 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D4FE43BE064F4C1C83491672 /* PBXTargetDependency */,
+			);
+			name = RigelUITests;
+			packageProductDependencies = (
+			);
+			productName = RigelUITests;
+			productReference = 4CA6B770DCC301AA7AD838CA /* RigelUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		2CFE07C6A3AC72F7F435F4EC /* RigelShare */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 867F68E50E18F3A834FFB51C /* Build configuration list for PBXNativeTarget "RigelShare" */;
@@ -410,6 +449,9 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					2B7CF91ABC8BAD11B799D136 = {
+						TestTargetID = 459E6C4A49D670774E68737C;
+					};
 					2CFE07C6A3AC72F7F435F4EC = {
 						DevelopmentTeam = 9SAXN99TCU;
 						ProvisioningStyle = Automatic;
@@ -437,6 +479,7 @@
 				459E6C4A49D670774E68737C /* Rigel */,
 				2CFE07C6A3AC72F7F435F4EC /* RigelShare */,
 				EB416464170670DE0F37A6C0 /* RigelTests */,
+				2B7CF91ABC8BAD11B799D136 /* RigelUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -587,6 +630,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F30A02C741ABC1FA1EDA1E61 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D12F167AD5FEB3A0E8A07A84 /* JellyfinWorkflowUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -594,6 +645,11 @@
 			isa = PBXTargetDependency;
 			target = 459E6C4A49D670774E68737C /* Rigel */;
 			targetProxy = 87F4C4A9A0130EDFC7D4E2D3 /* PBXContainerItemProxy */;
+		};
+		D4FE43BE064F4C1C83491672 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 459E6C4A49D670774E68737C /* Rigel */;
+			targetProxy = B426E4586C6676F1675D1809 /* PBXContainerItemProxy */;
 		};
 		FB31FE356BDF6152D495F184 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -666,6 +722,24 @@
 			};
 			name = Debug;
 		};
+		1F4DAC8A8FE09A3F00398E7A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rigel.RigelUITests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Rigel;
+			};
+			name = Release;
+		};
 		25F8E1DBD7A8F241D977E46D /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -731,6 +805,24 @@
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Rigel.app/Rigel";
 			};
 			name = Release;
+		};
+		48BBF5A5E2DDF53D22DC76B6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rigel.RigelUITests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Rigel;
+			};
+			name = Debug;
 		};
 		7D7FD7808006A79D9FB4D336 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -899,6 +991,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		27CD88404F4E7E60BDA1151E /* Build configuration list for PBXNativeTarget "RigelUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				48BBF5A5E2DDF53D22DC76B6 /* Debug */,
+				1F4DAC8A8FE09A3F00398E7A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		45EF8C9F85708CC72D72989B /* Build configuration list for PBXProject "Rigel" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -210,14 +210,9 @@ struct HistoryView: View {
             token: settings.jellyfinToken(),
             userId: settings.jellyfinUserId()
         ) {
-            _ = player.openJellyfin(
+            _ = player.open(
                 url: jellyfin.playableURL,
-                title: entry.title ?? jellyfin.itemId,
-                subtitleTracks: [],
-                baseUrl: jellyfin.baseURL,
-                token: jellyfin.token,
-                userId: jellyfin.userId,
-                itemId: jellyfin.itemId
+                title: entry.title ?? jellyfin.itemId
             )
         } else if HistoryPlaybackResolver.isLibraryStreamURL(
             entry.url,

@@ -1,4 +1,8 @@
 package app.rigel.source.jellyfin
+internal data class JsonItemsMetadata(
+    val fields: Map<String, String>,
+    val receivedCount: Int,
+)
 
 /**
  * Small dependency-free JSON walker. It exposes scalar fields for every object
@@ -8,25 +12,28 @@ package app.rigel.source.jellyfin
 internal class JsonObjectReader(
     private val source: String,
     private val onObjectAtPath: ((List<String>, Map<String, String>) -> Unit)? = null,
+    private val onArrayAtPath: ((List<String>, Int) -> Unit)? = null,
     private val onObject: (Map<String, String>) -> Unit = {},
 ) {
     private var index = 0
 
-    fun parseItems() {
+    fun parseItems(): JsonItemsMetadata {
         skipWhitespace()
-        when {
+        val fields = mutableMapOf<String, String>()
+        val receivedCount = when {
             takeIf('[') -> {
                 index--
                 parseItemArray()
             }
             takeIf('{') -> {
                 index--
-                parseItemsEnvelope()
+                parseItemsEnvelope(fields)
             }
             else -> error("Expected Jellyfin item array or envelope")
         }
         skipWhitespace()
         if (index != source.length) error("Trailing JSON content")
+        return JsonItemsMetadata(fields, receivedCount)
     }
 
     fun parseObjectsWithPaths() {
@@ -37,34 +44,43 @@ internal class JsonObjectReader(
     }
 
 
-    private fun parseItemsEnvelope() {
+    private fun parseItemsEnvelope(fields: MutableMap<String, String>): Int {
         expect('{')
         skipWhitespace()
-        if (takeIf('}')) return
+        if (takeIf('}')) error("Expected Jellyfin Items array")
+        var foundItems = false
+        var receivedCount = 0
         while (true) {
             skipWhitespace()
             val key = parseString()
             skipWhitespace()
             expect(':')
             skipWhitespace()
-            if (key == "Items" && index < source.length && source[index] == '[') {
-                parseItemArray()
+            if (key == "Items") {
+                if (foundItems || index >= source.length || source[index] != '[') {
+                    error("Expected Jellyfin Items array")
+                }
+                receivedCount = parseItemArray()
+                foundItems = true
             } else {
-                parseValue(emitObjects = false)
+                parseValue(emitObjects = false)?.let { fields[key] = it }
             }
             skipWhitespace()
             when {
-                takeIf('}') -> return
+                takeIf('}') -> break
                 takeIf(',') -> Unit
                 else -> error("Expected object separator at $index")
             }
         }
+        if (!foundItems) error("Expected Jellyfin Items array")
+        return receivedCount
     }
 
-    private fun parseItemArray() {
+    private fun parseItemArray(): Int {
         expect('[')
         skipWhitespace()
-        if (takeIf(']')) return
+        if (takeIf(']')) return 0
+        var receivedCount = 0
         while (true) {
             skipWhitespace()
             if (index < source.length && source[index] == '{') {
@@ -72,9 +88,10 @@ internal class JsonObjectReader(
             } else {
                 parseValue(emitObjects = false)
             }
+            receivedCount++
             skipWhitespace()
             when {
-                takeIf(']') -> return
+                takeIf(']') -> return receivedCount
                 takeIf(',') -> Unit
                 else -> error("Expected array separator at $index")
             }
@@ -154,14 +171,21 @@ internal class JsonObjectReader(
     ) {
         expect('[')
         skipWhitespace()
-        if (takeIf(']')) return
+        if (takeIf(']')) {
+            if (emitObjects) onArrayAtPath?.invoke(path, 0)
+            return
+        }
         var elementIndex = 0
         while (true) {
             parseValue(emitObjects, path + elementIndex.toString())
+            elementIndex++
             skipWhitespace()
             when {
-                takeIf(']') -> return
-                takeIf(',') -> elementIndex++
+                takeIf(']') -> {
+                    if (emitObjects) onArrayAtPath?.invoke(path, elementIndex)
+                    return
+                }
+                takeIf(',') -> Unit
                 else -> error("Expected array separator at $index")
             }
         }

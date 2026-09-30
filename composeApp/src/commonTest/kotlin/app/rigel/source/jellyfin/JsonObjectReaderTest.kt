@@ -112,4 +112,35 @@ class JsonObjectReaderTest {
     fun incompleteUnicodeEscapeIsRejected() {
         assertFailsWith<IllegalStateException> { itemFields("[{\"a\":\"\\u00\"}]") }
     }
+    @Test
+    fun parsesEnvelopeMetadataAndCountsRawEntries() {
+        val fields = mutableListOf<Map<String, String>>()
+        val metadata = JsonObjectReader(
+            """{"Items":[{"Id":"x"},null,7,{}],"StartIndex":50,"TotalRecordCount":153}""",
+        ) { fields += it }.parseItems()
+
+        assertEquals(listOf(mapOf("Id" to "x"), emptyMap()), fields)
+        assertEquals(mapOf("StartIndex" to "50", "TotalRecordCount" to "153"), metadata.fields)
+        assertEquals(4, metadata.receivedCount)
+    }
+
+    @Test
+    fun itemEnvelopeWithoutAnItemsArrayIsRejected() {
+        assertFailsWith<IllegalStateException> {
+            JsonObjectReader("""{"TotalRecordCount":5}""").parseItems()
+        }
+        assertFailsWith<IllegalStateException> {
+            JsonObjectReader("""{"Items":null}""").parseItems()
+        }
+    }
+    @Test
+    fun reportsRawArrayEntryCountsAlongsideObjectPaths() {
+        val arrays = mutableListOf<Pair<List<String>, Int>>()
+        JsonObjectReader(
+            source = """{"MediaSources":[{},null,{"Id":"last"}]}""",
+            onArrayAtPath = { path, count -> arrays += path to count },
+        ).parseObjectsWithPaths()
+
+        assertEquals(listOf(listOf("MediaSources") to 3), arrays)
+    }
 }

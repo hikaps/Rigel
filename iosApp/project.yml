@@ -172,15 +172,29 @@ targets:
           - "$(SRCROOT)/vendor/ffmpeg/lib"
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Rigel.app/Rigel"
         BUNDLE_LOADER: "$(TEST_HOST)"
+  RigelUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: ../RigelUITests
+        createIntermediateGroups: false
+    dependencies:
+      - target: Rigel
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   Rigel:
     build:
       targets:
         Rigel: all
         RigelTests: [test]
+        RigelUITests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
         - RigelTests
+        - RigelUITests

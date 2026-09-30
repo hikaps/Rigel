@@ -7,6 +7,7 @@ struct SourcesView: View {
     @EnvironmentObject private var player: PlayerModel
     @StateObject private var model = JellyfinViewModel()
     @State private var showPassword = false
+    @State private var showVersionPicker = false
 
     var body: some View {
         NavigationStack {
@@ -19,8 +20,13 @@ struct SourcesView: View {
             }
             .navigationTitle("Sources")
         }
+        .sheet(isPresented: $showVersionPicker, onDismiss: { model.dismissVersionChoice() }) {
+            versionPicker
+        }
+        .onChange(of: model.versionChoice?.id) { itemId in
+            showVersionPicker = itemId != nil
+        }
     }
-
     private var connectForm: some View {
         Form {
             Section {
@@ -78,7 +84,7 @@ struct SourcesView: View {
                 } label: {
                     HStack {
                         Spacer()
-                        if model.busy {
+                        if model.connectBusy {
                             ProgressView()
                         } else {
                             Text("Connect").font(.headline)
@@ -86,7 +92,7 @@ struct SourcesView: View {
                         Spacer()
                     }
                 }
-                .disabled(model.busy || model.server.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(model.connectBusy || model.server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .buttonStyle(.borderedProminent)
                 .tint(Color.rigelStar)
                 .listRowBackground(Color.clear)
@@ -105,7 +111,7 @@ struct SourcesView: View {
                         Text(model.displayServer)
                             .font(.headline)
                             .lineLimit(1)
-                        Text(model.username)
+                        Text(model.displayUsername)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -115,45 +121,19 @@ struct SourcesView: View {
                 }
             }
 
-            Section {
-                HStack {
-                    Text(model.parentName ?? "Library")
-                        .font(.headline)
-                    Spacer()
-                    if model.parentId != nil {
-                        Button {
-                            model.backToRoot()
-                        } label: {
-                            Image(systemName: "arrow.uturn.backward")
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                    Button {
-                        model.loadLibrary(at: model.parentId)
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(model.busy)
-                }
-                if model.busy {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Loading library…")
+            if !model.currentPath.isEmpty {
+                Section {
+                    HStack {
+                        Button("Back") { model.goBack() }
+                            .buttonStyle(.borderless)
+                        Text(model.currentPathNames.joined(separator: "  ›  "))
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        Button(model.isSearchActive ? "Search results" : "Library") { model.backToRoot() }
+                            .buttonStyle(.borderless)
                     }
-                }
-                if let libraryError = model.libraryError {
-                    Text(libraryError)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
-                if !model.loadedOnce && model.items.isEmpty && !model.busy && model.libraryError == nil {
-                    Button("Load library") { model.loadLibrary(at: model.parentId) }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Color.rigelStar)
-                        .listRowBackground(Color.clear)
                 }
             }
 
@@ -161,16 +141,28 @@ struct SourcesView: View {
                 HStack(spacing: 8) {
                     TextField("Movies, shows, or episodes", text: $model.searchText)
                         .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                         .submitLabel(.search)
-                        .onSubmit { model.search() }
+                        .onSubmit { model.searchNow() }
+                    if !model.searchText.isEmpty {
+                        Button("Clear") { model.clearSearch() }
+                            .buttonStyle(.borderless)
+                    }
                     Button {
-                        model.search()
+                        model.searchNow()
                     } label: {
                         Image(systemName: "magnifyingglass")
                     }
                     .buttonStyle(.borderless)
                     .disabled(model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
+                Picker("Type", selection: $model.searchFilter) {
+                    ForEach(JellyfinSearchCategory.allCases) { filter in
+                        Text(filter.rawValue.capitalized).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
                 if model.searchBusy {
                     HStack(spacing: 10) {
                         ProgressView()
@@ -179,42 +171,111 @@ struct SourcesView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-            }
-
-            if model.searchPerformed {
-                Section("Search results") {
-                    if let searchError = model.searchError {
-                        Text(searchError)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    } else if !model.searchBusy && model.searchResults.isEmpty {
-                        Text("No matches")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(model.searchResults, id: \.id) { item in
-                        LibraryRow(item: item) {
-                            model.openFolder(item)
-                        } onPlay: {
-                            play(item)
-                        }
-                    }
+                if model.isShowingSearchResults, let total = model.searchTotalRecordCount {
+                    Text("\(model.searchResults.count) of \(total) results")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
 
-            Section("Library") {
-                ForEach(model.items, id: \.id) { item in
+            Section(model.currentFolderName) {
+                if model.isShowingSearchResults, let error = model.searchError {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                    Button("Retry search") { model.searchNow() }
+                } else if model.isShowingSearchResults && !model.searchBusy && model.searchResults.isEmpty {
+                    Text("No matches")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if !model.isShowingSearchResults {
+                    if model.isSearchActive, let error = model.browseError {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                        Button("Retry folder") { model.refreshCurrentLocation() }
+                    } else if !model.isSearchActive, let error = model.libraryError {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                        Button("Retry library") { model.refreshCurrentLocation() }
+                    } else if model.browseBusy || (!model.isSearchActive && model.busy && !model.playbackBusy) {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Loading library…")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if !model.browseLoadedOnce && !model.isSearchActive {
+                        Button("Load library") { model.loadLibraryIfNeeded() }
+                    } else if model.currentItems.isEmpty && !model.browseBusy {
+                        Text("This folder is empty")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                ForEach(model.currentItems, id: \.id) { item in
                     LibraryRow(item: item) {
                         model.openFolder(item)
                     } onPlay: {
                         play(item)
                     }
                 }
-            }
 
+                if model.playbackBusy {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Preparing playback…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let error = model.playbackError {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                    if model.canRetryPlayback {
+                        Button("Reload versions") { model.retryPlayback() }
+                    }
+                }
 
-            if let notice = model.notice {
-                Section {
+                if model.isShowingSearchResults {
+                    if let error = model.searchMoreError {
+                        Text(error).font(.footnote).foregroundStyle(.red)
+                    }
+                    if model.canLoadMoreSearch || model.searchMoreError != nil {
+                        Button(model.searchMoreError == nil ? "Load more results" : "Retry loading results") {
+                            model.loadMoreSearch()
+                        }
+                        .disabled(model.searchMoreBusy)
+                    }
+                    if model.searchStalledWithRemainingItems {
+                        Text("Jellyfin returned no additional items. Refresh to try again.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    if let error = model.browseMoreError {
+                        Text(error).font(.footnote).foregroundStyle(.red)
+                    }
+                    if model.canLoadMoreLibrary || model.browseMoreError != nil {
+                        Button(model.browseMoreError == nil ? "Load more" : "Retry loading more") {
+                            model.loadMoreLibrary()
+                        }
+                        .disabled(model.browseMoreBusy)
+                    }
+                    if model.browseStalledWithRemainingItems {
+                        Text("Jellyfin returned no additional items. Refresh to try again.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if model.searchMoreBusy || model.browseMoreBusy {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                }
+                if let notice = model.notice {
                     Text(notice)
                         .font(.footnote)
                         .foregroundStyle(model.noticeIsError ? .red : Color.rigelStar)
@@ -222,42 +283,145 @@ struct SourcesView: View {
             }
 
             Section {
-                Text("Choose a Jellyfin client in Playback Destination before playing a library item. Arbitrary URLs cannot be pushed to Jellyfin clients.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Refresh") { model.refreshCurrentLocation() }
+                        .disabled(model.browseBusy || model.searchBusy || model.connectBusy)
+                    Spacer()
+                    Text("Playback Destination controls where playable items open.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
+        .onAppear { model.loadLibraryIfNeeded() }
     }
 
     private func play(_ item: JellyfinItem) {
-        model.play(item) { url, title, tracks, base, token, userId, itemId in
-            _ = player.openJellyfin(
+        model.play(item) { selection in
+            let url = JellyfinApi.shared.streamUrl(
+                base: selection.base,
+                itemId: selection.item.id,
+                token: selection.token,
+                mediaSourceId: selection.source.id
+            )
+            return player.openJellyfin(
                 url: url,
-                title: title,
-                subtitleTracks: tracks,
-                baseUrl: base,
-                token: token,
-                userId: userId,
-                itemId: itemId
+                title: selection.item.name,
+                subtitleTracks: selection.source.subtitleTracks,
+                baseUrl: selection.base,
+                token: selection.token,
+                userId: selection.userId,
+                itemId: selection.item.id,
+                mediaSourceId: selection.source.id
             )
         }
     }
+
+    private var versionPicker: some View {
+        NavigationStack {
+            List {
+                if let choice = model.versionChoice {
+                    ForEach(choice.sources.indices, id: \.self) { index in
+                        let source = choice.sources[index]
+                        Button {
+                            model.chooseVersion(sourceId: source.id)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(versionTitle(source, index: index))
+                                    .font(.headline)
+                                if let details = versionDetails(source, disambiguate: isDuplicate(source, choice: choice)) {
+                                    Text(details)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Choose version")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { showVersionPicker = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func versionTitle(_ source: JellyfinMediaSource, index: Int) -> String {
+        nonEmpty(source.name) ?? "Version \(index + 1)"
+    }
+
+    private func nonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func isDuplicate(_ source: JellyfinMediaSource, choice: JellyfinVersionChoice) -> Bool {
+        let title = nonEmpty(source.name)
+        let details = versionDetails(source, disambiguate: false)
+        return choice.sources.filter {
+            nonEmpty($0.name) == title && versionDetails($0, disambiguate: false) == details
+        }.count > 1
+    }
+
+    private func versionDetails(_ source: JellyfinMediaSource, disambiguate: Bool) -> String? {
+        var details: [String] = []
+        if let width = source.width?.intValue, let height = source.height?.intValue {
+            details.append("\(width)×\(height)")
+        }
+        if let container = nonEmpty(source.container) { details.append(container.uppercased()) }
+        let codecs = [nonEmpty(source.videoCodec), nonEmpty(source.audioCodec)].compactMap { $0?.uppercased() }
+        if !codecs.isEmpty { details.append(codecs.joined(separator: " / ")) }
+        if let channels = source.audioChannels?.intValue, channels > 0 { details.append("\(channels) ch") }
+        if let size = source.sizeBytes?.int64Value, size > 0 {
+            details.append(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+        }
+        if disambiguate { details.append("ID \(source.id)") }
+        return details.isEmpty ? nil : details.joined(separator: " · ")
+    }
+
 }
 
 private struct LibraryRow: View {
-    @EnvironmentObject private var player: PlayerModel
     let item: JellyfinItem
     let onOpenFolder: () -> Void
     let onPlay: () -> Void
+
+    private var metadata: String? {
+        var details: [String] = []
+        let knownType = ["Movie", "Series", "Season", "Episode", "Video"].first {
+            $0.caseInsensitiveCompare(item.type) == .orderedSame
+        }
+        if let knownType { details.append(knownType) }
+        if item.type.caseInsensitiveCompare("Episode") == .orderedSame {
+            if let series = item.seriesName, !series.isEmpty { details.append(series) }
+            if let season = item.parentIndexNumber?.intValue, let episode = item.indexNumber?.intValue {
+                details.append(String(format: "S%02dE%02d", season, episode))
+            }
+        }
+        if let year = item.productionYear?.intValue, year > 0 { details.append(String(year)) }
+        return details.isEmpty ? nil : details.joined(separator: " · ")
+    }
 
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: item.isFolder ? "folder" : "film")
                 .foregroundStyle(item.isFolder ? Color.rigelSteel : Color.rigelStar)
                 .frame(width: 22)
-            Text(item.name)
-                .font(.body)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.name)
+                    .font(.body)
+                    .lineLimit(2)
+                if let metadata {
+                    Text(metadata)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
             Spacer()
             if item.isFolder {
                 Button(action: onOpenFolder) {

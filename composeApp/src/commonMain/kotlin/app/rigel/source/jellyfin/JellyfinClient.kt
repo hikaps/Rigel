@@ -18,6 +18,39 @@ data class JellyfinItem(
     val id: String,
     val name: String,
     val isFolder: Boolean,
+    val type: String,
+    val productionYear: Int? = null,
+    val seriesName: String? = null,
+    val parentIndexNumber: Int? = null,
+    val indexNumber: Int? = null,
+)
+
+enum class JellyfinSearchFilter(val includeItemTypes: String) {
+    ALL("Movie,Series,Episode,Video"),
+    MOVIES("Movie"),
+    SERIES("Series"),
+    EPISODES("Episode"),
+}
+
+enum class JellyfinBrowseOrder { NAME, EPISODE }
+
+data class JellyfinItemPage(
+    val items: List<JellyfinItem>,
+    val totalRecordCount: Int?,
+    val startIndex: Int,
+    val receivedCount: Int,
+)
+data class JellyfinMediaSource(
+    val id: String,
+    val name: String?,
+    val container: String?,
+    val width: Int?,
+    val height: Int?,
+    val videoCodec: String?,
+    val audioCodec: String?,
+    val audioChannels: Int?,
+    val sizeBytes: Long?,
+    val subtitleTracks: List<SubtitleTrack>,
 )
 
 data class JellyfinSession(
@@ -63,30 +96,66 @@ object JellyfinApi {
     fun embyAuthHeader(deviceId: String, client: String = "Rigel", device: String = "Rigel iOS", version: String = "1.0"): String =
         "MediaBrowser Client=\"$client\", Device=\"$device\", DeviceId=\"$deviceId\", Version=\"$version\""
 
-    fun browseUrl(base: String, userId: String, parentId: String?): String {
-        val sb = StringBuilder(base.trimEnd('/'))
-            .append("/Users/").append(encodeUrlComponent(userId))
-            .append("/Items?Recursive=false&Fields=Path")
-        if (!parentId.isNullOrBlank()) sb.append("&ParentId=").append(encodeUrlComponent(parentId))
-        return sb.toString()
+    fun browseUrl(
+        base: String,
+        userId: String,
+        parentId: String?,
+        startIndex: Int,
+        limit: Int,
+        order: JellyfinBrowseOrder,
+    ): String {
+        require(startIndex >= 0) { "startIndex must not be negative" }
+        require(limit > 0) { "limit must be positive" }
+        return buildString {
+            append(base.trimEnd('/')).append("/Items?UserId=").append(encodeUrlComponent(userId))
+            append("&Recursive=false")
+            if (!parentId.isNullOrBlank()) append("&ParentId=").append(encodeUrlComponent(parentId))
+            append("&StartIndex=").append(startIndex)
+            append("&Limit=").append(limit)
+            append("&EnableTotalRecordCount=true&EnableImages=false")
+            when (order) {
+                JellyfinBrowseOrder.NAME -> append("&SortBy=SortName&SortOrder=Ascending")
+                JellyfinBrowseOrder.EPISODE -> append("&SortBy=ParentIndexNumber%2CIndexNumber%2CSortName&SortOrder=Ascending")
+            }
+        }
     }
 
-    fun searchUrl(base: String, userId: String, term: String): String =
+    fun searchUrl(
+        base: String,
+        userId: String,
+        term: String,
+        filter: JellyfinSearchFilter,
+        startIndex: Int,
+        limit: Int,
+    ): String {
+        require(startIndex >= 0) { "startIndex must not be negative" }
+        require(limit > 0) { "limit must be positive" }
+        return buildString {
+            append(base.trimEnd('/')).append("/Items?UserId=").append(encodeUrlComponent(userId))
+            append("&Recursive=true&SearchTerm=").append(encodeUrlComponent(term))
+            append("&IncludeItemTypes=").append(filter.includeItemTypes)
+            append("&StartIndex=").append(startIndex)
+            append("&Limit=").append(limit)
+            append("&EnableTotalRecordCount=true&EnableImages=false")
+        }
+    }
+
+    /** Direct selected-version URL — feeds the normal probe→route pipeline. */
+    fun streamUrl(base: String, itemId: String, token: String, mediaSourceId: String): String =
         base.trimEnd('/') +
-            "/Users/${encodeUrlComponent(userId)}/Items" +
-            "?Recursive=true" +
-            "&SearchTerm=${encodeUrlComponent(term)}" +
-            "&IncludeItemTypes=Movie,Series,Episode,Video" +
-            "&Fields=Path"
+            "/Videos/" + encodeUrlComponent(itemId) + "/stream" +
+            "?Static=true&MediaSourceId=" + encodeUrlComponent(mediaSourceId) +
+            "&api_key=" + encodeUrlComponent(token)
 
-    /** Direct file stream URL — feeds the normal probe→route pipeline. */
-    fun streamUrl(base: String, itemId: String, token: String): String =
-        base.trimEnd('/') + "/Videos/$itemId/stream?Static=true&api_key=$token"
-
+    internal fun isTokenizedJellyfinStream(url: String): Boolean {
+        val path = url.substringBefore('?')
+        if (!path.contains("/Videos/", ignoreCase = true) || !path.endsWith("/stream", ignoreCase = true)) return false
+        val parsed = runCatching { Url(url) }.getOrNull() ?: return false
+        return parsed.parameters.names().any { it.equals("api_key", ignoreCase = true) }
+    }
     fun itemDetailsUrl(base: String, userId: String, itemId: String): String =
-        base.trimEnd('/') +
-            "/Users/${encodeUrlComponent(userId)}/Items/${encodeUrlComponent(itemId)}" +
-            "?Fields=MediaStreams,MediaSources"
+        base.trimEnd('/') + "/Items/" + encodeUrlComponent(itemId) +
+            "?UserId=" + encodeUrlComponent(userId) + "&Fields=MediaStreams,MediaSources"
 
     fun subtitleStreamUrl(
         base: String,
@@ -105,11 +174,14 @@ object JellyfinApi {
         itemIds: List<String>,
         command: String = "PlayNow",
         startPositionTicks: Long = 0,
-    ): String =
-        base.trimEnd('/') + "/Sessions/${encodeUrlComponent(sessionId)}/Playing" +
-            "?playCommand=${encodeUrlComponent(command)}" +
-            "&itemIds=${itemIds.joinToString(",") { encodeUrlComponent(it) }}" +
-            "&startPositionTicks=$startPositionTicks"
+        mediaSourceId: String? = null,
+    ): String = buildString {
+        append(base.trimEnd('/')).append("/Sessions/").append(encodeUrlComponent(sessionId)).append("/Playing")
+        append("?playCommand=").append(encodeUrlComponent(command))
+        append("&itemIds=").append(itemIds.joinToString(",") { encodeUrlComponent(it) })
+        append("&startPositionTicks=").append(startPositionTicks)
+        mediaSourceId?.let { append("&mediaSourceId=").append(encodeUrlComponent(it)) }
+    }
 
     fun sessionsUrl(base: String, userId: String): String =
         base.trimEnd('/') + "/Sessions?controllableByUserId=${encodeUrlComponent(userId)}"
@@ -162,103 +234,166 @@ object JellyfinApi {
 
 /** Jellyfin client operations (ktor). */
 class JellyfinClient(private val http: HttpClient) {
+    @Throws(Exception::class)
     suspend fun authenticate(base: String, username: String, password: String, deviceId: String): JellyfinAuth? {
         val body = JellyfinApi.authBody(username, password)
-        val resp = try {
+        val response = try {
             http.post(base.trimEnd('/') + "/Users/AuthenticateByName") {
                 contentType(ContentType.Application.Json)
                 header("X-Emby-Authorization", JellyfinApi.embyAuthHeader(deviceId))
                 setBody(body)
-            }.bodyAsText()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Throwable) {
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             return null
         }
-        val token = Regex(""""AccessToken":"([^"]+)"""").find(resp)?.groupValues?.get(1)
-        val userId = Regex(""""User":\{[^}]*?"Id":"([^"]+)"""").find(resp)?.groupValues?.get(1)
-            ?: Regex(""""Id":"([^"]+)"""").find(resp)?.groupValues?.get(1)
-        if (token == null || userId == null) {
+        if (!response.status.isSuccess()) return null
+
+        val responseBody = try {
+            response.bodyAsText()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             return null
         }
-        return JellyfinAuth(token, userId)
+        var token: String? = null
+        var userId: String? = null
+        try {
+            JsonObjectReader(
+                source = responseBody,
+                onObjectAtPath = { path, fields ->
+                    when (path) {
+                        emptyList<String>() -> token = fields["AccessToken"]?.takeIf { it.isNotBlank() }
+                        listOf("User") -> userId = fields["Id"]?.takeIf { it.isNotBlank() }
+                    }
+                },
+            ).parseObjectsWithPaths()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return null
+        }
+        val accessToken = token ?: return null
+        val authenticatedUserId = userId ?: return null
+        return JellyfinAuth(accessToken, authenticatedUserId)
     }
     @Throws(Exception::class)
-    suspend fun browse(base: String, token: String, userId: String, parentId: String?): List<JellyfinItem> =
-        fetchItems(JellyfinApi.browseUrl(base, userId, parentId), token)
+    suspend fun browse(
+        base: String,
+        token: String,
+        userId: String,
+        parentId: String?,
+        startIndex: Int = 0,
+        limit: Int = 50,
+        order: JellyfinBrowseOrder = JellyfinBrowseOrder.NAME,
+    ): JellyfinItemPage = fetchItems(
+        JellyfinApi.browseUrl(base, userId, parentId, startIndex, limit, order), token, startIndex,
+    )
 
     /** Search Jellyfin itself rather than filtering the currently loaded folder. */
     @Throws(Exception::class)
-    suspend fun search(base: String, token: String, userId: String, term: String): List<JellyfinItem> {
-        if (term.isBlank()) return emptyList()
-        return fetchItems(JellyfinApi.searchUrl(base, userId, term.trim()), token)
+    suspend fun search(
+        base: String,
+        token: String,
+        userId: String,
+        term: String,
+        filter: JellyfinSearchFilter = JellyfinSearchFilter.ALL,
+        startIndex: Int = 0,
+        limit: Int = 50,
+    ): JellyfinItemPage {
+        require(startIndex >= 0) { "startIndex must not be negative" }
+        require(limit > 0) { "limit must be positive" }
+        if (term.isBlank()) return JellyfinItemPage(emptyList(), null, startIndex, 0)
+        return fetchItems(JellyfinApi.searchUrl(base, userId, term.trim(), filter, startIndex, limit), token, startIndex)
     }
 
     @Throws(Exception::class)
-    suspend fun itemSubtitleTracks(
+    suspend fun itemMediaSources(
         base: String,
         token: String,
         userId: String,
         itemId: String,
-    ): List<SubtitleTrack> {
+    ): List<JellyfinMediaSource> {
         val response = http.get(JellyfinApi.itemDetailsUrl(base, userId, itemId)) {
             header("X-Emby-Token", token)
         }
         if (!response.status.isSuccess()) {
-            throw JellyfinRequestException("Jellyfin request failed (${response.status.value})")
+            throw JellyfinRequestException(response.status.value)
         }
-        val sourceIds = mutableMapOf<Int, String>()
-        val nestedCandidates = mutableMapOf<Int, MutableList<JellyfinSubtitleCandidate>>()
-        val topLevelCandidates = mutableListOf<JellyfinSubtitleCandidate>()
-        fun candidate(fields: Map<String, String>): JellyfinSubtitleCandidate? {
+
+        val sourcesByIndex = mutableMapOf<Int, Map<String, String>>()
+        val streamsBySourceIndex = mutableMapOf<Int, MutableList<Map<String, String>>>()
+        val subtitlesBySourceIndex = mutableMapOf<Int, MutableList<JellyfinSubtitleCandidate>>()
+        val topLevelSubtitles = mutableListOf<JellyfinSubtitleCandidate>()
+        var mediaSourceCount = 0
+
+        fun subtitleCandidate(fields: Map<String, String>): JellyfinSubtitleCandidate? {
             if (!fields["Type"].equals("Subtitle", ignoreCase = true)) return null
             if (!fields["IsExternal"].equals("true", ignoreCase = true)) return null
-            val index = fields["Index"]?.toIntOrNull() ?: return null
+            val index = fields["Index"]?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
             return JellyfinSubtitleCandidate(
                 index = index,
                 language = fields["Language"]?.takeIf { it.isNotBlank() },
                 title = fields["DisplayTitle"]?.takeIf { it.isNotBlank() },
             )
         }
+
         JsonObjectReader(
             source = response.bodyAsText(),
             onObjectAtPath = { path, fields ->
                 when {
                     path.size == 2 && path[0] == "MediaSources" -> {
-                        val index = path[1].toIntOrNull()
-                        val id = fields["Id"]
-                        if (index != null && id != null && id.isNotBlank()) {
-                            sourceIds[index] = id
-                        }
+                        path[1].toIntOrNull()?.let { sourcesByIndex[it] = fields }
                     }
-                    path.size >= 4 &&
-                        path[0] == "MediaSources" &&
-                        path[2] == "MediaStreams" -> {
+                    path.size >= 4 && path[0] == "MediaSources" && path[2] == "MediaStreams" -> {
                         val sourceIndex = path[1].toIntOrNull() ?: return@JsonObjectReader
-                        candidate(fields)?.let {
-                            nestedCandidates.getOrPut(sourceIndex) { mutableListOf() } += it
+                        streamsBySourceIndex.getOrPut(sourceIndex) { mutableListOf() } += fields
+                        subtitleCandidate(fields)?.let {
+                            subtitlesBySourceIndex.getOrPut(sourceIndex) { mutableListOf() } += it
                         }
                     }
                     path.size == 2 && path[0] == "MediaStreams" -> {
-                        candidate(fields)?.let { topLevelCandidates += it }
+                        subtitleCandidate(fields)?.let { topLevelSubtitles += it }
                     }
                 }
             },
+            onArrayAtPath = { path, count ->
+                if (path == listOf("MediaSources")) mediaSourceCount = count
+            },
         ).parseObjectsWithPaths()
-        val firstSource = sourceIds.entries.firstOrNull() ?: return emptyList()
-        val candidates = (nestedCandidates[firstSource.key].orEmpty().ifEmpty { topLevelCandidates })
-            .distinctBy { it.index }
-        return candidates.map { candidate ->
-            SubtitleTrack(
-                url = JellyfinApi.subtitleStreamUrl(
-                    base = base,
-                    itemId = itemId,
-                    mediaSourceId = firstSource.value,
-                    index = candidate.index,
-                    token = token,
-                ),
-                language = candidate.language,
-                title = candidate.title ?: candidate.language ?: "Subtitle ${candidate.index}",
+
+        val seenIds = mutableSetOf<String>()
+        return sourcesByIndex.keys.sorted().mapNotNull { sourceIndex ->
+            val fields = sourcesByIndex.getValue(sourceIndex)
+            val id = fields["Id"]?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            if (!seenIds.add(id)) return@mapNotNull null
+            val streams = streamsBySourceIndex[sourceIndex].orEmpty()
+            val video = streams.firstOrNull { it["Type"].equals("Video", ignoreCase = true) }
+            val audio = streams.firstOrNull { it["Type"].equals("Audio", ignoreCase = true) }
+            val nestedSubtitles = subtitlesBySourceIndex[sourceIndex].orEmpty().distinctBy { it.index }
+            val subtitleCandidates = if (nestedSubtitles.isEmpty() && mediaSourceCount == 1) {
+                topLevelSubtitles.distinctBy { it.index }
+            } else {
+                nestedSubtitles
+            }
+            JellyfinMediaSource(
+                id = id,
+                name = fields["Name"]?.takeIf { it.isNotBlank() },
+                container = fields["Container"]?.takeIf { it.isNotBlank() },
+                width = video?.get("Width")?.toIntOrNull()?.takeIf { it > 0 },
+                height = video?.get("Height")?.toIntOrNull()?.takeIf { it > 0 },
+                videoCodec = video?.get("Codec")?.takeIf { it.isNotBlank() },
+                audioCodec = audio?.get("Codec")?.takeIf { it.isNotBlank() },
+                audioChannels = audio?.get("Channels")?.toIntOrNull()?.takeIf { it > 0 },
+                sizeBytes = fields["Size"]?.toLongOrNull()?.takeIf { it > 0 },
+                subtitleTracks = subtitleCandidates.map { candidate ->
+                    SubtitleTrack(
+                        url = JellyfinApi.subtitleStreamUrl(base, itemId, id, candidate.index, token),
+                        language = candidate.language,
+                        title = candidate.title ?: candidate.language ?: ("Subtitle " + candidate.index),
+                    )
+                },
             )
         }
     }
@@ -292,24 +427,35 @@ class JellyfinClient(private val http: HttpClient) {
         ).parseObjectsWithPaths()
         return out
     }
-    /** Cast a library item to a logged-in Jellyfin client session. */
+    /** Cast a library item and its selected version to a logged-in Jellyfin client. */
+    @Throws(Exception::class)
     suspend fun playToSession(
         base: String,
         token: String,
         sessionId: String,
         itemIds: List<String>,
         startPositionTicks: Long = 0,
+        mediaSourceId: String? = null,
     ): Boolean {
-        val resp = try {
-            http.post(JellyfinApi.playUrl(base, sessionId, itemIds, startPositionTicks = startPositionTicks)) {
+        val status = try {
+            http.post(
+                JellyfinApi.playUrl(
+                    base,
+                    sessionId,
+                    itemIds,
+                    startPositionTicks = startPositionTicks,
+                    mediaSourceId = mediaSourceId,
+                ),
+            ) {
                 header("X-Emby-Token", token)
             }.status.value
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Throwable) {
-            null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return false
         }
-        return resp != null && resp in 200..299
+        if (status !in 200..299) throw JellyfinRequestException(status)
+        return true
     }
 
     /** Remote stop command for a client session (Playing/Stopped is the client-side report endpoint; it does not stop playback). */
@@ -326,34 +472,39 @@ class JellyfinClient(private val http: HttpClient) {
         return resp != null && resp in 200..299
     }
 
-    private suspend fun fetchItems(url: String, token: String): List<JellyfinItem> {
+    private suspend fun fetchItems(url: String, token: String, startIndex: Int): JellyfinItemPage {
         try {
             val response = http.get(url) { header("X-Emby-Token", token) }
             if (!response.status.isSuccess()) {
-                throw JellyfinRequestException("Jellyfin request failed (${response.status.value})")
+                throw JellyfinRequestException(response.status.value)
             }
-            return parseItems(response.bodyAsText())
+            val items = mutableListOf<JellyfinItem>()
+            val metadata = JsonObjectReader(response.bodyAsText()) { fields ->
+                val id = fields["Id"]?.takeIf { it.isNotBlank() } ?: return@JsonObjectReader
+                val name = fields["Name"]?.takeIf { it.isNotBlank() } ?: return@JsonObjectReader
+                val type = fields["Type"]?.takeIf { it.isNotBlank() } ?: return@JsonObjectReader
+                val isFolder = fields["IsFolder"]?.equals("true", ignoreCase = true)
+                    ?: (type in folderItemTypes)
+                items += JellyfinItem(
+                    id = id,
+                    name = name,
+                    isFolder = isFolder,
+                    type = type,
+                    productionYear = fields["ProductionYear"]?.toIntOrNull(),
+                    seriesName = fields["SeriesName"]?.takeIf { it.isNotBlank() },
+                    parentIndexNumber = fields["ParentIndexNumber"]?.toIntOrNull(),
+                    indexNumber = fields["IndexNumber"]?.toIntOrNull(),
+                )
+            }.parseItems()
+            return JellyfinItemPage(
+                items = items,
+                totalRecordCount = metadata.fields["TotalRecordCount"]?.toIntOrNull()?.takeIf { it >= 0 },
+                startIndex = startIndex,
+                receivedCount = metadata.receivedCount,
+            )
         } catch (cancelled: CancellationException) {
             throw cancelled
         }
-    }
-
-    /**
-     * Jellyfin returns both bare arrays and an object containing an Items array.
-     * Parse JSON structure instead of relying on property order or flat objects;
-     * real responses contain nested UserData and MediaSources objects.
-     */
-    private fun parseItems(response: String): List<JellyfinItem> {
-        val out = mutableListOf<JellyfinItem>()
-        JsonObjectReader(response) { fields ->
-            val id = fields["Id"] ?: return@JsonObjectReader
-            val name = fields["Name"] ?: return@JsonObjectReader
-            val type = fields["Type"] ?: return@JsonObjectReader
-            val isFolder = fields["IsFolder"]?.equals("true", ignoreCase = true)
-                ?: (type in folderItemTypes)
-            out += JellyfinItem(id, name, isFolder)
-        }.parseItems()
-        return out
     }
 
     private companion object {
@@ -378,16 +529,19 @@ class JellyfinClient(private val http: HttpClient) {
     }
 }
 
-class JellyfinRequestException(message: String) : Exception(message)
+class JellyfinRequestException(val statusCode: Int) :
+    Exception("Jellyfin request failed ($statusCode)")
 
-/**
- * Swift-facing classifier for Kotlin throwables that Kotlin/Native carries
- * inside NSError.userInfo["KotlinException"]. The exported KotlinThrowable
- * does not conform to Swift Error, so Swift must ask Kotlin directly.
- */
+/** Swift-facing classifiers for Kotlin exceptions carried by Kotlin/Native. */
 object JellyfinInterop {
     fun isCancellation(throwable: Throwable): Boolean =
         throwable is CancellationException
+
+    fun httpStatusCode(throwable: Throwable): Int? =
+        (throwable as? JellyfinRequestException)?.statusCode
+
+    /** Test seam mirroring the exception Kotlin throws for HTTP failures. */
+    fun makeRequestException(statusCode: Int): Throwable = JellyfinRequestException(statusCode)
 
     /** Swift test support: a cancellation throwable with the exported type. */
     fun makeCancellationThrowable(): Throwable = CancellationException("cancelled")

@@ -382,4 +382,17 @@ class SettingsStoreTest {
         is CastTarget.Chrome -> "chrome|${t.device.id}|${t.device.host}:${t.device.port}|${t.device.name}"
         is CastTarget.JellyfinSessionTarget -> "jellyfin|${t.session.id}|x|${t.session.deviceName}"
     }
+    @Test
+    fun linkHistoryPurgesPreviouslyStoredJellyfinAccessKeys() {
+        val values = mutableMapOf<String, Any>(
+            "link_history" to "Movie|https://jf/proxy/Videos/i1/stream?Static=true&MediaSourceId=v2&api_key=secret\nWeb|https://media.example/video.mp4",
+        )
+        val settings = SettingsStore(MapSettings(values))
+
+        assertEquals(listOf(LinkHistoryEntry("https://media.example/video.mp4", "Web")), settings.linkHistory())
+        assertFalse((values["link_history"] as? String).orEmpty().contains("secret"))
+        settings.addToLinkHistory("https://jf/Videos/i2/stream?api_key=new-secret", "Another movie")
+        assertEquals(listOf(LinkHistoryEntry("https://media.example/video.mp4", "Web")), settings.linkHistory())
+        assertFalse((values["link_history"] as? String).orEmpty().contains("new-secret"))
+    }
 }

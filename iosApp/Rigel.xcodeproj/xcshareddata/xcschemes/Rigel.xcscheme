@@ -35,6 +35,20 @@
                ReferencedContainer = "container:Rigel.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "2B7CF91ABC8BAD11B799D136"
+               BuildableName = "RigelUITests.xctest"
+               BlueprintName = "RigelUITests"
+               ReferencedContainer = "container:Rigel.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -61,6 +75,17 @@
                BlueprintIdentifier = "EB416464170670DE0F37A6C0"
                BuildableName = "RigelTests.xctest"
                BlueprintName = "RigelTests"
+               ReferencedContainer = "container:Rigel.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "2B7CF91ABC8BAD11B799D136"
+               BuildableName = "RigelUITests.xctest"
+               BlueprintName = "RigelUITests"
                ReferencedContainer = "container:Rigel.xcodeproj">
             </BuildableReference>
          </TestableReference>

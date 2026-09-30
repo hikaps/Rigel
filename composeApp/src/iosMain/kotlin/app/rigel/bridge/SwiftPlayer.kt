@@ -39,7 +39,8 @@ object SwiftPlayer {
         token: String,
         userId: String,
         itemId: String,
-    ): Boolean = RigelCore.controller.loadJellyfinItem(url, title, subtitleTracks, baseUrl, token, userId, itemId)
+        mediaSourceId: String,
+    ): Boolean = RigelCore.controller.loadJellyfinItem(url, title, subtitleTracks, baseUrl, token, userId, itemId, mediaSourceId)
 
     fun stop() = RigelCore.controller.stopPlayback()
 

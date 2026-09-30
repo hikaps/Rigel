@@ -3,6 +3,7 @@ package app.rigel.settings
 import app.rigel.cast.CastTarget
 import app.rigel.cast.ReceiverRegistry
 import app.rigel.intake.UrlIntake
+import app.rigel.source.jellyfin.JellyfinApi
 import com.russhwolf.settings.Settings
 
 enum class RouteOverride { AUTO, DIRECT, ALWAYS_PROXY }
@@ -120,6 +121,7 @@ class SettingsStore(
     }
 
     fun addToLinkHistory(url: String, title: String?) {
+        if (JellyfinApi.isTokenizedJellyfinStream(url)) return
         val sanitizedUrl = sanitizeHistoryUrl(url)
         if (sanitizedUrl.isEmpty()) return
         val sanitizedTitle = title
@@ -161,6 +163,7 @@ class SettingsStore(
             .split('\n')
             .filter { it.isNotBlank() }
             .map(::parseHistoryRow)
+            .filterNot { JellyfinApi.isTokenizedJellyfinStream(it.url) }
             .map { it.copy(url = sanitizeHistoryUrl(it.url)) }
             .filter { it.url.isNotEmpty() }
 
@@ -235,4 +238,5 @@ class SettingsStore(
             "xmediabrowsertoken",
         )
     }
+
 }
