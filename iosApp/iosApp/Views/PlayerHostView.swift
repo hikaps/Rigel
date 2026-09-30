@@ -364,6 +364,20 @@ struct PlayerView: UIViewControllerRepresentable {
             return generation
         }
 
+        func deliverNativeBufferingEvent(_ event: NativeBufferingEvent, to onChange: @escaping (NativeBufferingEvent) -> Void) {
+            let generation: UUID
+            switch event {
+            case .generationStarted(let value), .changed(let value, _):
+                generation = value
+            }
+            // A single FIFO queue keeps generation-start ahead of changes and
+            // moves host @State writes outside representable creation/update.
+            DispatchQueue.main.async { [weak self] in
+                guard self?.nativeBufferingGeneration == generation else { return }
+                onChange(event)
+            }
+        }
+
         func invalidateNativeBufferingGeneration() {
             nativeBufferingGeneration = nil
         }
@@ -436,14 +450,15 @@ struct PlayerView: UIViewControllerRepresentable {
         let created = bridge.createPlayerViewController(events: events)
         if let player = created as? RigelPlayerViewController {
             let generation = context.coordinator.beginNativeBufferingGeneration()
-            onNativeBufferingChange(.generationStarted(generation))
+            context.coordinator.deliverNativeBufferingEvent(.generationStarted(generation), to: onNativeBufferingChange)
             player.onExternalSubtitleSelected = onExternalSubtitleSelected
             player.onDevicesRequested = onDevices
             player.onSeekRequested = onSeek
             player.onNativeBufferingChange = { [weak coordinator = context.coordinator] buffering in
-                guard let coordinator,
-                      coordinator.nativeBufferingGeneration == generation else { return }
-                onNativeBufferingChange(.changed(generation: generation, buffering: buffering))
+                coordinator?.deliverNativeBufferingEvent(
+                    .changed(generation: generation, buffering: buffering),
+                    to: onNativeBufferingChange
+                )
             }
             player.isCastPlayback = isCastActive
             player.setPhaseBuffering(isPhaseBuffering)
@@ -476,17 +491,18 @@ struct PlayerView: UIViewControllerRepresentable {
             let generation: UUID
             if needsLoad {
                 generation = context.coordinator.beginNativeBufferingGeneration()
-                onNativeBufferingChange(.generationStarted(generation))
+                context.coordinator.deliverNativeBufferingEvent(.generationStarted(generation), to: onNativeBufferingChange)
             } else if let current = context.coordinator.nativeBufferingGeneration {
                 generation = current
             } else {
                 generation = context.coordinator.beginNativeBufferingGeneration()
-                onNativeBufferingChange(.generationStarted(generation))
+                context.coordinator.deliverNativeBufferingEvent(.generationStarted(generation), to: onNativeBufferingChange)
             }
             player.onNativeBufferingChange = { [weak coordinator = context.coordinator] buffering in
-                guard let coordinator,
-                      coordinator.nativeBufferingGeneration == generation else { return }
-                onNativeBufferingChange(.changed(generation: generation, buffering: buffering))
+                coordinator?.deliverNativeBufferingEvent(
+                    .changed(generation: generation, buffering: buffering),
+                    to: onNativeBufferingChange
+                )
             }
         }
 

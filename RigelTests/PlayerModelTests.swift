@@ -63,6 +63,54 @@ final class PlayerModelTests: XCTestCase {
         XCTAssertFalse(AirPlayRouteMonitor.routeChanged(currentIdentity: "airplay:route-1", routeId: "route-1"))
         XCTAssertTrue(AirPlayRouteMonitor.routeChanged(currentIdentity: "airplay:route-1", routeId: "route-2"))
     }
+
+    @MainActor
+    func testNativeBufferingNotificationsDeferAndPreserveOrder() async {
+        let coordinator = PlayerView.Coordinator()
+        let generation = coordinator.beginNativeBufferingGeneration()
+        var events: [NativeBufferingEvent] = []
+        var state = NativeBufferingState()
+        let onChange: (NativeBufferingEvent) -> Void = {
+            events.append($0)
+            state.apply($0)
+        }
+        coordinator.deliverNativeBufferingEvent(.generationStarted(generation), to: onChange)
+        coordinator.deliverNativeBufferingEvent(.changed(generation: generation, buffering: true), to: onChange)
+        XCTAssertNil(state.generation, "host state must not change inside the representable update")
+
+        let drained = expectation(description: "buffering delivery queue drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+
+        XCTAssertEqual(events, [.generationStarted(generation), .changed(generation: generation, buffering: true)])
+        XCTAssertEqual(state.generation, generation)
+        XCTAssertTrue(state.isBuffering)
+    }
+
+    @MainActor
+    func testQueuedNativeBufferingNotificationsRejectReplacementAndTeardown() async {
+        let coordinator = PlayerView.Coordinator()
+        let old = coordinator.beginNativeBufferingGeneration()
+        var events: [NativeBufferingEvent] = []
+        let onChange: (NativeBufferingEvent) -> Void = { events.append($0) }
+        coordinator.deliverNativeBufferingEvent(.generationStarted(old), to: onChange)
+        coordinator.deliverNativeBufferingEvent(.changed(generation: old, buffering: true), to: onChange)
+        let current = coordinator.beginNativeBufferingGeneration()
+        coordinator.deliverNativeBufferingEvent(.generationStarted(current), to: onChange)
+        coordinator.deliverNativeBufferingEvent(.changed(generation: current, buffering: true), to: onChange)
+
+        let drained = expectation(description: "replacement notifications drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertEqual(events, [.generationStarted(current), .changed(generation: current, buffering: true)])
+
+        coordinator.deliverNativeBufferingEvent(.changed(generation: current, buffering: false), to: onChange)
+        coordinator.invalidateNativeBufferingGeneration()
+        let teardownDrained = expectation(description: "teardown notifications drained")
+        DispatchQueue.main.async { teardownDrained.fulfill() }
+        await fulfillment(of: [teardownDrained], timeout: 2)
+        XCTAssertEqual(events, [.generationStarted(current), .changed(generation: current, buffering: true)])
+    }
     func testHistoryJellyfinRestorationRequiresExactOriginAndBasePath() {
         let base = "https://media.example/jellyfin"
         let history = "https://media.example/jellyfin/Videos/episode%2F1/stream?Static=true"
