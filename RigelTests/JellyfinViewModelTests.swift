@@ -428,6 +428,69 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertEqual(model.searchResults.map(\.id), ["one", "two"])
     }
 
+    func testSearchPaginationRestartsForReplacementAccount() async {
+        for pendingMore in [false, true] {
+            let service = ControlledJellyfin()
+            let (model, settings, saved, destination) = connectedModel(service)
+            defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+            model.searchText = "shared query"
+            await waitUntil { service.searchRequests.count == 1 }
+            service.resolveSearch(term: "shared query", startIndex: 0, page: page([item("old", "Old account")], total: 100, start: 0, received: 50))
+            await waitUntil { !model.searchBusy }
+            if pendingMore {
+                model.loadMoreSearch()
+                await waitUntil { service.searchRequests.count == 2 }
+            }
+            settings.setJellyfinToken(v: "replacement-token")
+            if pendingMore {
+                service.resolveSearch(term: "shared query", startIndex: 50, page: page([item("stale", "Stale page")], total: 100, start: 50, received: 50))
+                await waitUntil { !model.searchMoreBusy }
+            }
+            model.loadMoreSearch()
+            await waitUntil { service.searchRequests.count == (pendingMore ? 3 : 2) }
+            XCTAssertEqual(service.searchRequests.last?.startIndex, 0)
+            XCTAssertTrue(model.searchResults.isEmpty)
+            service.resolveSearch(term: "shared query", startIndex: 0, page: page([item("new", "New account")], total: 1, start: 0, received: 1))
+            await waitUntil { !model.searchBusy && !model.searchMoreBusy }
+            XCTAssertEqual(model.searchResults.map(\.id), ["new"])
+            XCTAssertEqual(model.searchTotalRecordCount, 1)
+            XCTAssertFalse(model.canLoadMoreSearch)
+        }
+    }
+
+    func testBrowsePaginationRestartsAtRootForReplacementAccount() async {
+        for pendingMore in [false, true] {
+            let service = ControlledJellyfin()
+            service.deferBrowse = true
+            let (model, settings, saved, destination) = connectedModel(service)
+            defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+            model.openFolder(item("old-series", "Old series", folder: true, type: "Series"))
+            await waitUntil { service.browseRequests.count == 1 }
+            service.resolveBrowse(requestId: 0, result: .success(page([item("old", "Old episode")], total: 100, start: 0, received: 50)))
+            await waitUntil { !model.browseBusy }
+            if pendingMore {
+                model.loadMoreLibrary()
+                await waitUntil { service.browseRequests.count == 2 }
+            }
+            settings.setJellyfinServer(v: "http://replacement.invalid")
+            if pendingMore {
+                service.resolveBrowse(requestId: 1, result: .success(page([item("stale", "Stale episode")], total: 100, start: 50, received: 50)))
+                await waitUntil { !model.browseMoreBusy }
+            }
+            model.loadMoreLibrary()
+            let requestCount = pendingMore ? 3 : 2
+            await waitUntil { service.browseRequests.count == requestCount }
+            XCTAssertEqual(service.browseRequests.last?.startIndex, 0)
+            XCTAssertNil(service.browseRequests.last?.parentId)
+            XCTAssertTrue(model.libraryPath.isEmpty)
+            XCTAssertTrue(model.libraryItems.isEmpty)
+            service.resolveBrowse(requestId: requestCount - 1, result: .success(page([item("new", "New library")], total: 1, start: 0, received: 1)))
+            await waitUntil { !model.browseBusy && !model.browseMoreBusy }
+            XCTAssertEqual(model.libraryItems.map(\.id), ["new"])
+            XCTAssertFalse(model.canLoadMoreLibrary)
+        }
+    }
+
     func testRefreshRestartsSearchFromFirstPageWhileMoreIsLoading() async {
         let service = ControlledJellyfin()
         let (model, settings, saved, destination) = connectedModel(service) { _ in }

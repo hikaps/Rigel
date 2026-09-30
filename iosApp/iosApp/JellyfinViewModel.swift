@@ -107,6 +107,13 @@ final class JellyfinViewModel: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var playbackTask: Task<Void, Never>?
 
+    private struct ContentAccount: Equatable {
+        let base: String
+        let token: String
+        let userId: String
+    }
+    private var contentAccount: ContentAccount
+
     private struct SearchInput: Equatable {
         let term: String
         let filter: JellyfinSearchCategory
@@ -151,6 +158,7 @@ final class JellyfinViewModel: ObservableObject {
         self.jellyfin = jellyfin
         self.settings = settings ?? DefaultJellyfinSettingsFacade(store: RigelCore.shared.settings)
         self.searchDelay = searchDelay
+        contentAccount = ContentAccount(base: settings.jellyfinServer(), token: settings.jellyfinToken(), userId: settings.jellyfinUserId())
     }
 
     var connected: Bool { !settings.jellyfinToken().isEmpty }
@@ -298,6 +306,7 @@ final class JellyfinViewModel: ObservableObject {
     }
 
     func loadLibraryIfNeeded() {
+        _ = resetContentIfAccountChanged()
         guard connected, !libraryLoadedOnce, !browseBusy else { return }
         loadBrowsePage()
     }
@@ -308,11 +317,13 @@ final class JellyfinViewModel: ObservableObject {
     }
 
     func loadMoreLibrary() {
+        if resetContentIfAccountChanged() { refreshCurrentLocation(); return }
         guard canLoadMoreLibrary, !browseMoreBusy else { return }
         loadBrowsePage(append: true)
     }
 
     func refreshCurrentLocation() {
+        _ = resetContentIfAccountChanged()
         if isShowingSearchResults, let input = currentSearchInput, connected {
             startSearchPage(input, startIndex: 0, append: false, debounce: false)
         } else {
@@ -321,6 +332,7 @@ final class JellyfinViewModel: ObservableObject {
     }
 
     func openFolder(_ item: JellyfinItem) {
+        if resetContentIfAccountChanged() { refreshCurrentLocation(); return }
         guard item.isFolder, connected else { return }
         invalidatePendingPlayback()
         if isSearchActive {
@@ -339,6 +351,7 @@ final class JellyfinViewModel: ObservableObject {
     }
 
     func goBack() {
+        if resetContentIfAccountChanged() { refreshCurrentLocation(); return }
         guard !currentPath.isEmpty else { return }
         invalidatePendingPlayback()
         if isSearchActive {
@@ -362,6 +375,7 @@ final class JellyfinViewModel: ObservableObject {
     }
 
     func backToRoot() {
+        if resetContentIfAccountChanged() { refreshCurrentLocation(); return }
         guard !currentPath.isEmpty else { return }
         invalidatePendingPlayback()
         if isSearchActive {
@@ -385,12 +399,14 @@ final class JellyfinViewModel: ObservableObject {
     }
 
     func searchNow() {
+        _ = resetContentIfAccountChanged()
         guard let input = currentSearchInput, connected else { return }
         if searchExecutionInput == input && searchRequestIssued && (searchBusy || searchMoreBusy) { return }
         startSearchPage(input, startIndex: 0, append: false, debounce: false)
     }
 
     func loadMoreSearch() {
+        if resetContentIfAccountChanged() { searchNow(); return }
         guard canLoadMoreSearch else { return }
         guard let input = currentSearchInput else { return }
         startSearchPage(input, startIndex: searchNextOffset, append: true, debounce: false)
@@ -403,8 +419,9 @@ final class JellyfinViewModel: ObservableObject {
 
     private func searchInputsChanged() {
         guard !suppressSearchInputChanges else { return }
+        let accountChanged = resetContentIfAccountChanged()
         let input = currentSearchInput
-        guard input != lastSearchInput else { return }
+        guard input != lastSearchInput || accountChanged else { return }
         let wasSearching = lastSearchInput != nil
         lastSearchInput = input
         invalidatePendingPlayback()
@@ -450,6 +467,9 @@ final class JellyfinViewModel: ObservableObject {
 
     private func startSearchPage(_ input: SearchInput, startIndex: Int32, append: Bool, debounce: Bool) {
         guard connected else { return }
+        let accountChanged = resetContentIfAccountChanged()
+        let append = append && !accountChanged
+        let startIndex: Int32 = append ? startIndex : 0
         searchTask?.cancel()
         searchTask = nil
         searchExecutionInput = input
@@ -542,6 +562,8 @@ final class JellyfinViewModel: ObservableObject {
 
     private func loadBrowsePage(append: Bool = false, reset: Bool = false) {
         guard connected else { return }
+        let accountChanged = resetContentIfAccountChanged()
+        let append = append && !accountChanged
         let target = activeBrowseTarget
         let parentId = target.parentId
         let order = activeBrowseOrder
@@ -622,6 +644,28 @@ final class JellyfinViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func resetContentIfAccountChanged() -> Bool {
+        let account = ContentAccount(base: base, token: token, userId: userId)
+        guard account != contentAccount else { return false }
+        contentAccount = account
+        invalidateInFlight()
+        libraryItems = []
+        browseItems = []
+        libraryPath = []
+        searchPath = []
+        libraryLoadedOnce = false
+        browseLoadedOnce = false
+        libraryError = nil
+        browseError = nil
+        browseMoreError = nil
+        browseNextOffset = 0
+        browseLastReceivedCount = 0
+        browseTotalRecordCount = nil
+        browseStalled = false
+        resetSearchResults()
+        return true
     }
 
     private func resetSearchResults() {
