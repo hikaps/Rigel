@@ -428,6 +428,28 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertEqual(model.searchResults.map(\.id), ["one", "two"])
     }
 
+    func testSearchCanPagePastAnEmptyMappedFirstPage() async {
+        for total: Int32? in [51, nil] {
+            let service = ControlledJellyfin()
+            let (model, settings, saved, destination) = connectedModel(service)
+            defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+            model.searchText = "skipped entries"
+            await waitUntil { service.searchRequests.count == 1 }
+            XCTAssertFalse(model.canLoadMoreSearch)
+            service.resolveSearch(term: "skipped entries", startIndex: 0, page: page([], total: total, start: 0, received: 50))
+            await waitUntil { !model.searchBusy }
+            XCTAssertTrue(model.searchResults.isEmpty)
+            XCTAssertTrue(model.canLoadMoreSearch)
+            model.loadMoreSearch()
+            await waitUntil { service.searchRequests.count == 2 }
+            XCTAssertEqual(service.searchRequests.last?.startIndex, 50)
+            service.resolveSearch(term: "skipped entries", startIndex: 50, page: page([item("valid", "Valid result")], total: total, start: 50, received: 1))
+            await waitUntil { !model.searchMoreBusy }
+            XCTAssertEqual(model.searchResults.map(\.id), ["valid"])
+            XCTAssertFalse(model.canLoadMoreSearch)
+        }
+    }
+
     func testSearchPaginationRestartsForReplacementAccount() async {
         for pendingMore in [false, true] {
             let service = ControlledJellyfin()

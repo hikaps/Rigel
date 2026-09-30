@@ -185,7 +185,7 @@ final class JellyfinViewModel: ObservableObject {
             (browseTotalRecordCount.map { browseNextOffset < $0 } ?? (browseLastReceivedCount >= 50))
     }
     var canLoadMoreSearch: Bool {
-        isShowingSearchResults && !searchBusy && !searchMoreBusy && !searchStalled && !searchResults.isEmpty &&
+        isShowingSearchResults && !searchBusy && !searchMoreBusy && !searchStalled &&
             (searchTotalRecordCount.map { searchNextOffset < $0 } ?? (searchLastReceivedCount >= 50))
     }
     var searchStalledWithRemainingItems: Bool {
