@@ -177,6 +177,7 @@ targets:
     platform: iOS
     sources:
       - path: ../RigelUITests
+        createIntermediateGroups: false
     dependencies:
       - target: Rigel
     settings:

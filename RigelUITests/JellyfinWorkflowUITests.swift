@@ -182,11 +182,14 @@ private final class JellyfinFixtureServer: @unchecked Sendable {
                     if emptyFirstSearchPage, url?.queryItems?.contains(where: { $0.name == "SearchTerm" }) == true {
                         let offset = url?.queryItems?.first(where: { $0.name == "StartIndex" })?.value ?? "0"
                         switch offset {
-                        case "0", "50":
+                        case "0":
                             let skippedItems = Array(repeating: "{}", count: 50).joined(separator: ",")
-                            self.send(connection, contentType: "application/json", body: Data(#"{"Items":[\#(skippedItems)],"TotalRecordCount":101,"StartIndex":\#(offset)}"#.utf8))
-                        case "100":
-                            self.send(connection, contentType: "application/json", body: Data(#"{"Items":[{"Id":"movie-1","Name":"Smoke Feature","Type":"Movie","IsFolder":false}],"TotalRecordCount":101,"StartIndex":100}"#.utf8))
+                            self.send(connection, contentType: "application/json", body: Data(#"{"Items":[\#(skippedItems)],"TotalRecordCount":101,"StartIndex":0}"#.utf8))
+                        case "50":
+                            self.send(connection, contentType: "application/json", body: Data(#"{"Items":[{}],"StartIndex":50}"#.utf8))
+                        case "51":
+                            let skippedItems = Array(repeating: "{}", count: 49).joined(separator: ",")
+                            self.send(connection, contentType: "application/json", body: Data(#"{"Items":[{"Id":"movie-1","Name":"Smoke Feature","Type":"Movie","IsFolder":false},\#(skippedItems)],"TotalRecordCount":101,"StartIndex":51}"#.utf8))
                         default:
                             self.send(connection, status: 404, contentType: "application/json", body: Data("{}".utf8))
                         }

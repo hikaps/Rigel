@@ -527,6 +527,7 @@ final class JellyfinViewModel: ObservableObject {
                 searchNextOffset = Self.nextOffset(startIndex, page.receivedCount)
                 searchLastReceivedCount = page.receivedCount
                 searchTotalRecordCount = page.totalRecordCount?.int32Value
+                    ?? (append ? searchTotalRecordCount : nil)
                 searchStalled = searchNextOffset <= startIndex ||
                     (append && !page.items.isEmpty && merged.addedCount == 0)
             } catch {

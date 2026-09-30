@@ -428,6 +428,42 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertEqual(model.searchResults.map(\.id), ["one", "two"])
     }
 
+    func testSearchPreservesKnownTotalAcrossShortPagesWithoutMetadataAndResetsOnRefresh() async {
+        let service = ControlledJellyfin()
+        let (model, settings, saved, destination) = connectedModel(service)
+        defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+        model.searchText = "partial metadata"
+        await waitUntil { service.searchRequests.count == 1 }
+        service.resolveSearch(term: "partial metadata", startIndex: 0, page: page([item("one", "First")], total: 100, start: 0, received: 50))
+        await waitUntil { !model.searchBusy }
+        model.loadMoreSearch()
+        await waitUntil { service.searchRequests.count == 2 }
+        service.resolveSearch(term: "partial metadata", startIndex: 50, page: page([item("two", "Second")], total: nil, start: 50, received: 1))
+        await waitUntil { !model.searchMoreBusy }
+
+        XCTAssertEqual(model.searchTotalRecordCount, 100)
+        guard model.canLoadMoreSearch else {
+            XCTFail("Remaining records must stay reachable when an appended page omits the total")
+            return
+        }
+        model.loadMoreSearch()
+        await waitUntil { service.searchRequests.count == 3 }
+        XCTAssertEqual(service.searchRequests.last?.startIndex, 51)
+        service.resolveSearch(term: "partial metadata", startIndex: 51, page: page([item("three", "Final")], total: nil, start: 51, received: 49))
+        await waitUntil { !model.searchMoreBusy }
+        XCTAssertEqual(model.searchResults.map(\.id), ["one", "two", "three"])
+        XCTAssertFalse(model.canLoadMoreSearch)
+
+        model.searchNow()
+        await waitUntil { service.searchRequests.count == 4 }
+        service.resolveSearch(term: "partial metadata", startIndex: 0, page: page([item("fresh", "Refreshed")], total: nil, start: 0, received: 1))
+        await waitUntil { !model.searchBusy }
+        XCTAssertNil(model.searchTotalRecordCount)
+        XCTAssertEqual(model.searchResults.map(\.id), ["fresh"])
+        XCTAssertFalse(model.canLoadMoreSearch)
+    }
+
     func testSearchCanPagePastAnEmptyMappedFirstPage() async {
         for total: Int32? in [51, nil] {
             let service = ControlledJellyfin()
