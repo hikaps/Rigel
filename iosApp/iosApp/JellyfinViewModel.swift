@@ -156,9 +156,10 @@ final class JellyfinViewModel: ObservableObject {
         searchDelay: @escaping (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }
     ) {
         self.jellyfin = jellyfin
-        self.settings = settings ?? DefaultJellyfinSettingsFacade(store: RigelCore.shared.settings)
+        let resolvedSettings = settings ?? DefaultJellyfinSettingsFacade(store: RigelCore.shared.settings)
+        self.settings = resolvedSettings
         self.searchDelay = searchDelay
-        contentAccount = ContentAccount(base: settings.jellyfinServer(), token: settings.jellyfinToken(), userId: settings.jellyfinUserId())
+        contentAccount = ContentAccount(base: resolvedSettings.jellyfinServer(), token: resolvedSettings.jellyfinToken(), userId: resolvedSettings.jellyfinUserId())
     }
 
     var connected: Bool { !settings.jellyfinToken().isEmpty }
@@ -526,7 +527,8 @@ final class JellyfinViewModel: ObservableObject {
                 searchNextOffset = Self.nextOffset(startIndex, page.receivedCount)
                 searchLastReceivedCount = page.receivedCount
                 searchTotalRecordCount = page.totalRecordCount?.int32Value
-                searchStalled = page.receivedCount == 0 || (append && merged.addedCount == 0)
+                searchStalled = searchNextOffset <= startIndex ||
+                    (append && !page.items.isEmpty && merged.addedCount == 0)
             } catch {
                 guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error),
                       currentSearchInput == input,
@@ -622,7 +624,8 @@ final class JellyfinViewModel: ObservableObject {
                 browseLastReceivedCount = page.receivedCount
                 browseTotalRecordCount = page.totalRecordCount?.int32Value
                     ?? (append ? browseTotalRecordCount : nil)
-                browseStalled = page.receivedCount == 0 || (append && merged.addedCount == 0)
+                browseStalled = browseNextOffset <= startIndex ||
+                    (append && !page.items.isEmpty && merged.addedCount == 0)
                 browseLoadedOnce = true
             } catch {
                 guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error),

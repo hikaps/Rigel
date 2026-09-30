@@ -450,6 +450,72 @@ final class JellyfinViewModelTests: XCTestCase {
         }
     }
 
+    func testSearchContinuesPastEmptyIntermediatePagesAndStopsNonProgress() async {
+        for duplicate in [false, true] {
+            let service = ControlledJellyfin()
+            let (model, settings, saved, destination) = connectedModel(service)
+            defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+            model.searchText = "intermediate"
+            await waitUntil { service.searchRequests.count == 1 }
+            service.resolveSearch(term: "intermediate", startIndex: 0, page: page([item("first", "First")], total: 151, start: 0, received: 50))
+            await waitUntil { !model.searchBusy }
+            model.loadMoreSearch()
+            await waitUntil { service.searchRequests.count == 2 }
+            service.resolveSearch(term: "intermediate", startIndex: 50, page: page([], total: 151, start: 50, received: 50))
+            await waitUntil { !model.searchMoreBusy }
+            XCTAssertTrue(model.canLoadMoreSearch)
+            XCTAssertFalse(model.searchStalled)
+            XCTAssertEqual(model.searchResults.map(\.id), ["first"])
+            model.loadMoreSearch()
+            await waitUntil { service.searchRequests.count == 3 }
+            XCTAssertEqual(service.searchRequests.last?.startIndex, 100)
+            service.resolveSearch(term: "intermediate", startIndex: 100, page: page([item("later", "Later")], total: 151, start: 100, received: 1))
+            await waitUntil { !model.searchMoreBusy }
+            XCTAssertEqual(model.searchResults.map(\.id), ["first", "later"])
+            model.loadMoreSearch()
+            await waitUntil { service.searchRequests.count == 4 }
+            service.resolveSearch(term: "intermediate", startIndex: 101, page: page(duplicate ? [item("later", "Repeated")] : [], total: 151, start: 101, received: duplicate ? 50 : 0))
+            await waitUntil { !model.searchMoreBusy }
+            XCTAssertTrue(model.searchStalled)
+            XCTAssertFalse(model.canLoadMoreSearch)
+            XCTAssertEqual(model.searchResults.map(\.id), ["first", "later"])
+        }
+    }
+
+    func testBrowseContinuesPastEmptyIntermediatePagesAndStopsNonProgress() async {
+        for duplicate in [false, true] {
+            let service = ControlledJellyfin()
+            service.deferBrowse = true
+            let (model, settings, saved, destination) = connectedModel(service)
+            defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+            model.loadLibraryIfNeeded()
+            await waitUntil { service.browseRequests.count == 1 }
+            service.resolveBrowse(requestId: 0, result: .success(page([item("first", "First")], total: 151, start: 0, received: 50)))
+            await waitUntil { !model.browseBusy }
+            model.loadMoreLibrary()
+            await waitUntil { service.browseRequests.count == 2 }
+            service.resolveBrowse(requestId: 1, result: .success(page([], total: 151, start: 50, received: 50)))
+            await waitUntil { !model.browseMoreBusy }
+            XCTAssertTrue(model.canLoadMoreLibrary)
+            XCTAssertFalse(model.browseStalled)
+            XCTAssertEqual(model.libraryItems.map(\.id), ["first"])
+            model.loadMoreLibrary()
+            await waitUntil { service.browseRequests.count == 3 }
+            XCTAssertEqual(service.browseRequests.last?.startIndex, 100)
+            service.resolveBrowse(requestId: 2, result: .success(page([item("later", "Later")], total: 151, start: 100, received: 1)))
+            await waitUntil { !model.browseMoreBusy }
+            XCTAssertEqual(model.libraryItems.map(\.id), ["first", "later"])
+            model.loadMoreLibrary()
+            await waitUntil { service.browseRequests.count == 4 }
+            service.resolveBrowse(requestId: 3, result: .success(page(duplicate ? [item("later", "Repeated")] : [], total: 151, start: 101, received: duplicate ? 50 : 0)))
+            await waitUntil { !model.browseMoreBusy }
+            XCTAssertTrue(model.browseStalled)
+            XCTAssertFalse(model.canLoadMoreLibrary)
+            XCTAssertEqual(model.libraryItems.map(\.id), ["first", "later"])
+        }
+    }
+
+
     func testSearchPaginationRestartsForReplacementAccount() async {
         for pendingMore in [false, true] {
             let service = ControlledJellyfin()

@@ -87,10 +87,16 @@ final class JellyfinWorkflowUITests: XCTestCase {
         XCTAssertTrue(more.waitForExistence(timeout: 15))
         XCTAssertFalse(app.staticTexts["Smoke Feature"].exists)
         more.tap()
+        let intermediateFinished = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "enabled == true"), object: more
+        )
+        wait(for: [intermediateFinished], timeout: 10)
+        XCTAssertFalse(app.staticTexts["Smoke Feature"].exists)
+        more.tap()
         XCTAssertTrue(app.staticTexts["Smoke Feature"].waitForExistence(timeout: 10))
         XCTAssertFalse(more.exists)
         let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = "Search continues past unusable first page"
+        attachment.name = "Search continues past unusable first and intermediate pages"
         attachment.lifetime = .keepAlways
         add(attachment)
     }
@@ -175,11 +181,14 @@ private final class JellyfinFixtureServer: @unchecked Sendable {
                 case ("GET", "/Items"):
                     if emptyFirstSearchPage, url?.queryItems?.contains(where: { $0.name == "SearchTerm" }) == true {
                         let offset = url?.queryItems?.first(where: { $0.name == "StartIndex" })?.value ?? "0"
-                        if offset == "0" {
+                        switch offset {
+                        case "0", "50":
                             let skippedItems = Array(repeating: "{}", count: 50).joined(separator: ",")
-                            self.send(connection, contentType: "application/json", body: Data(#"{"Items":[\#(skippedItems)],"TotalRecordCount":51,"StartIndex":0}"#.utf8))
-                        } else {
-                            self.send(connection, contentType: "application/json", body: Data(#"{"Items":[{"Id":"movie-1","Name":"Smoke Feature","Type":"Movie","IsFolder":false}],"TotalRecordCount":51,"StartIndex":50}"#.utf8))
+                            self.send(connection, contentType: "application/json", body: Data(#"{"Items":[\#(skippedItems)],"TotalRecordCount":101,"StartIndex":\#(offset)}"#.utf8))
+                        case "100":
+                            self.send(connection, contentType: "application/json", body: Data(#"{"Items":[{"Id":"movie-1","Name":"Smoke Feature","Type":"Movie","IsFolder":false}],"TotalRecordCount":101,"StartIndex":100}"#.utf8))
+                        default:
+                            self.send(connection, status: 404, contentType: "application/json", body: Data("{}".utf8))
                         }
                         return
                     }
