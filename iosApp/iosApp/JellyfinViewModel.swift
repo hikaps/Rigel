@@ -770,7 +770,12 @@ final class JellyfinViewModel: ObservableObject {
                 pendingSourceChoice = PendingSourceChoice(request: request, sources: sources)
                 versionChoice = JellyfinVersionChoice(item: request.item, sources: sources)
             } catch {
-                guard !Task.isCancelled, isCurrent(request) else { return }
+                guard !Task.isCancelled else { return }
+                guard isCurrent(request) else {
+                    invalidatePendingPlayback()
+                    playbackError = "This version is no longer available. Reload versions and try again."
+                    return
+                }
                 if JellyfinCancellation.isCancellation(error) {
                     playbackBusy = false
                     playbackTask = nil

@@ -861,6 +861,66 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertFalse(model.searchBusy)
     }
 
+    func testReplacedAccountMediaSourceFailureClearsPlaybackAndAllowsNewPlay() async {
+        let errors: [Error] = [
+            JellyfinInterop.shared.makeRequestException(statusCode: 401).asError(),
+            JellyfinInterop.shared.makeCancellationThrowable().asError(),
+        ]
+        for error in errors {
+            let service = ControlledJellyfin()
+            let (model, settings, saved, destination) = connectedModel(service)
+            defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+            var opened: [JellyfinPlaybackSelection] = []
+            model.play(item("old", "Old account film")) { opened.append($0); return true }
+            await waitUntil { service.mediaSourceRequests == ["old"] }
+            XCTAssertTrue(model.playbackBusy)
+            settings.setJellyfinToken(v: "replacement-token")
+            service.failMediaSources(itemId: "old", error: error)
+            await waitUntil { !model.playbackBusy }
+
+            XCTAssertFalse(model.playbackBusy)
+            XCTAssertFalse(model.busy)
+            XCTAssertFalse(model.canRetryPlayback)
+            XCTAssertNil(model.versionChoice)
+            XCTAssertTrue(opened.isEmpty)
+            XCTAssertNil(model.notice)
+            XCTAssertEqual(settings.jellyfinToken(), "replacement-token")
+
+            model.play(item("new", "Current account film")) { opened.append($0); return true }
+            await waitUntil { service.mediaSourceRequests == ["old", "new"] }
+            service.resolveMediaSources(itemId: "new", sources: [mediaSource("current", name: "Current source")])
+            await waitUntil { !model.playbackBusy }
+            XCTAssertEqual(opened.map { $0.item.id }, ["new"])
+            XCTAssertEqual(opened.first?.token, "replacement-token")
+            XCTAssertNil(model.playbackError)
+        }
+    }
+
+    func testCancelledMediaSourceFailureCannotClearReplacementLookup() async {
+        let service = ControlledJellyfin()
+        let (model, settings, saved, destination) = connectedModel(service)
+        defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+        var opened: [JellyfinPlaybackSelection] = []
+        model.play(item("old", "Old account film")) { opened.append($0); return true }
+        await waitUntil { service.mediaSourceRequests == ["old"] }
+        settings.setJellyfinToken(v: "replacement-token")
+        model.play(item("new", "Current account film")) { opened.append($0); return true }
+        await waitUntil { service.mediaSourceRequests == ["old", "new"] }
+        service.failMediaSources(itemId: "old", error: JellyfinInterop.shared.makeRequestException(statusCode: 401).asError())
+        for _ in 0..<10 { await Task.yield() }
+
+        XCTAssertTrue(model.playbackBusy)
+        XCTAssertTrue(model.canRetryPlayback)
+        XCTAssertNil(model.playbackError)
+        XCTAssertEqual(settings.jellyfinToken(), "replacement-token")
+        service.resolveMediaSources(itemId: "new", sources: [mediaSource("current", name: "Current source")])
+        await waitUntil { !model.playbackBusy }
+        XCTAssertEqual(opened.map { $0.item.id }, ["new"])
+        XCTAssertEqual(opened.first?.token, "replacement-token")
+    }
+
     func testKotlinCancellationDuringMediaSourceLookupClearsBusyWithoutError() async {
         let service = ControlledJellyfin()
         let (model, settings, saved, destination) = connectedModel(service)
