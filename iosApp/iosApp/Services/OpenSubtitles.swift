@@ -303,6 +303,12 @@ final class OpenSubtitlesClient {
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         let redirectDelegate = RedirectDelegate(policy: .download(apiKey: apiKey))
         let (bytes, response) = try await session.bytes(for: request, delegate: redirectDelegate)
+        var didFinishReading = false
+        defer {
+            if !didFinishReading {
+                bytes.task.cancel()
+            }
+        }
         guard let http = response as? HTTPURLResponse else {
             throw OpenSubtitlesError.invalidResponse
         }
@@ -326,6 +332,7 @@ final class OpenSubtitlesClient {
             }
             data.append(byte)
         }
+        didFinishReading = true
         // Reject archives/gzip, require decodable text with at least one cue,
         // then save normalized UTF-8: FFmpeg's SRT demuxer only reads
         // byte-oriented text, unlike the overlay parser.

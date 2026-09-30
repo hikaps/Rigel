@@ -47,6 +47,7 @@ import platform.Security.kSecValueData
 import platform.darwin.OSStatus
 
 private class IosJellyfinTokenStore : JellyfinTokenStore {
+    override val persistsAcrossInstances = true
     private val service = "com.rigel.player.jellyfin"
     private val account = "token"
 

@@ -30,7 +30,12 @@ final class RigelProbe {
         var result: ProbeResult? = nil
         var error: String? = nil
 
-        defer { avformat_close_input(&fmt) }
+        defer {
+            // FFmpeg keeps the opaque interrupt pointer until its input is closed.
+            withExtendedLifetime(watchdog) {
+                avformat_close_input(&fmt)
+            }
+        }
         url.withCString { cstr in
             var opts: OpaquePointer? = nil
             defer { if opts != nil { av_dict_free(&opts) } }

@@ -12,12 +12,16 @@ data class LinkHistoryEntry(val url: String, val title: String?)
 
 /** The protected store used for the Jellyfin authentication token. */
 interface JellyfinTokenStore {
+    /** True when a successful write survives creation of a new token store. */
+    val persistsAcrossInstances: Boolean
+        get() = false
     fun read(): String?
     fun write(value: String): Boolean
     fun clear(): Boolean
 }
 
 private class CommonInMemoryJellyfinTokenStore : JellyfinTokenStore {
+    override val persistsAcrossInstances = false
     private var value: String? = null
 
     override fun read(): String? = value
@@ -68,12 +72,10 @@ class SettingsStore(
             return true
         }
 
-        // Never fall back to plaintext when protected storage rejects a write.
-        // In particular, remove a legacy value only after the secure write has
-        // reported success.
+        // Preserve the legacy value unless the replacement survives store recreation.
         val stored = runCatching { jellyfinTokenStore.write(v) }.getOrDefault(false)
         if (!stored) return false
-        settings.remove(jfTokenKey)
+        if (jellyfinTokenStore.persistsAcrossInstances) settings.remove(jfTokenKey)
         return true
     }
 
@@ -143,6 +145,7 @@ class SettingsStore(
     }.getOrNull()
 
     private fun migrateLegacyJellyfinToken() {
+        if (!jellyfinTokenStore.persistsAcrossInstances) return
         val legacy = settings.getString(jfTokenKey, "")
         if (legacy.isEmpty()) return
 

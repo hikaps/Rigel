@@ -19,6 +19,7 @@ class SettingsStoreTest {
         private val writesSucceed: Boolean = true,
         private val clearsSucceed: Boolean = true,
     ) : JellyfinTokenStore {
+        override val persistsAcrossInstances = true
         var writeAttempts = 0
             private set
         var clearAttempts = 0
@@ -74,6 +75,19 @@ class SettingsStoreTest {
         assertTrue(first.setJellyfinToken("first-token"))
         assertEquals("first-token", first.jellyfinToken())
         assertEquals("", second.jellyfinToken())
+    }
+    @Test
+    fun volatileDefaultTokenStoreKeepsLegacyCredentialAcrossInstances() {
+        val settings = MapSettings(mutableMapOf())
+        settings.putString("jellyfin_token", "legacy-token")
+
+        val first = SettingsStore(settings)
+        assertEquals("legacy-token", first.jellyfinToken())
+        assertTrue(first.setJellyfinToken("volatile-token"))
+        assertEquals("volatile-token", first.jellyfinToken())
+
+        val second = SettingsStore(settings)
+        assertEquals("legacy-token", second.jellyfinToken())
     }
 
     @Test

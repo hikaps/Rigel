@@ -4,6 +4,7 @@ import com.russhwolf.settings.Settings
 
 /** JVM host used by shared tests; do not persist credentials in Settings. */
 private class JvmInMemoryJellyfinTokenStore : JellyfinTokenStore {
+    override val persistsAcrossInstances = false
     private var value: String? = null
 
     override fun read(): String? = value

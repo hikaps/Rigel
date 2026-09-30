@@ -355,11 +355,25 @@ final class OpenSubtitlesTests: XCTestCase {
     }
 
     func testSubtitleTransportStopsAtMaximumSize() async throws {
-        serve([
-            "/too-large.srt": (200, Data(repeating: 0x61, count: OpenSubtitlesClient.maximumSubtitleBytes + 1)),
-        ])
+        let stopped = expectation(description: "oversized subtitle transfer is cancelled")
+        let session = makeSession()
+        OpenSubtitlesURLProtocol.heldOpenPath = "/too-large.srt"
+        OpenSubtitlesURLProtocol.stopHandler = { request in
+            if request.url?.path == "/too-large.srt" {
+                stopped.fulfill()
+            }
+        }
+        OpenSubtitlesURLProtocol.handler = { request in
+            if request.url?.path == "/too-large.srt" {
+                let body = Data(repeating: 0x61, count: OpenSubtitlesClient.maximumSubtitleBytes + 1)
+                return Self.response(request: request, body: body)
+            }
+            return Self.response(request: request, statusCode: 404, body: Self.data("{}"))
+        }
         defer {
             OpenSubtitlesURLProtocol.handler = nil
+            OpenSubtitlesURLProtocol.heldOpenPath = nil
+            OpenSubtitlesURLProtocol.stopHandler = nil
         }
 
         do {
@@ -367,13 +381,14 @@ final class OpenSubtitlesTests: XCTestCase {
                 from: try XCTUnwrap(URL(string: "https://signed.example/too-large.srt")),
                 for: makeResult(id: 12, title: "Large", fileName: "large.srt"),
                 apiKey: "app-key",
-                session: makeSession(),
+                session: session,
                 directory: nil
             )
             XCTFail("oversize subtitle must be rejected while streaming")
         } catch let error as OpenSubtitlesError {
             XCTAssertEqual(error.localizedDescription, OpenSubtitlesError.fileTooLarge.localizedDescription)
         }
+        await fulfillment(of: [stopped], timeout: 2)
     }
 
 
@@ -485,6 +500,8 @@ private final class TestCredentialStore: OpenSubtitlesCredentialStore {
 private final class OpenSubtitlesURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
     static var observer: ((URLRequest) -> Void)?
+    static var heldOpenPath: String?
+    static var stopHandler: ((URLRequest) -> Void)?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
 
@@ -499,6 +516,10 @@ private final class OpenSubtitlesURLProtocol: URLProtocol {
         do {
             let (response, data) = try handler(request)
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if request.url?.path == Self.heldOpenPath {
+                client?.urlProtocol(self, didLoad: data)
+                return
+            }
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)
         } catch {
@@ -506,5 +527,7 @@ private final class OpenSubtitlesURLProtocol: URLProtocol {
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        Self.stopHandler?(request)
+    }
 }
