@@ -25,6 +25,7 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 - Each home feed loads, reports errors, and retries independently. Switching Jellyfin accounts resets feed and folder state and discards in-flight responses and version lookups from the previous account.
 - Search results and folders opened from search retain paging, including pages with no usable entries while more records remain and known totals when later pages omit them.
 - Jellyfin history links are restored with the current account. Unsupported credential-only stream links are blocked instead of replaying an embedded token through generic playback.
+- Cancelling a Jellyfin version choice returns to browsing without starting playback.
 
 ## Integrations
 

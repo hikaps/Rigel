@@ -57,7 +57,8 @@ final class JellyfinWorkflowUITests: XCTestCase {
             predicate: NSPredicate(format: "exists == false"),
             object: app.navigationBars["Choose version"]
         )
-        wait(for: [dismissed], timeout: 2)
+        // Match the picker presentation budget: CI accessibility snapshots can exceed two seconds.
+        wait(for: [dismissed], timeout: 10)
         wait(for: [noNegotiationAfterCancel], timeout: 1)
         XCTAssertTrue(server.requestedSourceIds.isEmpty)
         XCTAssertTrue(server.playbackRequestSourceIds.isEmpty)
