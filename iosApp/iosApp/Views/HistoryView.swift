@@ -2,54 +2,92 @@ import Foundation
 import SwiftUI
 import ComposeApp
 struct JellyfinHistoryMatch: Equatable {
-    let playableURL: String
     let baseURL: String
     let token: String
     let userId: String
     let itemId: String
+    let mediaSourceId: String?
 }
 
 enum HistoryPlaybackResolver {
+    enum LegacyStreamClassification: Equatable {
+        case unrelated
+        case rejected
+        case replayable(itemId: String, mediaSourceId: String?)
+    }
+
+    static func classifyLegacyJellyfinStream(_ rawURL: String) -> LegacyStreamClassification {
+        guard let url = URLComponents(string: rawURL),
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty,
+              let itemId = streamItemID(url),
+              let queryItems = url.queryItems,
+              queryItems.contains(where: { ["static", "mediasourceid"].contains($0.name.lowercased()) }) else {
+            return .unrelated
+        }
+
+        guard url.user == nil, url.password == nil, url.fragment == nil else { return .rejected }
+
+        var valid = true
+        var staticCount = 0
+        var sourceCount = 0
+        var credentialCount = 0
+        var mediaSourceId: String?
+        for item in queryItems {
+            let hasControl = item.name.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+                || (item.value?.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } ?? false)
+            guard !hasControl else {
+                valid = false
+                continue
+            }
+
+            switch item.name {
+            case "Static":
+                staticCount += 1
+                if item.value != "true" { valid = false }
+            case "MediaSourceId":
+                sourceCount += 1
+                guard let value = item.value, !value.isEmpty else {
+                    valid = false
+                    continue
+                }
+                mediaSourceId = value
+            case "api_key", "ApiKey":
+                credentialCount += 1
+                if item.value?.isEmpty != false { valid = false }
+            default:
+                valid = false
+            }
+        }
+
+        guard staticCount == 1, sourceCount <= 1, credentialCount <= 1 else { return .rejected }
+        guard valid else { return .rejected }
+        return .replayable(itemId: itemId, mediaSourceId: mediaSourceId)
+    }
+
     static func restoreJellyfin(
         historyURL: String,
         configuredBaseURL: String,
         token: String,
         userId: String
     ) -> JellyfinHistoryMatch? {
-        guard !token.isEmpty, !userId.isEmpty,
+        guard case .replayable(let itemId, let mediaSourceId) = classifyLegacyJellyfinStream(historyURL),
+              !token.isEmpty, !userId.isEmpty,
               let history = parseHTTPURL(historyURL),
               let base = parseHTTPURL(configuredBaseURL),
               base.query == nil,
               sameOrigin(history, base),
-              let itemId = libraryItemID(history, relativeTo: base),
-              hasLibraryStreamQuery(history) else {
+              libraryItemID(history, relativeTo: base) == itemId else {
             return nil
         }
 
-        var playable = history
-        playable.queryItems = [URLQueryItem(name: "Static", value: "true"),
-                               URLQueryItem(name: "api_key", value: token)]
-        guard let playableURL = playable.url?.absoluteString else { return nil }
         return JellyfinHistoryMatch(
-            playableURL: playableURL,
             baseURL: configuredBaseURL,
             token: token,
             userId: userId,
-            itemId: itemId
+            itemId: itemId,
+            mediaSourceId: mediaSourceId
         )
-    }
-
-    /// A configured Jellyfin stream URL must not fall through to unauthenticated
-    /// generic playback when its credentials are unavailable.
-    static func isLibraryStreamURL(_ rawURL: String, configuredBaseURL: String) -> Bool {
-        guard let url = parseHTTPURL(rawURL),
-              let base = parseHTTPURL(configuredBaseURL),
-              base.query == nil,
-              sameOrigin(url, base),
-              libraryItemID(url, relativeTo: base) != nil else {
-            return false
-        }
-        return true
     }
 
     private static func parseHTTPURL(_ rawURL: String) -> URLComponents? {
@@ -96,10 +134,14 @@ enum HistoryPlaybackResolver {
         return itemId.isEmpty ? nil : itemId
     }
 
-    private static func hasLibraryStreamQuery(_ url: URLComponents) -> Bool {
-        guard let queryItems = url.queryItems, queryItems.count == 1,
-              let item = queryItems.first else { return false }
-        return item.name == "Static" && item.value == "true"
+    private static func streamItemID(_ url: URLComponents) -> String? {
+        guard let segments = pathSegments(url.percentEncodedPath), segments.count >= 3,
+              segments[segments.count - 3] == "Videos",
+              segments[segments.count - 1] == "stream" else {
+            return nil
+        }
+        let itemId = segments[segments.count - 2]
+        return itemId.isEmpty ? nil : itemId
     }
 
     private static func pathSegments(_ encodedPath: String) -> [String]? {
@@ -203,24 +245,30 @@ struct HistoryView: View {
     }
     private func open(_ entry: LinkHistoryEntry) {
         errorText = nil
-        let configuredBaseURL = settings.jellyfinServer()
-        if let jellyfin = HistoryPlaybackResolver.restoreJellyfin(
-            historyURL: entry.url,
-            configuredBaseURL: configuredBaseURL,
-            token: settings.jellyfinToken(),
-            userId: settings.jellyfinUserId()
-        ) {
-            _ = player.open(
-                url: jellyfin.playableURL,
-                title: entry.title ?? jellyfin.itemId
+        let classification = HistoryPlaybackResolver.classifyLegacyJellyfinStream(entry.url)
+        guard case .unrelated = classification else {
+            let jellyfin = HistoryPlaybackResolver.restoreJellyfin(
+                historyURL: entry.url,
+                configuredBaseURL: settings.jellyfinServer(),
+                token: settings.jellyfinToken(),
+                userId: settings.jellyfinUserId()
             )
-        } else if HistoryPlaybackResolver.isLibraryStreamURL(
-            entry.url,
-            configuredBaseURL: configuredBaseURL
-        ) {
-            errorText = "Unable to restore this Jellyfin link. Reconnect to the configured server in Sources."
-        } else {
-            _ = player.open(url: entry.url, title: entry.title)
+            guard let jellyfin else {
+                errorText = "Unable to restore this Jellyfin link. Reconnect to the configured server in Sources."
+                return
+            }
+
+            _ = player.openJellyfin(
+                title: entry.title ?? jellyfin.itemId,
+                subtitleTracks: [],
+                baseUrl: jellyfin.baseURL,
+                token: jellyfin.token,
+                userId: jellyfin.userId,
+                itemId: jellyfin.itemId,
+                mediaSourceId: jellyfin.mediaSourceId
+            )
+            return
         }
+        _ = player.open(url: entry.url, title: entry.title)
     }
 }

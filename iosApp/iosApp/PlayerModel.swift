@@ -117,17 +117,15 @@ final class PlayerModel: ObservableObject {
 
     @discardableResult
     func openJellyfin(
-        url: String,
         title: String,
         subtitleTracks: [SubtitleTrack],
         baseUrl: String,
         token: String,
         userId: String,
         itemId: String,
-        mediaSourceId: String
+        mediaSourceId: String?
     ) -> Bool {
         SwiftPlayer.shared.loadJellyfinItem(
-            url: url,
             title: title,
             subtitleTracks: subtitleTracks,
             baseUrl: baseUrl,

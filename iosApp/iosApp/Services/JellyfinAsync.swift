@@ -95,6 +95,8 @@ protocol JellyfinServing {
         limit: Int32
     ) async throws -> JellyfinItemPage
     func itemMediaSourcesAsync(base: String, token: String, userId: String, itemId: String) async throws -> [JellyfinMediaSource]
+    func resumeAsync(base: String, token: String, userId: String, limit: Int32) async throws -> JellyfinItemPage
+    func nextUpAsync(base: String, token: String, userId: String, limit: Int32) async throws -> JellyfinItemPage
 }
 
 @MainActor extension JellyfinClient: JellyfinServing {
@@ -138,6 +140,17 @@ protocol JellyfinServing {
         }
     }
 
+    func resumeAsync(base: String, token: String, userId: String, limit: Int32) async throws -> JellyfinItemPage {
+        try await JellyfinAsync.run {
+            self.resume(base: base, token: token, userId: userId, limit: limit, completionHandler: $0)
+        }
+    }
+
+    func nextUpAsync(base: String, token: String, userId: String, limit: Int32) async throws -> JellyfinItemPage {
+        try await JellyfinAsync.run {
+            self.nextUp(base: base, token: token, userId: userId, limit: limit, completionHandler: $0)
+        }
+    }
     func searchAsync(
         base: String,
         token: String,

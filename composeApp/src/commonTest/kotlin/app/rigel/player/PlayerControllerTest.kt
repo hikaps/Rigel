@@ -13,6 +13,9 @@ import app.rigel.cast.DlnaDevice
 import app.rigel.cast.RokuDevice
 
 import app.rigel.gateway.PlaybackRoute
+import app.rigel.output.OutputCapabilityResolver
+import app.rigel.output.OutputMediaProfile
+import app.rigel.output.OutputMediaProfiles
 import app.rigel.output.PlaybackDestination
 import app.rigel.output.OutputSelection
 import app.rigel.intake.IntakeRequest
@@ -21,6 +24,7 @@ import app.rigel.settings.LinkHistoryEntry
 import app.rigel.settings.RouteOverride
 import app.rigel.settings.SettingsStore
 import app.rigel.settings.JellyfinTokenStore
+import app.rigel.source.jellyfin.JellyfinApi
 import app.rigel.source.jellyfin.JellyfinClient
 import app.rigel.source.jellyfin.JellyfinSession
 import com.russhwolf.settings.MapSettings
@@ -62,6 +66,8 @@ class PlayerControllerTest {
     private var serverStopped = false
     private var lanBase: String? = null
     private val probeUrls = mutableListOf<String>()
+    private var deferProbe = false
+    private var pendingProbe: ((ProbeResult?, String?) -> Unit)? = null
     private val stoppedSessions = mutableListOf<String>()
     private val hlsModes = mutableListOf<String>()
     private val hlsPassthroughAudioCodecs = mutableListOf<List<String>>()
@@ -77,13 +83,14 @@ class PlayerControllerTest {
         settings: SettingsStore = SettingsStore(MapSettings(mutableMapOf())),
         jellyfin: JellyfinClient? = null,
         onSuccess: (String) -> Unit = {},
+        capabilityResolver: OutputCapabilityResolver = app.rigel.output.DefaultOutputCapabilityResolver,
     ): PlayerController {
         RigelBridgeFactory.register(
             discovery = null,
             probe = object : ProbeBridge {
                 override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
                     probeUrls += url
-                    onResult(probeResult, probeError)
+                    if (deferProbe) pendingProbe = onResult else onResult(probeResult, probeError)
                     return object : ProbeOperation {
                         override fun cancel() = Unit
                     }
@@ -128,7 +135,7 @@ class PlayerControllerTest {
                 override fun lanBaseUrl(): String? = lanBase
             },
         )
-        return PlayerController(settings, jellyfin = jellyfin, fireSuccess = onSuccess)
+        return PlayerController(settings, capabilityResolver = capabilityResolver, jellyfin = jellyfin, fireSuccess = onSuccess)
     }
 
     private val request = IntakeRequest(
@@ -164,6 +171,8 @@ class PlayerControllerTest {
         serverStopped = false
         lanBase = null
         probeUrls.clear()
+        deferProbe = false
+        pendingProbe = null
         stoppedSessions.clear()
         hlsModes.clear()
         hlsPassthroughAudioCodecs.clear()
@@ -173,6 +182,88 @@ class PlayerControllerTest {
         transcodeErrorCallback = null
         pendingReady = null
     }
+    private fun jellyfinSettings(base: String, token: String, userId: String): SettingsStore =
+        SettingsStore(MapSettings(mutableMapOf())).also {
+            it.setJellyfinServer(base)
+            it.setJellyfinToken(token)
+            it.setJellyfinUserId(userId)
+        }
+
+    private fun jellyfinPlaybackResponse(
+        sessionId: String,
+        sourceId: String,
+        url: String = "/Videos/item1/master.m3u8?PlaySessionId=$sessionId&MediaSourceId=$sourceId",
+        mediaStreams: String = "[]",
+    ): String = """{"PlaySessionId":"$sessionId","MediaSources":[{"Id":"$sourceId","SupportsDirectPlay":false,"SupportsDirectStream":false,"SupportsTranscoding":true,"TranscodingUrl":"$url","MediaStreams":$mediaStreams}]}"""
+
+    private fun jellyfinPlaybackClient(
+        sessionId: String = "play-session-1",
+        sourceId: String = "source-1",
+        url: String = "/Videos/item1/master.m3u8?PlaySessionId=$sessionId&MediaSourceId=$sourceId",
+        mediaStreams: String = "[]",
+        requests: MutableList<String>? = null,
+        playbackGate: CompletableDeferred<Unit>? = null,
+        playbackStatus: HttpStatusCode = HttpStatusCode.OK,
+    ): JellyfinClient = JellyfinClient(HttpClient(MockEngine) {
+        engine {
+            dispatcher = this@PlayerControllerTest.dispatcher
+            addHandler { request ->
+                requests?.add("${request.method.value} ${request.url}")
+                if (request.url.toString().contains("/PlaybackInfo")) {
+                    playbackGate?.await()
+                    val body = if (playbackStatus == HttpStatusCode.OK) {
+                        jellyfinPlaybackResponse(sessionId, sourceId, url, mediaStreams)
+                    } else {
+                        ""
+                    }
+                    respond(body, playbackStatus)
+                } else {
+                    respond("", HttpStatusCode.NoContent)
+                }
+            }
+        }
+    })
+
+    private fun jellyfinPlaybackClientForFreshDeliveries(requests: MutableList<String>): JellyfinClient {
+        var deliveryNumber = 0
+        return JellyfinClient(HttpClient(MockEngine) {
+            engine {
+                dispatcher = this@PlayerControllerTest.dispatcher
+                addHandler { request ->
+                    val requestUrl = request.url.toString()
+                    requests += "${request.method.value} $requestUrl"
+                    if (requestUrl.contains("/PlaybackInfo")) {
+                        deliveryNumber += 1
+                        val sessionId = "delivery-$deliveryNumber"
+                        val sourceId = "version-1"
+                        val streamUrl =
+                            "/Videos/item1/master.m3u8?PlaySessionId=$sessionId&MediaSourceId=$sourceId"
+                        respond(
+                            jellyfinPlaybackResponse(sessionId, sourceId, streamUrl),
+                            HttpStatusCode.OK,
+                        )
+                    } else {
+                        respond("", HttpStatusCode.NoContent)
+                    }
+                }
+            }
+        })
+    }
+
+    private fun jellyfinItemRequest(
+        base: String,
+        token: String,
+        userId: String,
+        itemId: String,
+        mediaSourceId: String? = null,
+    ): IntakeRequest = IntakeRequest(
+        sourceUrl = JellyfinApi.itemDetailsUrl(base, userId, itemId),
+        filename = null,
+        subtitleTracks = emptyList(),
+        successCallbackUrl = null,
+        title = "Fixture title",
+        jellyfinContext = JellyfinPlaybackContext(base, token, userId, itemId, mediaSourceId),
+    )
 
     @Test
     fun loadRawRejectsUnrecognizedUrl() {
@@ -879,7 +970,7 @@ class PlayerControllerTest {
                 }
             }
         })
-        val c = controller(jellyfin = client)
+        val c = controller(jellyfinSettings(jfBase, "tok", "u1"), client)
         fun jfRequest(itemId: String): IntakeRequest {
             val sourceId = "version-$itemId"
             return request.copy(
@@ -906,6 +997,102 @@ class PlayerControllerTest {
         advanceUntilIdle()
         assertEquals("$jfBase/Sessions/s2/Playing?playCommand=PlayNow&itemIds=i2&startPositionTicks=0&mediaSourceId=version-i2", requests.last())
     }
+
+    @Test
+    fun jellyfinSessionPlayDoesNotSendOldAccountAfterHeldStop() = runTest(dispatcher.scheduler) {
+        val jfBase = "http://jf:8096"
+        val oldToken = "old-token"
+        val replacementToken = "replacement-token"
+        val settings = jellyfinSettings(jfBase, oldToken, "u1")
+        val requests = mutableListOf<Pair<String, String?>>()
+        val stopGate = CompletableDeferred<Unit>()
+        val stopStarted = CompletableDeferred<Unit>()
+        val client = JellyfinClient(HttpClient(MockEngine) {
+            engine {
+                dispatcher = this@PlayerControllerTest.dispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    requests += url to request.headers["X-Emby-Token"]
+                    if (url.endsWith("/Sessions/session-1/Playing/Stop")) {
+                        stopStarted.complete(Unit)
+                        stopGate.await()
+                    }
+                    respond("", HttpStatusCode.NoContent)
+                }
+            }
+        })
+        val c = controller(settings, client)
+        val target = PlaybackDestination.Receiver(
+            CastTarget.JellyfinSessionTarget(JellyfinSession("session-1", "TV", "Jellyfin Web", jfBase)),
+        )
+
+        c.loadRequest(jellyfinItemRequest(jfBase, oldToken, "u1", "item-1"), target)
+        advanceUntilIdle()
+        assertTrue(c.uiState.value.remotePlayback)
+
+        c.loadRequest(jellyfinItemRequest(jfBase, oldToken, "u1", "item-2"), target)
+        advanceUntilIdle()
+        assertTrue(stopStarted.isCompleted)
+        settings.setJellyfinToken(replacementToken)
+        stopGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertTrue(requests.any { (url, token) ->
+            url.endsWith("/Sessions/session-1/Playing/Stop") && token == oldToken
+        })
+        assertFalse(requests.any { (url, _) ->
+            url.contains("/Sessions/session-1/Playing?") && url.contains("itemIds=item-2")
+        })
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertFalse(c.uiState.value.remotePlayback)
+        assertEquals(replacementToken, settings.jellyfinToken())
+    }
+
+    @Test
+    fun jellyfinSessionPlayStopsOldAccountAfterHeldPlayResponse() = runTest(dispatcher.scheduler) {
+        val jfBase = "http://jf:8096"
+        val oldToken = "old-token"
+        val replacementToken = "replacement-token"
+        val settings = jellyfinSettings(jfBase, oldToken, "u1")
+        val requests = mutableListOf<Pair<String, String?>>()
+        val playGate = CompletableDeferred<Unit>()
+        val playStarted = CompletableDeferred<Unit>()
+        val client = JellyfinClient(HttpClient(MockEngine) {
+            engine {
+                dispatcher = this@PlayerControllerTest.dispatcher
+                addHandler { request ->
+                    val url = request.url.toString()
+                    requests += url to request.headers["X-Emby-Token"]
+                    if (url.contains("/Sessions/session-1/Playing?")) {
+                        playStarted.complete(Unit)
+                        playGate.await()
+                    }
+                    respond("", HttpStatusCode.NoContent)
+                }
+            }
+        })
+        val c = controller(settings, client)
+        val target = PlaybackDestination.Receiver(
+            CastTarget.JellyfinSessionTarget(JellyfinSession("session-1", "TV", "Jellyfin Web", jfBase)),
+        )
+
+        c.loadRequest(jellyfinItemRequest(jfBase, oldToken, "u1", "item-1"), target)
+        advanceUntilIdle()
+        assertTrue(playStarted.isCompleted)
+        settings.setJellyfinToken(replacementToken)
+        playGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertTrue(requests.any { (url, token) ->
+            url.contains("/Sessions/session-1/Playing?") && url.contains("itemIds=item-1") && token == oldToken
+        })
+        assertTrue(requests.any { (url, token) ->
+            url.endsWith("/Sessions/session-1/Playing/Stop") && token == oldToken
+        })
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertFalse(c.uiState.value.remotePlayback)
+        assertEquals(replacementToken, settings.jellyfinToken())
+    }
     @Test
     fun cancelledJellyfinSessionPlayDoesNotBecomePlaybackFailure() = runTest(dispatcher.scheduler) {
         val jfBase = "http://jf:8096"
@@ -916,7 +1103,7 @@ class PlayerControllerTest {
                 addHandler { throw CancellationException("cancelled") }
             }
         })
-        val c = controller(jellyfin = client)
+        val c = controller(jellyfinSettings(jfBase, "tok", "u1"), client)
         val sourceId = "version-1"
         val jellyfinRequest = request.copy(
             sourceUrl = "$jfBase/Videos/item1/stream?Static=true&MediaSourceId=$sourceId&api_key=tok",
@@ -1061,39 +1248,530 @@ class PlayerControllerTest {
         assertEquals("You do not have permission to start this item on TV", c.uiState.value.error)
     }
     @Test
-    fun selectingJellyfinReceiverAfterStopDoesNotReuseStoppedItem() = runTest(dispatcher.scheduler) {
-        val jfBase = "http://jf:8096"
+    fun typedJellyfinItemNegotiatesHlsBeforeProbeAndStopsItsEncoding() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096/proxy"
+        val token = "secret-token"
+        val sourceId = "server-selected-version"
+        val playSessionId = "server-play-session"
+        val settings = jellyfinSettings(base, token, "u1")
+        val requests = mutableListOf<String>()
+        val subtitles = """[{"Type":"Subtitle","IsExternal":true,"Index":2,"Language":"eng","DisplayTitle":"English"}]"""
+        val client = jellyfinPlaybackClient(
+            sessionId = playSessionId,
+            sourceId = sourceId,
+            mediaStreams = subtitles,
+            requests = requests,
+        )
+        probeResult = ProbeResult("m3u8", "h264", listOf("aac"), emptyList(), 60_000, isLive = false, pixFmt = "yuv420p")
+        val c = controller(settings, client)
+
+        assertTrue(c.loadJellyfinItem("Negotiated title", emptyList(), base, token, "u1", "item1", null))
+        assertEquals(JellyfinApi.itemDetailsUrl(base, "u1", "item1"), c.uiState.value.sourceUrl)
+        assertTrue(probeUrls.isEmpty())
+        advanceUntilIdle()
+
+        val negotiatedUrl = probeUrls.single()
+        assertTrue(negotiatedUrl.contains("/Videos/item1/master.m3u8"), negotiatedUrl)
+        assertTrue(negotiatedUrl.contains("PlaySessionId=$playSessionId"), negotiatedUrl)
+        assertTrue(negotiatedUrl.contains("MediaSourceId=$sourceId"), negotiatedUrl)
+        assertTrue(negotiatedUrl.contains("api_key=$token"), negotiatedUrl)
+        assertEquals(negotiatedUrl, c.uiState.value.sourceUrl)
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals("English", c.uiState.value.subtitleTracks.single().title)
+        assertEquals(c.uiState.value.subtitleTracks.single().url, c.uiState.value.selectedExternalSubtitleUrl)
+
+        c.stopPlayback()
+        advanceUntilIdle()
+        assertTrue(requests.any { it.startsWith("DELETE ") && it.contains("PlaySessionId=$playSessionId") }, requests.toString())
+    }
+
+    @Test
+    fun compatibleDestinationMigrationReusesNegotiationAndJellyfinHandoffStopsItFirst() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        lanBase = "http://192.168.1.50:8090"
+        val token = "secret-token"
+        val sourceId = "selected-version"
+        val settings = jellyfinSettings(base, token, "u1")
+        val requests = mutableListOf<String>()
+        val c = controller(settings, jellyfinPlaybackClient("migration-play-session", sourceId, requests = requests))
+        c.loadRequest(jellyfinItemRequest(base, token, "u1", "item1"), PlaybackDestination.Local)
+        advanceUntilIdle()
+        val negotiatedUrl = c.uiState.value.sourceUrl
+        probeResult = null
+        probeError = "The owned delivery's cached probe should be reused"
+
+        c.selectAirPlay("airplay-1", "Living Room", 0)
+        advanceUntilIdle()
+        assertEquals(1, probeUrls.size)
+        assertEquals(negotiatedUrl, probeUrls.single())
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        assertEquals(1, requests.count { it.contains("/PlaybackInfo") })
+        assertTrue(requests.none { it.contains("/Videos/ActiveEncodings") })
+
+        val remote = CastTarget.JellyfinSessionTarget(JellyfinSession("remote-session", "TV", "Jellyfin Web", base))
+        c.selectReceiver(remote, 0)
+        advanceUntilIdle()
+
+        val encodingStop = requests.indexOfFirst { it.startsWith("DELETE ") && it.contains("/Videos/ActiveEncodings") }
+        val remotePlay = requests.indexOfFirst { it.contains("/Sessions/remote-session/Playing?") }
+        assertTrue(encodingStop >= 0 && remotePlay > encodingStop, requests.toString())
+        assertTrue(requests[remotePlay].contains("mediaSourceId=$sourceId"), requests[remotePlay])
+        assertEquals(1, requests.count { it.contains("/PlaybackInfo") })
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertTrue(c.uiState.value.remotePlayback)
+        c.stopPlayback()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun freshDeliveryAfterRemoteHandoffIsProbedInsteadOfUsingOldMetadata() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
         val token = "secret-token"
         val requests = mutableListOf<String>()
+        val c = controller(
+            jellyfinSettings(base, token, "u1"),
+            jellyfinPlaybackClientForFreshDeliveries(requests),
+        )
+        c.loadRequest(jellyfinItemRequest(base, token, "u1", "item1"), PlaybackDestination.Local)
+        advanceUntilIdle()
+        val firstDeliveryUrl = probeUrls.single()
+        assertTrue(firstDeliveryUrl.contains("PlaySessionId=delivery-1"), firstDeliveryUrl)
+
+        c.selectReceiver(
+            CastTarget.JellyfinSessionTarget(JellyfinSession("remote-session", "TV", "Jellyfin Web", base)),
+            positionMs = 0,
+        )
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertTrue(c.uiState.value.remotePlayback)
+        assertTrue(requests.any { it.contains("/Sessions/remote-session/Playing") }, requests.toString())
+
+        probeResult = null
+        probeError = "Fresh delivery probe failed"
+        c.selectLocal(positionMs = 0)
+        advanceUntilIdle()
+
+        assertEquals(2, requests.count { it.contains("/PlaybackInfo") }, requests.toString())
+        assertEquals(2, probeUrls.size)
+        assertTrue(probeUrls[1] != firstDeliveryUrl, "The new delivery must have its own stream URL: $probeUrls")
+        assertTrue(probeUrls[1].contains("PlaySessionId=delivery-2"), probeUrls[1])
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertTrue(
+            requests.any { it.startsWith("DELETE ") && it.contains("PlaySessionId=delivery-1") },
+            requests.toString(),
+        )
+        assertTrue(
+            requests.any { it.startsWith("DELETE ") && it.contains("PlaySessionId=delivery-2") },
+            requests.toString(),
+        )
+    }
+
+    @Test
+    fun stoppedDeliveryIsNegotiatedAndProbedAgainOnReload() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "secret-token"
+        val requests = mutableListOf<String>()
+        val c = controller(
+            jellyfinSettings(base, token, "u1"),
+            jellyfinPlaybackClientForFreshDeliveries(requests),
+        )
+        c.loadRequest(jellyfinItemRequest(base, token, "u1", "item1"), PlaybackDestination.Local)
+        advanceUntilIdle()
+        val firstDeliveryUrl = probeUrls.single()
+        assertTrue(firstDeliveryUrl.contains("PlaySessionId=delivery-1"), firstDeliveryUrl)
+
+        c.stopPlayback()
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.IDLE, c.uiState.value.phase)
+        assertTrue(
+            requests.any { it.startsWith("DELETE ") && it.contains("PlaySessionId=delivery-1") },
+            requests.toString(),
+        )
+
+        probeResult = null
+        probeError = "Fresh delivery probe failed"
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+
+        assertEquals(2, requests.count { it.contains("/PlaybackInfo") }, requests.toString())
+        assertEquals(2, probeUrls.size)
+        assertTrue(probeUrls[1] != firstDeliveryUrl, "The new delivery must have its own stream URL: $probeUrls")
+        assertTrue(probeUrls[1].contains("PlaySessionId=delivery-2"), probeUrls[1])
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertTrue(
+            requests.any { it.startsWith("DELETE ") && it.contains("PlaySessionId=delivery-2") },
+            requests.toString(),
+        )
+    }
+
+    @Test
+    fun changedAccountDoesNotCommitLateNegotiationAndDisposesItsSession() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "old-token"
+        val settings = jellyfinSettings(base, token, "u1")
+        val gate = CompletableDeferred<Unit>()
+        val requests = mutableListOf<String>()
+        val c = controller(settings, jellyfinPlaybackClient("late-session", "server-version", requests = requests, playbackGate = gate))
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+        assertTrue(probeUrls.isEmpty())
+
+        settings.setJellyfinToken("new-token")
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals("new-token", settings.jellyfinToken())
+        assertEquals(JellyfinApi.itemDetailsUrl(base, "u1", "item1"), c.uiState.value.sourceUrl)
+        assertTrue(probeUrls.isEmpty())
+        assertTrue(requests.any { it.startsWith("DELETE ") && it.contains("PlaySessionId=late-session") }, requests.toString())
+    }
+
+    @Test
+    fun stoppingDuringNegotiatedProbeDisposesEncodingAndIgnoresLateProbe() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "secret-token"
+        val settings = jellyfinSettings(base, token, "u1")
+        val requests = mutableListOf<String>()
+        val c = controller(settings, jellyfinPlaybackClient("probe-session", "version-1", requests = requests))
+        deferProbe = true
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+        val lateProbe = assertNotNull(pendingProbe)
+
+        c.stopPlayback()
+        advanceUntilIdle()
+        assertEquals(PlayerUiState(), c.uiState.value)
+        assertTrue(requests.any { it.startsWith("DELETE ") && it.contains("PlaySessionId=probe-session") }, requests.toString())
+
+        lateProbe(probeResult, probeError)
+        advanceUntilIdle()
+        assertEquals(PlayerUiState(), c.uiState.value)
+    }
+
+    @Test
+    fun jellyfinPlaybackApi401ExpiresOnlyMatchingAccountBeforeAnyProbe() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "expired-token"
+        val settings = jellyfinSettings(base, token, "u1")
+        val c = controller(settings, jellyfinPlaybackClient(playbackStatus = HttpStatusCode.Unauthorized))
+
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+
+        assertEquals("", settings.jellyfinToken())
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertEquals("Jellyfin session expired. Sign in again.", c.uiState.value.error)
+        assertTrue(probeUrls.isEmpty())
+    }
+
+    @Test
+    fun accountReplacementWhileNativeProbeIsSuspendedStopsOnlyOldDelivery() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "old-token"
+        val settings = jellyfinSettings(base, token, "u1")
+        val requests = mutableListOf<String>()
+        val c = controller(settings, jellyfinPlaybackClient("probe-session", "server-version", requests = requests))
+        deferProbe = true
+
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+        val suspendedProbe = assertNotNull(pendingProbe)
+
+        settings.setJellyfinToken("replacement-token")
+        suspendedProbe(probeResult, probeError)
+        advanceUntilIdle()
+
+        assertEquals("replacement-token", settings.jellyfinToken())
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertEquals(1, requests.count { it.contains("/PlaybackInfo") }, requests.toString())
+        assertEquals(
+            1,
+            requests.count { it.startsWith("DELETE ") && it.contains("/Videos/ActiveEncodings") },
+            requests.toString(),
+        )
+        assertTrue(
+            requests.any {
+                it.startsWith("DELETE ") &&
+                    it.contains("/Videos/ActiveEncodings") &&
+                    it.contains("PlaySessionId=probe-session")
+            },
+            requests.toString(),
+        )
+    }
+
+    @Test
+    fun accountReplacementWhileReceiverCapabilitiesAreSuspendedStopsOldDeliveryBeforeRouting() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "old-token"
+        val userId = "u1"
+        val replacementBase = "http://replacement-jf:8096"
+        val replacementToken = "replacement-token"
+        val replacementUserId = "u2"
+        val settings = jellyfinSettings(base, token, userId)
+        val requests = mutableListOf<String>()
+        val profileRequested = CompletableDeferred<Unit>()
+        val profileGate = CompletableDeferred<Unit>()
+        val resolver = object : OutputCapabilityResolver {
+            override suspend fun profileFor(target: CastTarget): OutputMediaProfile {
+                profileRequested.complete(Unit)
+                profileGate.await()
+                return OutputMediaProfiles.familyDefault(target)
+            }
+
+            override fun invalidate(target: CastTarget) = Unit
+        }
+        val castRequests = mutableListOf<String>()
+        val engineDispatcher = dispatcher
+        val castClient = HttpClient(MockEngine) {
+            engine {
+                dispatcher = engineDispatcher
+                addHandler { request ->
+                    castRequests += request.headers["SOAPACTION"] ?: request.url.toString()
+                    respond("<ok/>", HttpStatusCode.OK)
+                }
+            }
+        }
+        val target = CastTarget.Dlna(
+            DlnaDevice("usn-account-change", "http://192.168.1.9/desc.xml", "Living Room", "http://192.168.1.9/control"),
+        )
+        val c = controller(
+            settings,
+            jellyfinPlaybackClient("capability-session", "version-1", requests = requests),
+            capabilityResolver = resolver,
+        )
+        CastDispatcher.install(c, castClient)
+        try {
+            c.loadRequest(
+                jellyfinItemRequest(base, token, userId, "item1", mediaSourceId = "version-1"),
+                PlaybackDestination.Receiver(target),
+            )
+            advanceUntilIdle()
+            assertTrue(profileRequested.isCompleted)
+            assertEquals(1, requests.count { it.contains("/PlaybackInfo") }, requests.toString())
+            assertEquals(1, probeUrls.size, probeUrls.toString())
+            assertTrue(
+                probeUrls.single().contains(
+                    "/Videos/item1/master.m3u8?PlaySessionId=capability-session&MediaSourceId=version-1",
+                ),
+                probeUrls.single(),
+            )
+
+            settings.setJellyfinServer(replacementBase)
+            settings.setJellyfinToken(replacementToken)
+            settings.setJellyfinUserId(replacementUserId)
+            profileGate.complete(Unit)
+            advanceUntilIdle()
+
+            assertEquals(replacementBase, settings.jellyfinServer())
+            assertEquals(replacementToken, settings.jellyfinToken())
+            assertEquals(replacementUserId, settings.jellyfinUserId())
+            assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+            assertNull(c.uiState.value.route)
+            assertNull(c.uiState.value.proxyUrl)
+            assertFalse(c.uiState.value.remotePlayback)
+            assertFalse(c.uiState.value.castActive)
+            assertTrue(hlsModes.isEmpty(), "HLS sessions started: $hlsModes")
+            assertTrue(castRequests.isEmpty(), "Old library media was dispatched: $castRequests")
+            assertEquals(1, requests.count { it.contains("/PlaybackInfo") }, requests.toString())
+            assertEquals(
+                listOf("DELETE $base/Videos/ActiveEncodings?DeviceId=rigel-ios&PlaySessionId=capability-session"),
+                requests.filter { it.startsWith("DELETE ") && it.contains("/Videos/ActiveEncodings") },
+                requests.toString(),
+            )
+        } finally {
+            profileGate.complete(Unit)
+            CastDispatcher.clearActive()
+            CastDispatcher.install(null, null)
+        }
+    }
+
+    @Test
+    fun nativeJellyfinStream401DoesNotExpireAccount() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "valid-token"
+        val settings = jellyfinSettings(base, token, "u1")
+        val c = controller(settings, jellyfinPlaybackClient("native-stream-session", "version-1"))
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.reportError("HTTP 401 Unauthorized")
+        advanceUntilIdle()
+
+        assertEquals(token, settings.jellyfinToken())
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        c.stopPlayback()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun missingJellyfinClientFailsWithoutProbingItemIdentity() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "valid-token"
+        val c = controller(jellyfinSettings(base, token, "u1"))
+
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+
+        assertEquals("Jellyfin client is not configured", c.uiState.value.error)
+        assertTrue(probeUrls.isEmpty())
+        assertEquals(JellyfinApi.itemDetailsUrl(base, "u1", "item1"), c.uiState.value.sourceUrl)
+    }
+
+    @Test
+    fun failedNegotiatedProbeStopsEncodingWithoutClearingCredentials() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "valid-token"
+        val settings = jellyfinSettings(base, token, "u1")
+        val requests = mutableListOf<String>()
+        val c = controller(settings, jellyfinPlaybackClient("failed-probe-session", "version-1", requests = requests))
+        probeResult = null
+        probeError = "HTTP 401 Unauthorized"
+
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+
+        assertEquals(token, settings.jellyfinToken())
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertTrue(requests.any { it.startsWith("DELETE ") && it.contains("PlaySessionId=failed-probe-session") }, requests.toString())
+    }
+
+    @Test
+    fun negotiatedProxyStartupFailureReleasesProxyAndJellyfinSessions() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "valid-token"
+        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "ALWAYS_PROXY"))).also {
+            it.setJellyfinServer(base)
+            it.setJellyfinToken(token)
+            it.setJellyfinUserId("u1")
+        }
+        val requests = mutableListOf<String>()
+        val c = controller(settings, jellyfinPlaybackClient("proxy-session", "version-1", requests = requests))
+        serverPort = -1
+        serverError = "proxy listener failed"
+
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+
+        assertEquals(1, requests.count { it.contains("/PlaybackInfo") }, requests.toString())
+        assertEquals(1, probeUrls.size)
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertEquals("proxy listener failed", c.uiState.value.error)
+        assertTrue(serverStopped, "The failed local proxy listener must be stopped")
+        assertEquals(1, hlsSessionIds.size)
+        assertTrue(stoppedSessions.contains(hlsSessionIds.single()), stoppedSessions.toString())
+        assertTrue(
+            requests.any { it.startsWith("DELETE ") && it.contains("PlaySessionId=proxy-session") },
+            requests.toString(),
+        )
+        assertEquals(token, settings.jellyfinToken())
+    }
+
+    @Test
+    fun negotiatedEncodingStaysOwnedDuringFallbackAndStopsAfterTerminalFailure() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "valid-token"
+        val settings = jellyfinSettings(base, token, "u1")
+        val requests = mutableListOf<String>()
+        val c = controller(settings, jellyfinPlaybackClient("fallback-session", "version-1", requests = requests))
+        c.loadJellyfinItem("Fixture", emptyList(), base, token, "u1", "item1", null)
+        advanceUntilIdle()
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.reportError("native decoder failed")
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.TRANSCODE, c.uiState.value.route)
+        assertTrue(
+            requests.none { it.startsWith("DELETE ") && it.contains("PlaySessionId=fallback-session") },
+            requests.toString(),
+        )
+
+        c.reportError("fallback decoder failed")
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+        assertEquals("fallback decoder failed", c.uiState.value.error)
+        assertEquals(
+            1,
+            requests.count { it.startsWith("DELETE ") && it.contains("PlaySessionId=fallback-session") },
+            requests.toString(),
+        )
+        assertEquals(token, settings.jellyfinToken())
+    }
+
+    @Test
+    fun replacementNegotiationWaitsForPreviousEncodingStop() = runTest(dispatcher.scheduler) {
+        val base = "http://jf:8096"
+        val token = "secret-token"
+        val settings = jellyfinSettings(base, token, "u1")
+        val requests = mutableListOf<String>()
+        val stopGate = CompletableDeferred<Unit>()
+        var sessionNumber = 0
         val engineDispatcher = dispatcher
         val client = JellyfinClient(HttpClient(MockEngine) {
             engine {
                 dispatcher = engineDispatcher
                 addHandler { request ->
-                    requests += request.url.toString()
-                    respond("", HttpStatusCode.NoContent)
+                    val url = request.url.toString()
+                    requests += "${request.method.value} $url"
+                    when {
+                        url.contains("/PlaybackInfo") -> {
+                            sessionNumber += 1
+                            respond(jellyfinPlaybackResponse("replacement-$sessionNumber", "source-$sessionNumber"), HttpStatusCode.OK)
+                        }
+                        url.contains("/Videos/ActiveEncodings") -> {
+                            stopGate.await()
+                            respond("", HttpStatusCode.NoContent)
+                        }
+                        else -> respond("", HttpStatusCode.NoContent)
+                    }
                 }
             }
         })
-        val c = controller(jellyfin = client)
-        val sourceId = "version-1"
-        val jellyfinRequest = request.copy(
-            sourceUrl = "$jfBase/Videos/item1/stream?Static=true&MediaSourceId=$sourceId&api_key=$token",
-            jellyfinContext = JellyfinPlaybackContext(jfBase, token, "u1", "item1", sourceId),
-        )
-        c.loadRequest(jellyfinRequest, PlaybackDestination.Local)
+        val c = controller(settings, client)
+        c.loadRequest(jellyfinItemRequest(base, token, "u1", "item1"), PlaybackDestination.Local)
+        advanceUntilIdle()
+
+        c.loadRequest(jellyfinItemRequest(base, token, "u1", "item2"), PlaybackDestination.Local)
+        advanceUntilIdle()
+        assertTrue(requests.any { it.contains("/Videos/ActiveEncodings") })
+        assertTrue(requests.none { it.contains("/Items/item2/PlaybackInfo") }, requests.toString())
+
+        stopGate.complete(Unit)
+        advanceUntilIdle()
+        val stopIndex = requests.indexOfFirst { it.contains("/Videos/ActiveEncodings") }
+        val replacementIndex = requests.indexOfFirst { it.contains("/Items/item2/PlaybackInfo") }
+        assertTrue(replacementIndex > stopIndex, requests.toString())
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        c.stopPlayback()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun selectingJellyfinReceiverAfterStopDoesNotReuseStoppedItem() = runTest(dispatcher.scheduler) {
+        val jfBase = "http://jf:8096"
+        val token = "secret-token"
+        val requests = mutableListOf<String>()
+        val client = jellyfinPlaybackClient(sessionId = "local-play-session", sourceId = "version-1", requests = requests)
+        val c = controller(jellyfinSettings(jfBase, token, "u1"), client)
+        c.loadRequest(jellyfinItemRequest(jfBase, token, "u1", "item1", "version-1"), PlaybackDestination.Local)
         advanceUntilIdle()
         assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
 
         c.stopPlayback()
         advanceUntilIdle()
         assertEquals(PlayerPhase.IDLE, c.uiState.value.phase)
+        assertTrue(requests.any { it.contains("/Videos/ActiveEncodings") && it.contains("PlaySessionId=local-play-session") })
 
         val target = CastTarget.JellyfinSessionTarget(JellyfinSession("session-1", "TV", "Jellyfin Web", jfBase))
         c.selectReceiver(target, positionMs = 0)
         advanceUntilIdle()
 
-        assertTrue(requests.isEmpty(), "stopped Jellyfin media must not be resent: $requests")
+        assertTrue(requests.none { it.contains("/Sessions/session-1/Playing") }, "stopped Jellyfin media must not be resent: $requests")
         assertEquals(PlayerPhase.IDLE, c.uiState.value.phase)
     }
     @Test
@@ -1117,7 +1795,7 @@ class PlayerControllerTest {
                 }
             }
         })
-        val c = controller(jellyfin = client)
+        val c = controller(jellyfinSettings(jfBase, "tok", "u1"), client)
         fun jfRequest(itemId: String): IntakeRequest {
             val sourceId = "version-$itemId"
             return request.copy(
@@ -1246,7 +1924,7 @@ class PlayerControllerTest {
                 addHandler { castRequest ->
                     val url = castRequest.url.toString()
                     if (url.endsWith("/query/apps")) {
-                        respond("<apps><app id=\"15985\">Play on Roku</app></apps>", HttpStatusCode.OK)
+                        respond("""<apps><app id="15985">Play on Roku</app></apps>""", HttpStatusCode.OK)
                     } else {
                         posted += url
                         respond("", HttpStatusCode.OK)
@@ -1254,25 +1932,23 @@ class PlayerControllerTest {
                 }
             }
         }
-        val c = controller()
-        val target = CastTarget.Roku(RokuDevice("jellyfin-r1", "http://192.168.1.9:8060/", "Roku"))
         val base = "http://192.168.1.20:8096"
         val token = "secret-token"
+        val settings = jellyfinSettings(base, token, "user1")
+        val jellyfinClient = jellyfinPlaybackClient(sessionId = "cast-play-session", sourceId = "high")
+        val c = controller(settings, jellyfinClient)
+        val target = CastTarget.Roku(RokuDevice("jellyfin-r1", "http://192.168.1.9:8060/", "Roku"))
         val source = "$base/Videos/item1/stream?Static=true&MediaSourceId=high&api_key=$token"
-        val context = JellyfinPlaybackContext(base, token, "user1", "item1", "high")
-        val cases = listOf(
-            source to context,
-            source to null,
-            source.replace("api_key=", "api%5Fkey=") to null,
+        val requests = listOf(
+            jellyfinItemRequest(base, token, "user1", "item1", "high"),
+            request.copy(sourceUrl = source),
+            request.copy(sourceUrl = source.replace("api_key=", "api%5Fkey=")),
         )
         CastDispatcher.install(c, client)
         try {
-            for ((testSource, jellyfinContext) in cases) {
+            for (playRequest in requests) {
                 val postedBefore = posted.size
-                c.loadRequest(
-                    request.copy(sourceUrl = testSource, jellyfinContext = jellyfinContext),
-                    PlaybackDestination.Receiver(target),
-                )
+                c.loadRequest(playRequest, PlaybackDestination.Receiver(target))
                 advanceUntilIdle()
 
                 assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
@@ -1861,20 +2537,18 @@ class PlayerControllerTest {
 
     @Test
     fun JellyfinStreamCredentialsAreNotStoredInLinkHistory() = runTest(dispatcher.scheduler) {
-        val settings = SettingsStore(MapSettings(mutableMapOf()))
-        val controller = controller(settings)
         val base = "http://jf:8096"
         val token = "private-token"
-        val sourceId = "version-2"
-        val jellyfinRequest = request.copy(
-            sourceUrl = "$base/Videos/item1/stream?Static=true&MediaSourceId=$sourceId&api_key=$token",
-            jellyfinContext = JellyfinPlaybackContext(base, token, "user-1", "item1", sourceId),
-        )
+        val settings = jellyfinSettings(base, token, "user-1")
+        val controller = controller(settings, jellyfinPlaybackClient(sessionId = "history-session", sourceId = "version-2"))
 
-        controller.loadRequest(jellyfinRequest, PlaybackDestination.Local)
+        controller.loadRequest(jellyfinItemRequest(base, token, "user-1", "item1", "version-2"), PlaybackDestination.Local)
         advanceUntilIdle()
 
+        assertEquals(PlayerPhase.PLAYING, controller.uiState.value.phase)
         assertTrue(settings.linkHistory().isEmpty())
         assertFalse(settings.linkHistory().any { token in it.url })
+        controller.stopPlayback()
+        advanceUntilIdle()
     }
 }

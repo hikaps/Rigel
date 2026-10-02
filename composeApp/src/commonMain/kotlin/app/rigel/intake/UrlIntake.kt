@@ -21,7 +21,7 @@ data class JellyfinPlaybackContext(
     val token: String,
     val userId: String,
     val itemId: String,
-    val mediaSourceId: String,
+    val mediaSourceId: String?,
 )
 
 data class IntakeRequest(

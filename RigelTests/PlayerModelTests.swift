@@ -111,9 +111,9 @@ final class PlayerModelTests: XCTestCase {
         await fulfillment(of: [teardownDrained], timeout: 2)
         XCTAssertEqual(events, [.generationStarted(current), .changed(generation: current, buffering: true)])
     }
-    func testHistoryJellyfinRestorationRequiresExactOriginAndBasePath() {
-        let base = "https://media.example/jellyfin"
-        let history = "https://media.example/jellyfin/Videos/episode%2F1/stream?Static=true"
+    func testHistoryJellyfinRestorationRequiresExactOriginAndPrefixedBasePath() {
+        let base = "https://media.example/proxy/jellyfin"
+        let history = "https://media.example/proxy/jellyfin/Videos/episode%2F1/stream?Static=true&MediaSourceId=source%2F1"
 
         let match = HistoryPlaybackResolver.restoreJellyfin(
             historyURL: history,
@@ -123,45 +123,117 @@ final class PlayerModelTests: XCTestCase {
         )
         XCTAssertEqual(match?.itemId, "episode/1")
         XCTAssertEqual(match?.baseURL, base)
-        XCTAssertTrue(match?.playableURL.contains("api_key=current-token") == true)
-        XCTAssertFalse(match?.playableURL.contains("history-token") == true)
+        XCTAssertEqual(match?.mediaSourceId, "source/1")
+        XCTAssertEqual(
+            HistoryPlaybackResolver.classifyLegacyJellyfinStream(history),
+            .replayable(itemId: "episode/1", mediaSourceId: "source/1")
+        )
 
         XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
-            historyURL: "https://media.example.attacker/jellyfin/Videos/item/stream?Static=true",
+            historyURL: "https://media.example.attacker/proxy/jellyfin/Videos/item/stream?Static=true",
             configuredBaseURL: base,
             token: "current-token",
             userId: "user-1"
         ))
         XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
-            historyURL: "https://media.example/jellyfin-evasion/Videos/item/stream?Static=true",
+            historyURL: "https://media.example/proxy/jellyfin-evasion/Videos/item/stream?Static=true",
             configuredBaseURL: base,
+            token: "current-token",
+            userId: "user-1"
+        ))
+        XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
+            historyURL: history,
+            configuredBaseURL: "https://media.example/other-prefix/jellyfin",
             token: "current-token",
             userId: "user-1"
         ))
     }
 
-    func testHistoryJellyfinRestorationBlocksMissingCredentialsWithoutChangingGenericURLs() {
-        let base = "https://media.example/jellyfin"
-        let history = "https://media.example/jellyfin/Videos/item/stream?Static=true"
+    func testHistoryJellyfinRestorationAllowsLegacyCredentialAliasesButUsesCurrentToken() {
+        let base = "https://media.example/proxy/jellyfin"
+        for alias in ["api_key", "ApiKey"] {
+            let history = "\(base)/Videos/item/stream?Static=true&\(alias)=old-url-token"
+            let match = HistoryPlaybackResolver.restoreJellyfin(
+                historyURL: history,
+                configuredBaseURL: base,
+                token: "current-account-token",
+                userId: "user-1"
+            )
+            XCTAssertEqual(match?.token, "current-account-token")
+            XCTAssertNil(match?.mediaSourceId)
+        }
+    }
+
+    func testHistoryJellyfinRestorationBlocksLegacyURLsWithoutConfiguredAccountAndPreservesGenericURLs() {
+        let base = "https://media.example/proxy/jellyfin"
+        let history = "\(base)/Videos/item/stream?Static=true&api_key=old-url-token"
         XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
             historyURL: history,
             configuredBaseURL: base,
             token: "",
             userId: "user-1"
         ))
-        XCTAssertTrue(HistoryPlaybackResolver.isLibraryStreamURL(history, configuredBaseURL: base))
-        XCTAssertFalse(HistoryPlaybackResolver.isLibraryStreamURL(
-            history,
-            configuredBaseURL: "https://other.example/jellyfin"
+        XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
+            historyURL: history,
+            configuredBaseURL: base,
+            token: "current-token",
+            userId: ""
         ))
-        XCTAssertFalse(HistoryPlaybackResolver.isLibraryStreamURL(
-            "https://cdn.example/Videos/item/stream",
-            configuredBaseURL: base
+        XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
+            historyURL: history,
+            configuredBaseURL: "",
+            token: "current-token",
+            userId: "user-1"
         ))
-        XCTAssertFalse(HistoryPlaybackResolver.isLibraryStreamURL(
-            "https://media.example/media/movie.mp4",
-            configuredBaseURL: base
+        XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
+            historyURL: history,
+            configuredBaseURL: "https://other.example/proxy/jellyfin",
+            token: "current-token",
+            userId: "user-1"
         ))
+        XCTAssertEqual(
+            HistoryPlaybackResolver.classifyLegacyJellyfinStream(history),
+            .replayable(itemId: "item", mediaSourceId: nil)
+        )
+
+        XCTAssertEqual(
+            HistoryPlaybackResolver.classifyLegacyJellyfinStream("https://cdn.example/media/movie.mp4"),
+            .unrelated
+        )
+        XCTAssertEqual(
+            HistoryPlaybackResolver.classifyLegacyJellyfinStream("https://media.example/Videos/item/stream?quality=720p"),
+            .unrelated
+        )
+    }
+
+    func testHistoryJellyfinRestorationRejectsMalformedUnknownControlAndDuplicateQueries() {
+        let base = "https://media.example/proxy/jellyfin"
+        let invalidQueries = [
+            "Static=false",
+            "Static=true&MediaSourceId",
+            "Static=true&MediaSourceId=source%0Aline",
+            "Static=true&PlaySessionId=session-1",
+            "Static=true&Static=true",
+            "Static=true&static=true",
+            "Static=true&MediaSourceId=source-1&MediaSourceId=source-2",
+            "Static=true&api_key=old-token&ApiKey=another-token",
+            "Static=true&api_key=old-token&api_key=another-token"
+        ]
+
+        for query in invalidQueries {
+            let history = "\(base)/Videos/item/stream?\(query)"
+            XCTAssertEqual(
+                HistoryPlaybackResolver.classifyLegacyJellyfinStream(history),
+                .rejected,
+                "Expected rejection for query: \(query)"
+            )
+            XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
+                historyURL: history,
+                configuredBaseURL: base,
+                token: "current-token",
+                userId: "user-1"
+            ))
+        }
     }
     @MainActor
     func testPlayingStateMapsAndPresentsPlayer() {
