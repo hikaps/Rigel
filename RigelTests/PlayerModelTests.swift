@@ -206,6 +206,20 @@ final class PlayerModelTests: XCTestCase {
         )
     }
 
+    func testHistoryRejectsCredentialOnlyJellyfinStreamsWithoutConfiguredAccount() {
+        let base = "https://media.example/proxy/jellyfin"
+        for alias in ["api_key", "ApiKey", "API_KEY", "apikey"] {
+            let history = "\(base)/Videos/item/stream?\(alias)=old-url-token"
+            XCTAssertEqual(HistoryPlaybackResolver.classifyLegacyJellyfinStream(history), .rejected)
+            XCTAssertNil(HistoryPlaybackResolver.restoreJellyfin(
+                historyURL: history,
+                configuredBaseURL: base,
+                token: "",
+                userId: ""
+            ))
+        }
+    }
+
     func testHistoryJellyfinRestorationRejectsMalformedUnknownControlAndDuplicateQueries() {
         let base = "https://media.example/proxy/jellyfin"
         let invalidQueries = [

@@ -22,7 +22,7 @@ enum HistoryPlaybackResolver {
               let host = url.host, !host.isEmpty,
               let itemId = streamItemID(url),
               let queryItems = url.queryItems,
-              queryItems.contains(where: { ["static", "mediasourceid"].contains($0.name.lowercased()) }) else {
+              queryItems.contains(where: { ["static", "mediasourceid", "api_key", "apikey"].contains($0.name.lowercased()) }) else {
             return .unrelated
         }
 
