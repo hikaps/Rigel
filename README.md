@@ -21,9 +21,11 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 ## Sources
 
-- **Jellyfin** — connect to your server, browse and search the library, play on this device, or push a library item to a logged-in client session. The access token is stored in the iOS Keychain. Failed credential removal preserves the account and selected destination and reports a secure-storage error.
-- Switching Jellyfin accounts resets cached pages and folder navigation before browsing or searching resumes, and discards in-flight responses and version lookups from the previous account without leaving playback stuck busy.
-- Search and library browsing can continue past pages with no usable entries when more records remain, preserving known result totals when later pages omit them.
+- **Jellyfin** — connect to your server to see separate Continue Watching and Next Up feeds, or search and filter the library, browse search-result folders, and play here or push to a logged-in client session. A version picker appears only when an item has multiple media sources. Playback negotiates the chosen source through Jellyfin PlaybackInfo, honoring the server's direct-play/transcoding support and carrying its play session and subtitle tracks through to native playback. The access token is stored in the iOS Keychain; failed credential removal preserves the account and selected destination and reports a secure-storage error.
+- Each home feed loads, reports errors, and retries independently. Switching Jellyfin accounts resets feed and folder state and discards in-flight responses and version lookups from the previous account.
+- Search results and folders opened from search retain paging, including pages with no usable entries while more records remain and known totals when later pages omit them.
+- Jellyfin history links are restored with the current account. Unsupported credential-only stream links are blocked instead of replaying an embedded token through generic playback.
+- Cancelling a Jellyfin version choice returns to browsing without starting playback.
 
 ## Integrations
 

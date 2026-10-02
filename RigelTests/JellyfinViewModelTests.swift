@@ -33,12 +33,28 @@ private final class ControlledJellyfin: JellyfinServing {
         let limit: Int32
     }
 
+    struct FeedRequest {
+        let base: String
+        let token: String
+        let userId: String
+        let limit: Int32
+    }
+
     private(set) var searchRequests: [SearchRequest] = []
     private(set) var browseRequests: [(parentId: String?, startIndex: Int32, order: JellyfinBrowseOrder)] = []
     var browsePages: [String: JellyfinItemPage] = [:]
     var browseError: Error?
     var deferBrowse = false
     private var pendingBrowses: [Int: CheckedContinuation<JellyfinItemPage, Error>] = [:]
+    private(set) var resumeRequests: [FeedRequest] = []
+    private(set) var nextUpRequests: [FeedRequest] = []
+    var deferHomeFeeds = false
+    var resumePage: JellyfinItemPage?
+    var nextUpPage: JellyfinItemPage?
+    var resumeError: Error?
+    var nextUpError: Error?
+    private var pendingResume: [Int: CheckedContinuation<JellyfinItemPage, Error>] = [:]
+    private var pendingNextUp: [Int: CheckedContinuation<JellyfinItemPage, Error>] = [:]
     private var pendingSearches: [Int: CheckedContinuation<JellyfinItemPage, Error>] = [:]
     private(set) var mediaSourceRequests: [String] = []
     private var pendingMediaSources: [String: CheckedContinuation<[JellyfinMediaSource], Error>] = [:]
@@ -78,6 +94,26 @@ private final class ControlledJellyfin: JellyfinServing {
         )
     }
 
+    func resumeAsync(base: String, token: String, userId: String, limit: Int32) async throws -> JellyfinItemPage {
+        let requestId = resumeRequests.count
+        resumeRequests.append(FeedRequest(base: base, token: token, userId: userId, limit: limit))
+        if deferHomeFeeds {
+            return try await withCheckedThrowingContinuation { pendingResume[requestId] = $0 }
+        }
+        if let resumeError { throw resumeError }
+        return resumePage ?? JellyfinItemPage(items: [], totalRecordCount: nil, startIndex: 0, receivedCount: 0)
+    }
+
+    func nextUpAsync(base: String, token: String, userId: String, limit: Int32) async throws -> JellyfinItemPage {
+        let requestId = nextUpRequests.count
+        nextUpRequests.append(FeedRequest(base: base, token: token, userId: userId, limit: limit))
+        if deferHomeFeeds {
+            return try await withCheckedThrowingContinuation { pendingNextUp[requestId] = $0 }
+        }
+        if let nextUpError { throw nextUpError }
+        return nextUpPage ?? JellyfinItemPage(items: [], totalRecordCount: nil, startIndex: 0, receivedCount: 0)
+    }
+
     func searchAsync(
         base: String,
         token: String,
@@ -113,6 +149,14 @@ private final class ControlledJellyfin: JellyfinServing {
         pendingMediaSources.removeValue(forKey: itemId)?.resume(returning: sources)
     }
 
+    func resolveResume(requestId: Int, result: Result<JellyfinItemPage, Error>) {
+        pendingResume.removeValue(forKey: requestId)?.resume(with: result)
+    }
+
+    func resolveNextUp(requestId: Int, result: Result<JellyfinItemPage, Error>) {
+        pendingNextUp.removeValue(forKey: requestId)?.resume(with: result)
+    }
+
     func resolveBrowse(requestId: Int, result: Result<JellyfinItemPage, Error>) {
         pendingBrowses.removeValue(forKey: requestId)?.resume(with: result)
     }
@@ -142,6 +186,14 @@ private final class ControlledJellyfin: JellyfinServing {
             continuation.resume(throwing: CancellationError())
         }
         pendingBrowses.removeAll()
+        for continuation in pendingResume.values {
+            continuation.resume(throwing: CancellationError())
+        }
+        pendingResume.removeAll()
+        for continuation in pendingNextUp.values {
+            continuation.resume(throwing: CancellationError())
+        }
+        pendingNextUp.removeAll()
         for continuation in pendingSearches.values {
             continuation.resume(throwing: CancellationError())
         }
@@ -264,8 +316,54 @@ final class JellyfinViewModelTests: XCTestCase {
         }
     }
 
+    func testHomeFeedsLoadIndependentlyRetryAndRefreshTogether() async {
+        let service = ControlledJellyfin()
+        service.deferHomeFeeds = true
+        let (model, settings, saved, destination) = connectedModel(service)
+        defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
+
+        model.loadHomeIfNeeded()
+        await waitUntil { service.resumeRequests.count == 1 && service.nextUpRequests.count == 1 }
+        XCTAssertTrue(model.continueWatchingBusy)
+        XCTAssertTrue(model.nextUpBusy)
+
+        service.resolveNextUp(
+            requestId: 0,
+            result: .failure(JellyfinInterop.shared.makeRequestException(statusCode: 403).asError())
+        )
+        await waitUntil { !model.nextUpBusy }
+        XCTAssertTrue(model.continueWatchingBusy)
+        XCTAssertTrue(model.continueWatchingItems.isEmpty)
+        XCTAssertNotNil(model.nextUpError)
+
+        service.resolveResume(requestId: 0, result: .success(page([item("resume", "Resume")], total: 1, start: 0, received: 1)))
+        await waitUntil { !model.continueWatchingBusy }
+        XCTAssertEqual(model.continueWatchingItems.map(\.id), ["resume"])
+        XCTAssertNil(model.continueWatchingError)
+
+        model.retryNextUp()
+        await waitUntil { service.nextUpRequests.count == 2 }
+        service.resolveNextUp(requestId: 1, result: .success(page([item("next", "Next")], total: 1, start: 0, received: 1)))
+        await waitUntil { !model.nextUpBusy }
+        XCTAssertEqual(model.nextUpItems.map(\.id), ["next"])
+        XCTAssertNil(model.nextUpError)
+
+        model.refreshHome()
+        await waitUntil { service.resumeRequests.count == 2 && service.nextUpRequests.count == 3 }
+        XCTAssertTrue(model.continueWatchingBusy)
+        XCTAssertTrue(model.nextUpBusy)
+        service.resolveResume(requestId: 1, result: .success(page([], total: 0, start: 0, received: 0)))
+        service.resolveNextUp(requestId: 2, result: .success(page([item("next-new", "Next new")], total: 1, start: 0, received: 1)))
+        await waitUntil { !model.continueWatchingBusy && !model.nextUpBusy }
+        XCTAssertTrue(model.continueWatchingItems.isEmpty)
+        XCTAssertTrue(model.continueWatchingLoadedOnce)
+        XCTAssertNil(model.continueWatchingError)
+        XCTAssertEqual(model.nextUpItems.map(\.id), ["next-new"])
+    }
+
     func testDisconnectResetsActivityFlagsWhileRequestsAreInFlight() async {
         let service = ControlledJellyfin()
+        service.deferHomeFeeds = true
         let (model, settings, saved, destination) = connectedModel(service)
         defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
 
@@ -273,6 +371,8 @@ final class JellyfinViewModelTests: XCTestCase {
         model.username = "new-user"
         model.connect()
         await service.waitForAuthentication(base: "https://pending.example")
+        model.loadHomeIfNeeded()
+        await waitUntil { service.resumeRequests.count == 1 && service.nextUpRequests.count == 1 }
 
         model.searchText = "star"
         await waitUntil { service.searchRequests.count == 1 }
@@ -281,6 +381,8 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertTrue(model.connectBusy)
         XCTAssertTrue(model.busy)
         XCTAssertTrue(model.searchBusy)
+        XCTAssertTrue(model.continueWatchingBusy)
+        XCTAssertTrue(model.nextUpBusy)
 
         model.disconnect()
 
@@ -288,6 +390,8 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertFalse(model.connectBusy)
         XCTAssertFalse(model.searchBusy)
         XCTAssertFalse(model.searchMoreBusy)
+        XCTAssertFalse(model.continueWatchingBusy)
+        XCTAssertFalse(model.nextUpBusy)
         XCTAssertFalse(model.playbackBusy)
         service.cancelPending()
     }
@@ -518,36 +622,41 @@ final class JellyfinViewModelTests: XCTestCase {
         }
     }
 
-    func testBrowseContinuesPastEmptyIntermediatePagesAndStopsNonProgress() async {
+    func testSearchFolderBrowseContinuesPastEmptyIntermediatePagesAndStopsNonProgress() async {
         for duplicate in [false, true] {
             let service = ControlledJellyfin()
             service.deferBrowse = true
             let (model, settings, saved, destination) = connectedModel(service)
             defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
-            model.loadLibraryIfNeeded()
+            let folder = item("browse-folder", "Browse", folder: true, type: "Folder")
+            model.searchText = "browse"
+            await waitUntil { service.searchRequests.count == 1 }
+            service.resolveSearch(term: "browse", startIndex: 0, page: page([folder], total: 1, start: 0, received: 1))
+            await waitUntil { !model.searchBusy }
+            model.openFolder(folder)
             await waitUntil { service.browseRequests.count == 1 }
             service.resolveBrowse(requestId: 0, result: .success(page([item("first", "First")], total: 151, start: 0, received: 50)))
             await waitUntil { !model.browseBusy }
-            model.loadMoreLibrary()
+            model.loadMoreBrowse()
             await waitUntil { service.browseRequests.count == 2 }
             service.resolveBrowse(requestId: 1, result: .success(page([], total: 151, start: 50, received: 50)))
             await waitUntil { !model.browseMoreBusy }
-            XCTAssertTrue(model.canLoadMoreLibrary)
+            XCTAssertTrue(model.canLoadMoreBrowse)
             XCTAssertFalse(model.browseStalled)
-            XCTAssertEqual(model.libraryItems.map(\.id), ["first"])
-            model.loadMoreLibrary()
+            XCTAssertEqual(model.browseItems.map(\.id), ["first"])
+            model.loadMoreBrowse()
             await waitUntil { service.browseRequests.count == 3 }
             XCTAssertEqual(service.browseRequests.last?.startIndex, 100)
             service.resolveBrowse(requestId: 2, result: .success(page([item("later", "Later")], total: 151, start: 100, received: 1)))
             await waitUntil { !model.browseMoreBusy }
-            XCTAssertEqual(model.libraryItems.map(\.id), ["first", "later"])
-            model.loadMoreLibrary()
+            XCTAssertEqual(model.browseItems.map(\.id), ["first", "later"])
+            model.loadMoreBrowse()
             await waitUntil { service.browseRequests.count == 4 }
             service.resolveBrowse(requestId: 3, result: .success(page(duplicate ? [item("later", "Repeated")] : [], total: 151, start: 101, received: duplicate ? 50 : 0)))
             await waitUntil { !model.browseMoreBusy }
             XCTAssertTrue(model.browseStalled)
-            XCTAssertFalse(model.canLoadMoreLibrary)
-            XCTAssertEqual(model.libraryItems.map(\.id), ["first", "later"])
+            XCTAssertFalse(model.canLoadMoreBrowse)
+            XCTAssertEqual(model.browseItems.map(\.id), ["first", "later"])
         }
     }
 
@@ -582,36 +691,39 @@ final class JellyfinViewModelTests: XCTestCase {
         }
     }
 
-    func testBrowsePaginationRestartsAtRootForReplacementAccount() async {
-        for pendingMore in [false, true] {
+    func testHomeFeedsDiscardReplacedAccountResponsesAndReload() async {
+        for unauthorized in [false, true] {
             let service = ControlledJellyfin()
-            service.deferBrowse = true
+            service.deferHomeFeeds = true
             let (model, settings, saved, destination) = connectedModel(service)
             defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
-            model.openFolder(item("old-series", "Old series", folder: true, type: "Series"))
-            await waitUntil { service.browseRequests.count == 1 }
-            service.resolveBrowse(requestId: 0, result: .success(page([item("old", "Old episode")], total: 100, start: 0, received: 50)))
-            await waitUntil { !model.browseBusy }
-            if pendingMore {
-                model.loadMoreLibrary()
-                await waitUntil { service.browseRequests.count == 2 }
-            }
-            settings.setJellyfinServer(v: "http://replacement.invalid")
-            if pendingMore {
-                service.resolveBrowse(requestId: 1, result: .success(page([item("stale", "Stale episode")], total: 100, start: 50, received: 50)))
-                await waitUntil { !model.browseMoreBusy }
-            }
-            model.loadMoreLibrary()
-            let requestCount = pendingMore ? 3 : 2
-            await waitUntil { service.browseRequests.count == requestCount }
-            XCTAssertEqual(service.browseRequests.last?.startIndex, 0)
-            XCTAssertNil(service.browseRequests.last?.parentId)
-            XCTAssertTrue(model.libraryPath.isEmpty)
-            XCTAssertTrue(model.libraryItems.isEmpty)
-            service.resolveBrowse(requestId: requestCount - 1, result: .success(page([item("new", "New library")], total: 1, start: 0, received: 1)))
-            await waitUntil { !model.browseBusy && !model.browseMoreBusy }
-            XCTAssertEqual(model.libraryItems.map(\.id), ["new"])
-            XCTAssertFalse(model.canLoadMoreLibrary)
+
+            model.loadHomeIfNeeded()
+            await waitUntil { service.resumeRequests.count == 1 && service.nextUpRequests.count == 1 }
+            settings.setJellyfinToken(v: "replacement-token")
+            let oldResume: Result<JellyfinItemPage, Error> = unauthorized
+                ? .failure(JellyfinInterop.shared.makeRequestException(statusCode: 401).asError())
+                : .success(page([item("old-resume", "Old account")], total: 1, start: 0, received: 1))
+            service.resolveResume(requestId: 0, result: oldResume)
+            service.resolveNextUp(requestId: 0, result: .success(page([item("old-next", "Old account")], total: 1, start: 0, received: 1)))
+            await waitUntil { !model.continueWatchingBusy && !model.nextUpBusy }
+
+            XCTAssertTrue(model.continueWatchingItems.isEmpty)
+            XCTAssertTrue(model.nextUpItems.isEmpty)
+            XCTAssertFalse(model.continueWatchingLoadedOnce)
+            XCTAssertFalse(model.nextUpLoadedOnce)
+            XCTAssertNil(model.continueWatchingError)
+            XCTAssertNil(model.nextUpError)
+            XCTAssertNil(model.notice)
+            XCTAssertEqual(settings.jellyfinToken(), "replacement-token")
+
+            model.loadHomeIfNeeded()
+            await waitUntil { service.resumeRequests.count == 2 && service.nextUpRequests.count == 2 }
+            service.resolveResume(requestId: 1, result: .success(page([item("new-resume", "Current account")], total: 1, start: 0, received: 1)))
+            service.resolveNextUp(requestId: 1, result: .success(page([item("new-next", "Current account")], total: 1, start: 0, received: 1)))
+            await waitUntil { !model.continueWatchingBusy && !model.nextUpBusy }
+            XCTAssertEqual(model.continueWatchingItems.map(\.id), ["new-resume"])
+            XCTAssertEqual(model.nextUpItems.map(\.id), ["new-next"])
         }
     }
 
@@ -640,31 +752,33 @@ final class JellyfinViewModelTests: XCTestCase {
 
         XCTAssertEqual(model.searchResults.map(\.id), ["fresh"])
     }
-    func testNestedLibraryBackNavigationReloadsTheParentFolder() async {
+    func testNestedSearchFolderBackNavigationReloadsParentFolder() async {
         let service = ControlledJellyfin()
         let series = item("series", "Series", folder: true, type: "Series")
         let season = item("season", "Season 1", folder: true, type: "Season")
         let episode = item("episode", "Pilot", type: "Episode")
-        service.browsePages["<root>"] = page([series], total: 1, start: 0, received: 1)
         service.browsePages["series"] = page([season], total: 1, start: 0, received: 1)
         service.browsePages["season"] = page([episode], total: 1, start: 0, received: 1)
         let (model, settings, saved, destination) = connectedModel(service)
         defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
 
-        model.loadLibraryIfNeeded()
-        await waitUntil { model.libraryItems.map(\.id) == ["series"] }
+        model.searchText = "show"
+        await waitUntil { service.searchRequests.count == 1 }
+        service.resolveSearch(term: "show", startIndex: 0, page: page([series], total: 1, start: 0, received: 1))
+        await waitUntil { !model.searchBusy }
         model.openFolder(series)
-        await waitUntil { model.libraryItems.map(\.id) == ["season"] }
+        await waitUntil { model.browseItems.map(\.id) == ["season"] }
         model.openFolder(season)
-        await waitUntil { model.libraryItems.map(\.id) == ["episode"] }
+        await waitUntil { model.browseItems.map(\.id) == ["episode"] }
         model.goBack()
-        await waitUntil { model.libraryItems.map(\.id) == ["season"] }
+        await waitUntil { model.browseItems.map(\.id) == ["season"] }
         model.goBack()
-        await waitUntil { model.libraryItems.map(\.id) == ["series"] }
 
-        XCTAssertEqual(service.browseRequests.map(\.parentId), [nil, "series", "season", "series", nil])
+        XCTAssertTrue(model.searchPath.isEmpty)
+        XCTAssertEqual(model.currentItems.map(\.id), ["series"])
+        XCTAssertEqual(service.browseRequests.map(\.parentId), ["series", "season", "series"])
+        XCTAssertEqual(service.browseRequests[0].order, .episode)
         XCTAssertEqual(service.browseRequests[1].order, .episode)
-        XCTAssertEqual(service.browseRequests[2].order, .episode)
     }
 
     func testDisconnectDuringAuthenticationCannotRestoreExpiredSession() async {
@@ -832,7 +946,7 @@ final class JellyfinViewModelTests: XCTestCase {
         XCTAssertNil(model.playbackError)
     }
 
-    func testLeavingFolderCancelsPendingVersionLookup() async {
+    func testLeavingSearchFolderCancelsPendingVersionLookup() async {
         let service = ControlledJellyfin()
         let folder = item("folder", "Folder", folder: true, type: "Folder")
         service.browsePages["folder"] = page([], total: 0, start: 0, received: 0)
@@ -840,13 +954,18 @@ final class JellyfinViewModelTests: XCTestCase {
         defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
         var opened = false
 
+        model.searchText = "folder"
+        await waitUntil { service.searchRequests.count == 1 }
+        service.resolveSearch(term: "folder", startIndex: 0, page: page([folder], total: 1, start: 0, received: 1))
+        await waitUntil { !model.searchBusy }
         model.openFolder(folder)
+        await waitUntil { model.browseLoadedOnce }
         model.play(item("movie", "Film")) { _ in
             opened = true
             return true
         }
         await waitUntil { service.mediaSourceRequests == ["movie"] }
-        model.backToRoot()
+        model.backToSearchResults()
         service.resolveMediaSources(itemId: "movie", sources: [mediaSource("late", name: "Late")])
         for _ in 0..<10 { await Task.yield() }
 
@@ -929,20 +1048,24 @@ final class JellyfinViewModelTests: XCTestCase {
 
     func testCancelledRequestsCannotClearReplacementOperationBusyState() async {
         let service = ControlledJellyfin()
-        service.deferBrowse = true
+        service.deferHomeFeeds = true
         let (model, settings, saved, destination) = connectedModel(service)
         defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
 
-        model.loadLibraryIfNeeded()
-        await waitUntil { service.browseRequests.count == 1 }
-        model.refreshLibrary()
-        await waitUntil { service.browseRequests.count == 2 }
-        service.resolveBrowse(requestId: 0, result: .failure(CancellationError()))
+        model.loadHomeIfNeeded()
+        await waitUntil { service.resumeRequests.count == 1 && service.nextUpRequests.count == 1 }
+        model.refreshHome()
+        await waitUntil { service.resumeRequests.count == 2 && service.nextUpRequests.count == 2 }
+        service.resolveResume(requestId: 0, result: .failure(CancellationError()))
+        service.resolveNextUp(requestId: 0, result: .failure(CancellationError()))
         for _ in 0..<10 { await Task.yield() }
-        XCTAssertTrue(model.browseBusy)
-        service.resolveBrowse(requestId: 1, result: .success(page([item("current", "Current library")], total: 1, start: 0, received: 1)))
-        await waitUntil { !model.browseBusy }
-        XCTAssertEqual(model.libraryItems.map(\.id), ["current"])
+        XCTAssertTrue(model.continueWatchingBusy)
+        XCTAssertTrue(model.nextUpBusy)
+        service.resolveResume(requestId: 1, result: .success(page([item("current-resume", "Current")], total: 1, start: 0, received: 1)))
+        service.resolveNextUp(requestId: 1, result: .success(page([item("current-next", "Current")], total: 1, start: 0, received: 1)))
+        await waitUntil { !model.continueWatchingBusy && !model.nextUpBusy }
+        XCTAssertEqual(model.continueWatchingItems.map(\.id), ["current-resume"])
+        XCTAssertEqual(model.nextUpItems.map(\.id), ["current-next"])
 
         model.searchText = "older"
         await waitUntil { service.searchRequests.count == 1 }
@@ -986,47 +1109,21 @@ final class JellyfinViewModelTests: XCTestCase {
         }
     }
 
-    func testReplacedAccountBrowseDiscardsSuccessAndFailureAndAllowsRetry() async {
-        for succeeds in [true, false] {
-            let service = ControlledJellyfin()
-            service.deferBrowse = true
-            let (model, settings, saved, destination) = connectedModel(service)
-            defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
-            model.loadLibraryIfNeeded()
-            await waitUntil { service.browseRequests.count == 1 }
-            XCTAssertTrue(model.browseBusy)
-            settings.setJellyfinUserId(v: "replacement-user")
-            let result: Result<JellyfinItemPage, Error> = succeeds
-                ? .success(page([item("old", "Old account")], total: 1, start: 0, received: 1))
-                : .failure(JellyfinInterop.shared.makeRequestException(statusCode: 401).asError())
-            service.resolveBrowse(requestId: 0, result: result)
-            await waitUntil { !model.browseBusy }
-            XCTAssertTrue(model.libraryItems.isEmpty)
-            XCTAssertFalse(model.loadedOnce)
-            XCTAssertFalse(model.browseBusy)
-            XCTAssertFalse(model.browseMoreBusy)
-            XCTAssertNil(model.libraryError)
-            XCTAssertNil(model.notice)
-            XCTAssertEqual(settings.jellyfinToken(), "test-token")
-            model.loadLibraryIfNeeded()
-            await waitUntil { service.browseRequests.count == 2 }
-            XCTAssertEqual(service.browseRequests.count, 2)
-            service.resolveBrowse(requestId: 1, result: .success(page([item("new", "Current account")], total: 1, start: 0, received: 1)))
-            await waitUntil { !model.browseBusy }
-            XCTAssertEqual(model.libraryItems.map(\.id), ["new"])
-        }
-    }
-
-    func testKotlinCancellationDuringBrowseClearsBusyWithoutError() async {
+    func testKotlinCancellationDuringSearchFolderBrowseClearsBusyWithoutError() async {
         let service = ControlledJellyfin()
         service.browseError = JellyfinInterop.shared.makeCancellationThrowable().asError()
+        let folder = item("folder", "Folder", folder: true, type: "Folder")
         let (model, settings, saved, destination) = connectedModel(service)
         defer { restore(model: model, service: service, settings: settings, saved: saved, destination: destination) }
 
-        model.loadLibraryIfNeeded()
+        model.searchText = "folder"
+        await waitUntil { service.searchRequests.count == 1 }
+        service.resolveSearch(term: "folder", startIndex: 0, page: page([folder], total: 1, start: 0, received: 1))
+        await waitUntil { !model.searchBusy }
+        model.openFolder(folder)
         await waitUntil { service.browseRequests.count == 1 && !model.browseBusy }
 
-        XCTAssertNil(model.libraryError)
+        XCTAssertNil(model.browseError)
         XCTAssertFalse(model.browseBusy)
     }
 

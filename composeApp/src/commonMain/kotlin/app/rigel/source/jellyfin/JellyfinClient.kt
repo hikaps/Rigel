@@ -1,17 +1,21 @@
 package app.rigel.source.jellyfin
 
 import app.rigel.bridge.SubtitleTrack
+import app.rigel.output.OutputMediaProfiles
 
 import io.ktor.client.HttpClient
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.URLBuilder
 import io.ktor.http.Url
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
+import io.ktor.http.takeFrom
 import kotlinx.coroutines.CancellationException
 
 data class JellyfinItem(
@@ -53,6 +57,13 @@ data class JellyfinMediaSource(
     val subtitleTracks: List<SubtitleTrack>,
 )
 
+data class JellyfinPlayback(
+    val url: String,
+    val mediaSourceId: String,
+    val subtitleTracks: List<SubtitleTrack>,
+    val playSessionId: String?,
+)
+
 data class JellyfinSession(
     val id: String,
     val deviceName: String,
@@ -70,6 +81,37 @@ private data class JellyfinSubtitleCandidate(
     val index: Int,
     val language: String?,
     val title: String?,
+)
+
+private fun subtitleCandidate(fields: Map<String, String>): JellyfinSubtitleCandidate? {
+    if (!fields["Type"].equals("Subtitle", ignoreCase = true)) return null
+    if (!fields["IsExternal"].equals("true", ignoreCase = true)) return null
+    val index = fields["Index"]?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
+    return JellyfinSubtitleCandidate(
+        index = index,
+        language = fields["Language"]?.takeIf { it.isNotBlank() },
+        title = fields["DisplayTitle"]?.takeIf { it.isNotBlank() },
+    )
+}
+
+private fun subtitlesForSource(
+    base: String,
+    itemId: String,
+    mediaSourceId: String,
+    token: String,
+    candidates: List<JellyfinSubtitleCandidate>,
+): List<SubtitleTrack> = candidates.distinctBy { it.index }.map { candidate ->
+    SubtitleTrack(
+        url = JellyfinApi.subtitleStreamUrl(base, itemId, mediaSourceId, candidate.index, token),
+        language = candidate.language,
+        title = candidate.title ?: candidate.language ?: ("Subtitle " + candidate.index),
+    )
+}
+
+private data class JellyfinPlaybackSource(
+    val id: String,
+    val fields: Map<String, String>,
+    val mediaStreams: List<Map<String, String>>,
 )
 
 /**
@@ -140,7 +182,25 @@ object JellyfinApi {
         }
     }
 
-    /** Direct selected-version URL — feeds the normal probe→route pipeline. */
+    fun resumeUrl(base: String, userId: String, limit: Int): String {
+        require(limit > 0) { "limit must be positive" }
+        return buildString {
+            append(base.trimEnd('/')).append("/UserItems/Resume?UserId=").append(encodeUrlComponent(userId))
+            append("&Limit=").append(limit)
+            append("&MediaTypes=Video&EnableImages=false")
+        }
+    }
+
+    fun nextUpUrl(base: String, userId: String, limit: Int): String {
+        require(limit > 0) { "limit must be positive" }
+        return buildString {
+            append(base.trimEnd('/')).append("/Shows/NextUp?UserId=").append(encodeUrlComponent(userId))
+            append("&Limit=").append(limit)
+            append("&EnableImages=false")
+        }
+    }
+
+    /** Static source URL for the negotiated SupportsDirectPlay fallback when no server URL is supplied. */
     fun streamUrl(base: String, itemId: String, token: String, mediaSourceId: String): String =
         base.trimEnd('/') +
             "/Videos/" + encodeUrlComponent(itemId) + "/stream" +
@@ -168,6 +228,143 @@ object JellyfinApi {
             "/Videos/${encodeUrlComponent(itemId)}/${encodeUrlComponent(mediaSourceId)}" +
             "/Subtitles/$index/Stream.vtt?api_key=${encodeUrlComponent(token)}"
 
+    fun playbackInfoUrl(base: String, itemId: String): String =
+        base.trimEnd('/') + "/Items/" + encodeUrlComponent(itemId) + "/PlaybackInfo"
+
+    fun stopPlaybackUrl(base: String, playSessionId: String): String =
+        base.trimEnd('/') + "/Videos/ActiveEncodings?DeviceId=rigel-ios&PlaySessionId=" + encodeUrlComponent(playSessionId)
+
+    fun playbackInfoBody(userId: String, mediaSourceId: String?): String = buildString {
+        append("{\"UserId\":\"").append(jsonEscape(userId)).append('"')
+        mediaSourceId?.let { append(",\"MediaSourceId\":\"").append(jsonEscape(it)).append('"') }
+        append(",\"IsPlayback\":true,\"AutoOpenLiveStream\":true")
+        append(",\"EnableDirectPlay\":true,\"EnableDirectStream\":true,\"EnableTranscoding\":true")
+        append(",\"AllowVideoStreamCopy\":true,\"AllowAudioStreamCopy\":true,\"DeviceProfile\":")
+        append(localDeviceProfileJson).append('}')
+    }
+
+    private val localDeviceProfileJson: String by lazy { buildLocalDeviceProfileJson() }
+    private fun buildLocalDeviceProfileJson(): String {
+        val profile = OutputMediaProfiles.local
+        return buildString {
+            append("{\"Name\":\"Rigel iOS\",\"DirectPlayProfiles\":[{\"Container\":\"")
+            append(profile.directContainers.sorted().joinToString(","))
+            append("\",\"Type\":\"Video\",\"VideoCodec\":\"")
+            append(profile.directVideoCodecs.sorted().joinToString(","))
+            append("\",\"AudioCodec\":\"")
+            append(profile.directAudioCodecs.sorted().joinToString(","))
+            append("\"}],\"TranscodingProfiles\":[{\"Container\":\"ts\",\"Type\":\"Video\",\"VideoCodec\":\"")
+            append(profile.hlsVideoCodecs.sorted().joinToString(","))
+            append("\",\"AudioCodec\":\"")
+            append(profile.hlsAudioCodecs.sorted().joinToString(","))
+            append("\",\"Protocol\":\"hls\",\"Context\":\"Streaming\",\"EnableSubtitlesInManifest\":")
+            append(profile.supportsHlsWebVtt)
+            append("}],\"SubtitleProfiles\":")
+            if (profile.supportsHlsWebVtt) {
+                append("[{\"Format\":\"vtt\",\"Method\":\"Hls\"}]")
+            } else {
+                append("[]")
+            }
+            append('}')
+        }
+    }
+
+    internal fun resolvePlaybackUrl(base: String, negotiatedUrl: String, token: String): String? {
+        if (negotiatedUrl.isBlank() || negotiatedUrl.any { it.isWhitespace() || it.code < 0x20 }) return null
+        if (!hasExplicitScheme(negotiatedUrl) && !negotiatedUrl.startsWith("//") && negotiatedUrl.substringBefore('?').isBlank()) return null
+        if (hasUserInfo(base)) return null
+        val serverUrl = runCatching { Url(base.trimEnd('/')) }.getOrNull() ?: return null
+        val serverOrigin = playbackOrigin(serverUrl) ?: return null
+        if (serverUrl.parameters.names().isNotEmpty() || serverUrl.fragment.isNotEmpty()) return null
+        val mountPath = serverUrl.encodedPath.trimEnd('/')
+        if (!isSafePlaybackPath(serverUrl.encodedPath.ifEmpty { "/" }, allowRoot = true)) return null
+
+        val absoluteReference = hasExplicitScheme(negotiatedUrl) || negotiatedUrl.startsWith("//")
+        val resolved = when {
+            hasExplicitScheme(negotiatedUrl) -> negotiatedUrl
+            negotiatedUrl.startsWith("//") -> "${serverOrigin.scheme}:$negotiatedUrl"
+            negotiatedUrl.startsWith('/') -> {
+                val rootPath = rawUrlPath(negotiatedUrl)
+                val alreadyMounted = mountPath.isEmpty() || rootPath == mountPath || rootPath.startsWith("$mountPath/")
+                val mountedPath = if (alreadyMounted) rootPath else mountPath + rootPath
+                originPrefix(serverOrigin) + mountedPath + negotiatedUrl.substring(rootPath.length)
+            }
+            else -> base.trimEnd('/') + "/" + negotiatedUrl
+        }
+        if ('#' in resolved || hasUserInfo(resolved)) return null
+        if (!isSafePlaybackPath(rawUrlPath(resolved), allowRoot = false)) return null
+        val target = runCatching { Url(resolved) }.getOrNull() ?: return null
+        if (playbackOrigin(target) != serverOrigin) return null
+        if (!isSafePlaybackPath(target.encodedPath, allowRoot = false)) return null
+        if (absoluteReference && mountPath.isNotEmpty() && target.encodedPath != mountPath && !target.encodedPath.startsWith("$mountPath/")) return null
+
+        val builder = URLBuilder().apply { takeFrom(resolved) }
+        builder.parameters.names()
+            .filter { it.equals("api_key", ignoreCase = true) || it.equals("apikey", ignoreCase = true) }
+            .forEach(builder.parameters::remove)
+        builder.parameters.append("api_key", token)
+        return builder.buildString()
+    }
+
+    private data class PlaybackOrigin(val scheme: String, val host: String, val port: Int)
+
+    private fun playbackOrigin(url: Url): PlaybackOrigin? {
+        val scheme = url.protocol.name.lowercase()
+        if (scheme != "http" && scheme != "https") return null
+        val host = url.host.takeIf { it.isNotBlank() }?.lowercase() ?: return null
+        val port = url.port.takeIf { it > 0 } ?: if (scheme == "https") 443 else 80
+        return PlaybackOrigin(scheme, host, port)
+    }
+
+    private fun originPrefix(origin: PlaybackOrigin): String {
+        val host = origin.host.let { if (it.contains(':') && !it.startsWith('[')) "[$it]" else it }
+        val defaultPort = if (origin.scheme == "https") 443 else 80
+        return origin.scheme + "://" + host + if (origin.port == defaultPort) "" else ":${origin.port}"
+    }
+
+    private fun hasUserInfo(value: String): Boolean {
+        if (!value.contains("://")) return false
+        return value.substringAfter("://").substringBefore('/').substringBefore('?').substringBefore('#').contains('@')
+    }
+
+    private fun hasExplicitScheme(value: String): Boolean {
+        val colon = value.indexOf(':')
+        if (colon <= 0) return false
+        val scheme = value.substring(0, colon)
+        return scheme.first().isLetter() && scheme.all { it.isLetterOrDigit() || it == '+' || it == '.' || it == '-' }
+    }
+
+    private fun rawUrlPath(value: String): String {
+        val authorityStart = value.indexOf("://")
+        if (authorityStart < 0) return value.substringBefore('?').substringBefore('#')
+        val pathStart = value.indexOf('/', authorityStart + 3)
+        return if (pathStart < 0) "/" else value.substring(pathStart).substringBefore('?').substringBefore('#')
+    }
+
+    private fun isSafePlaybackPath(path: String, allowRoot: Boolean): Boolean {
+        if (!path.startsWith('/') || path.startsWith("//") || '\\' in path) return false
+        if (path == "/") return allowRoot
+        if (path.any { it.isWhitespace() || it.code < 0x20 || it.code == 0x7f }) return false
+        var index = 0
+        while (index < path.length) {
+            if (path[index] == '%') {
+                if (index + 2 >= path.length || path[index + 1].digitToIntOrNull(16) == null || path[index + 2].digitToIntOrNull(16) == null) {
+                    return false
+                }
+                index += 3
+            } else {
+                index++
+            }
+        }
+        for (segment in path.substring(1).split('/')) {
+            val lower = segment.lowercase()
+            if ("%2f" in lower || "%5c" in lower) return false
+            val decodedDots = lower.replace("%2e", ".")
+            if (decodedDots == "." || decodedDots == "..") return false
+        }
+        return true
+    }
+
     fun playUrl(
         base: String,
         sessionId: String,
@@ -182,6 +379,9 @@ object JellyfinApi {
         append("&startPositionTicks=").append(startPositionTicks)
         mediaSourceId?.let { append("&mediaSourceId=").append(encodeUrlComponent(it)) }
     }
+
+    fun stopSessionUrl(base: String, sessionId: String): String =
+        base.trimEnd('/') + "/Sessions/" + encodeUrlComponent(sessionId) + "/Playing/Stop"
 
     fun sessionsUrl(base: String, userId: String): String =
         base.trimEnd('/') + "/Sessions?controllableByUserId=${encodeUrlComponent(userId)}"
@@ -291,6 +491,22 @@ class JellyfinClient(private val http: HttpClient) {
         JellyfinApi.browseUrl(base, userId, parentId, startIndex, limit, order), token, startIndex,
     )
 
+    @Throws(Exception::class)
+    suspend fun resume(
+        base: String,
+        token: String,
+        userId: String,
+        limit: Int = 20,
+    ): JellyfinItemPage = fetchItems(JellyfinApi.resumeUrl(base, userId, limit), token, 0)
+
+    @Throws(Exception::class)
+    suspend fun nextUp(
+        base: String,
+        token: String,
+        userId: String,
+        limit: Int = 20,
+    ): JellyfinItemPage = fetchItems(JellyfinApi.nextUpUrl(base, userId, limit), token, 0)
+
     /** Search Jellyfin itself rather than filtering the currently loaded folder. */
     @Throws(Exception::class)
     suspend fun search(
@@ -327,17 +543,6 @@ class JellyfinClient(private val http: HttpClient) {
         val subtitlesBySourceIndex = mutableMapOf<Int, MutableList<JellyfinSubtitleCandidate>>()
         val topLevelSubtitles = mutableListOf<JellyfinSubtitleCandidate>()
         var mediaSourceCount = 0
-
-        fun subtitleCandidate(fields: Map<String, String>): JellyfinSubtitleCandidate? {
-            if (!fields["Type"].equals("Subtitle", ignoreCase = true)) return null
-            if (!fields["IsExternal"].equals("true", ignoreCase = true)) return null
-            val index = fields["Index"]?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
-            return JellyfinSubtitleCandidate(
-                index = index,
-                language = fields["Language"]?.takeIf { it.isNotBlank() },
-                title = fields["DisplayTitle"]?.takeIf { it.isNotBlank() },
-            )
-        }
 
         JsonObjectReader(
             source = response.bodyAsText(),
@@ -387,15 +592,115 @@ class JellyfinClient(private val http: HttpClient) {
                 audioCodec = audio?.get("Codec")?.takeIf { it.isNotBlank() },
                 audioChannels = audio?.get("Channels")?.toIntOrNull()?.takeIf { it > 0 },
                 sizeBytes = fields["Size"]?.toLongOrNull()?.takeIf { it > 0 },
-                subtitleTracks = subtitleCandidates.map { candidate ->
-                    SubtitleTrack(
-                        url = JellyfinApi.subtitleStreamUrl(base, itemId, id, candidate.index, token),
-                        language = candidate.language,
-                        title = candidate.title ?: candidate.language ?: ("Subtitle " + candidate.index),
-                    )
-                },
+                subtitleTracks = subtitlesForSource(base, itemId, id, token, subtitleCandidates),
             )
         }
+    }
+
+    @Throws(Exception::class)
+    suspend fun playback(
+        base: String,
+        token: String,
+        userId: String,
+        itemId: String,
+        mediaSourceId: String?,
+    ): JellyfinPlayback {
+        val response = http.post(JellyfinApi.playbackInfoUrl(base, itemId)) {
+            header("X-Emby-Token", token)
+            contentType(ContentType.Application.Json)
+            setBody(JellyfinApi.playbackInfoBody(userId, mediaSourceId))
+        }
+        if (!response.status.isSuccess()) throw JellyfinRequestException(response.status.value)
+
+        val sourceFieldsByIndex = mutableMapOf<Int, Map<String, String>>()
+        val streamsBySourceIndex = mutableMapOf<Int, MutableList<Map<String, String>>>()
+        val topLevelSubtitles = mutableListOf<JellyfinSubtitleCandidate>()
+        var mediaSourceCount = 0
+        var playSessionId: String? = null
+        var errorCode: String? = null
+        JsonObjectReader(
+            source = response.bodyAsText(),
+            onObjectAtPath = { path, fields ->
+                if (path.isEmpty()) {
+                    playSessionId = fields["PlaySessionId"]?.takeIf { it.isNotBlank() }
+                    errorCode = fields["ErrorCode"]?.takeIf { it.isNotBlank() }
+                    return@JsonObjectReader
+                }
+                when {
+                    path.size == 2 && path[0] == "MediaSources" -> {
+                        path[1].toIntOrNull()?.let { sourceFieldsByIndex[it] = fields }
+                    }
+                    path.size >= 4 && path[0] == "MediaSources" && path[2] == "MediaStreams" -> {
+                        val sourceIndex = path[1].toIntOrNull() ?: return@JsonObjectReader
+                        streamsBySourceIndex.getOrPut(sourceIndex) { mutableListOf() } += fields
+                    }
+                    path.size == 2 && path[0] == "MediaStreams" -> {
+                        subtitleCandidate(fields)?.let { topLevelSubtitles += it }
+                    }
+                }
+            },
+            onArrayAtPath = { path, count ->
+                if (path == listOf("MediaSources")) mediaSourceCount = count
+            },
+        ).parseObjectsWithPaths()
+
+        if (!errorCode.isNullOrBlank()) throw JellyfinPlaybackException(errorCode)
+        val seenIds = mutableSetOf<String>()
+        val sources = sourceFieldsByIndex.keys.sorted().mapNotNull { sourceIndex ->
+            val fields = sourceFieldsByIndex.getValue(sourceIndex)
+            val id = fields["Id"]?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            if (!seenIds.add(id)) return@mapNotNull null
+            JellyfinPlaybackSource(id, fields, streamsBySourceIndex[sourceIndex].orEmpty())
+        }
+        var resolvedPlaybackUrl: String? = null
+        val selected = if (mediaSourceId == null) {
+            sources.firstOrNull { source ->
+                val candidateUrl = playbackUrlFor(base, token, itemId, source)
+                if (candidateUrl == null) false else {
+                    resolvedPlaybackUrl = candidateUrl
+                    true
+                }
+            }
+        } else {
+            sources.firstOrNull { it.id == mediaSourceId }
+        } ?: throw JellyfinPlaybackException()
+        val url = resolvedPlaybackUrl ?: playbackUrlFor(base, token, itemId, selected) ?: throw JellyfinPlaybackException()
+        val nestedSubtitles = selected.mediaStreams.mapNotNull(::subtitleCandidate).distinctBy { it.index }
+        val subtitleCandidates = if (nestedSubtitles.isEmpty() && mediaSourceCount == 1) {
+            topLevelSubtitles
+        } else {
+            nestedSubtitles
+        }
+        return JellyfinPlayback(
+            url = url,
+            mediaSourceId = selected.id,
+            subtitleTracks = subtitlesForSource(base, itemId, selected.id, token, subtitleCandidates),
+            playSessionId = playSessionId,
+        )
+    }
+
+    private fun playbackUrlFor(
+        base: String,
+        token: String,
+        itemId: String,
+        source: JellyfinPlaybackSource,
+    ): String? {
+        val supportsDirectPlay = source.fields["SupportsDirectPlay"].equals("true", ignoreCase = true)
+        val supportsDirectStream = source.fields["SupportsDirectStream"].equals("true", ignoreCase = true)
+        val supportsTranscoding = source.fields["SupportsTranscoding"].equals("true", ignoreCase = true)
+        val directUrl = source.fields["DirectStreamUrl"]?.takeIf { it.isNotBlank() }
+        val transcodingUrl = source.fields["TranscodingUrl"]?.takeIf { it.isNotBlank() }
+
+        if (supportsDirectPlay || supportsDirectStream) {
+            directUrl?.let { JellyfinApi.resolvePlaybackUrl(base, it, token) }?.let { return it }
+        }
+        if (supportsTranscoding) {
+            transcodingUrl?.let { JellyfinApi.resolvePlaybackUrl(base, it, token) }?.let { return it }
+        }
+        if (supportsDirectPlay && directUrl == null && transcodingUrl == null) {
+            return JellyfinApi.resolvePlaybackUrl(base, JellyfinApi.streamUrl(base, itemId, token, source.id), token)
+        }
+        return null
     }
 
     suspend fun sessions(base: String, token: String, userId: String): List<JellyfinSession> {
@@ -457,11 +762,25 @@ class JellyfinClient(private val http: HttpClient) {
         if (status !in 200..299) throw JellyfinRequestException(status)
         return true
     }
+    @Throws(Exception::class)
+    suspend fun stopPlayback(base: String, token: String, playSessionId: String): Boolean {
+        if (playSessionId.isBlank()) return false
+        val status = try {
+            http.delete(JellyfinApi.stopPlaybackUrl(base, playSessionId)) {
+                header("X-Emby-Token", token)
+            }.status.value
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return false
+        }
+        return status in 200..299
+    }
 
     /** Remote stop command for a client session (Playing/Stopped is the client-side report endpoint; it does not stop playback). */
     suspend fun stopSession(base: String, token: String, sessionId: String): Boolean {
         val resp = try {
-            http.post(base.trimEnd('/') + "/Sessions/$sessionId/Playing/Stop") {
+            http.post(JellyfinApi.stopSessionUrl(base, sessionId)) {
                 header("X-Emby-Token", token)
             }.status.value
         } catch (error: CancellationException) {
@@ -531,6 +850,9 @@ class JellyfinClient(private val http: HttpClient) {
 
 class JellyfinRequestException(val statusCode: Int) :
     Exception("Jellyfin request failed ($statusCode)")
+
+class JellyfinPlaybackException(val errorCode: String? = null) :
+    Exception("Jellyfin playback negotiation failed")
 
 /** Swift-facing classifiers for Kotlin exceptions carried by Kotlin/Native. */
 object JellyfinInterop {

@@ -77,13 +77,17 @@ final class JellyfinViewModel: ObservableObject {
     @Published private(set) var playbackError: String?
     @Published private(set) var versionChoice: JellyfinVersionChoice?
 
-    @Published private(set) var libraryItems: [JellyfinItem] = []
+    @Published private(set) var continueWatchingItems: [JellyfinItem] = []
+    @Published private(set) var continueWatchingBusy = false
+    @Published private(set) var continueWatchingLoadedOnce = false
+    @Published private(set) var continueWatchingError: String?
+    @Published private(set) var nextUpItems: [JellyfinItem] = []
+    @Published private(set) var nextUpBusy = false
+    @Published private(set) var nextUpLoadedOnce = false
+    @Published private(set) var nextUpError: String?
     @Published private(set) var browseItems: [JellyfinItem] = []
-    @Published private(set) var libraryPath: [JellyfinItem] = []
     @Published private(set) var searchPath: [JellyfinItem] = []
-    @Published private(set) var libraryLoadedOnce = false
     @Published private(set) var browseLoadedOnce = false
-    @Published private(set) var libraryError: String?
     @Published private(set) var browseError: String?
     @Published private(set) var browseMoreError: String?
     @Published private(set) var browseStalled = false
@@ -103,9 +107,13 @@ final class JellyfinViewModel: ObservableObject {
     private var searchLastReceivedCount: Int32 = 0
 
     private var connectTask: Task<Void, Never>?
+    private var continueWatchingTask: Task<Void, Never>?
+    private var nextUpTask: Task<Void, Never>?
     private var browseTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var playbackTask: Task<Void, Never>?
+
+    private enum HomeFeed { case continueWatching, nextUp }
 
     private struct ContentAccount: Equatable {
         let base: String
@@ -166,23 +174,19 @@ final class JellyfinViewModel: ObservableObject {
     var base: String { settings.jellyfinServer() }
     private var token: String { settings.jellyfinToken() }
     private var userId: String { settings.jellyfinUserId() }
-    var busy: Bool { connectBusy || browseBusy || browseMoreBusy || playbackBusy }
-    var loadedOnce: Bool { libraryLoadedOnce }
+    var busy: Bool { connectBusy || continueWatchingBusy || nextUpBusy || browseBusy || browseMoreBusy || playbackBusy }
     var isSearchActive: Bool { !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var canRetryPlayback: Bool { pendingPlaybackRequest != nil }
     var isShowingSearchResults: Bool { isSearchActive && searchPath.isEmpty }
-    var currentItems: [JellyfinItem] {
-        if !isSearchActive { return libraryItems }
-        return searchPath.isEmpty ? searchResults : browseItems
-    }
-    var currentPath: [JellyfinItem] { isSearchActive ? searchPath : libraryPath }
-    var currentFolderName: String { currentPath.last?.name ?? (isSearchActive ? "Search results" : "Library") }
+    var currentItems: [JellyfinItem] { searchPath.isEmpty ? searchResults : browseItems }
+    var currentPath: [JellyfinItem] { searchPath }
+    var currentFolderName: String { currentPath.last?.name ?? "Search results" }
     var currentPathNames: [String] { currentPath.map(\.name) }
     var parentId: String? { currentPath.last?.id }
     var parentName: String? { currentPath.last?.name }
     var searchPerformed: Bool { isSearchActive }
-    var canLoadMoreLibrary: Bool {
-        !isShowingSearchResults && !browseStalled && browseLoadedOnce &&
+    var canLoadMoreBrowse: Bool {
+        !searchPath.isEmpty && !browseBusy && !browseMoreBusy && !browseStalled && browseLoadedOnce &&
             (browseTotalRecordCount.map { browseNextOffset < $0 } ?? (browseLastReceivedCount >= 50))
     }
     var canLoadMoreSearch: Bool {
@@ -201,6 +205,30 @@ final class JellyfinViewModel: ObservableObject {
             .replacingOccurrences(of: "http://", with: "")
     }
     var displayUsername: String { username.isEmpty ? settings.jellyfinUsername() : username }
+
+    private func resetHomeFeeds() {
+        continueWatchingItems = []
+        continueWatchingLoadedOnce = false
+        continueWatchingError = nil
+        nextUpItems = []
+        nextUpLoadedOnce = false
+        nextUpError = nil
+    }
+
+    private func resetBrowseState() {
+        browseTask?.cancel()
+        browseTask = nil
+        browseBusy = false
+        browseMoreBusy = false
+        browseItems = []
+        browseLoadedOnce = false
+        browseError = nil
+        browseMoreError = nil
+        browseStalled = false
+        browseTotalRecordCount = nil
+        browseNextOffset = 0
+        browseLastReceivedCount = 0
+    }
 
     func prepareForm() {
         server = settings.jellyfinServer()
@@ -259,16 +287,11 @@ final class JellyfinViewModel: ObservableObject {
             suppressSearchInputChanges = false
             lastSearchInput = nil
             resetSearchResults()
-            libraryPath = []
             searchPath = []
-            libraryItems = []
-            browseItems = []
-            libraryLoadedOnce = false
-            browseLoadedOnce = false
-            libraryError = nil
-            browseError = nil
+            resetHomeFeeds()
+            resetBrowseState()
             notice = nil
-            loadLibraryIfNeeded()
+            loadHomeIfNeeded()
         }
     }
 
@@ -292,108 +315,183 @@ final class JellyfinViewModel: ObservableObject {
         searchFilter = .all
         suppressSearchInputChanges = false
         lastSearchInput = nil
-        libraryItems = []
-        browseItems = []
-        libraryPath = []
+        resetHomeFeeds()
+        resetBrowseState()
         searchPath = []
-        libraryLoadedOnce = false
-        browseLoadedOnce = false
-        libraryError = nil
-        browseError = nil
-        browseMoreError = nil
         resetSearchResults()
         notice = nil
         noticeIsError = false
     }
 
-    func loadLibraryIfNeeded() {
+    func loadHomeIfNeeded() {
+        loadHomeFeed(.continueWatching)
+        loadHomeFeed(.nextUp)
+    }
+
+    func refreshHome() {
+        loadHomeFeed(.continueWatching, force: true)
+        loadHomeFeed(.nextUp, force: true)
+    }
+
+    func retryContinueWatching() { loadHomeFeed(.continueWatching, force: true) }
+    func retryNextUp() { loadHomeFeed(.nextUp, force: true) }
+
+    private func loadHomeFeed(_ feed: HomeFeed, force: Bool = false) {
         _ = resetContentIfAccountChanged()
-        guard connected, !libraryLoadedOnce, !browseBusy else { return }
-        loadBrowsePage()
-    }
-
-    func refreshLibrary() {
         guard connected else { return }
-        loadBrowsePage(reset: true)
+        let loaded: Bool
+        let busy: Bool
+        switch feed {
+        case .continueWatching:
+            loaded = continueWatchingLoadedOnce
+            busy = continueWatchingBusy
+        case .nextUp:
+            loaded = nextUpLoadedOnce
+            busy = nextUpBusy
+        }
+        guard force || (!loaded && !busy) else { return }
+
+        cancelHomeFeedTask(feed)
+        setHomeFeedBusy(feed, true)
+        setHomeFeedError(feed, nil)
+        let requestBase = base
+        let requestToken = token
+        let requestUserId = userId
+        let task = Task {
+            defer {
+                if !Task.isCancelled {
+                    setHomeFeedBusy(feed, false)
+                    setHomeFeedTask(feed, nil)
+                }
+            }
+            do {
+                let page: JellyfinItemPage
+                switch feed {
+                case .continueWatching:
+                    page = try await jellyfin.resumeAsync(base: requestBase, token: requestToken, userId: requestUserId, limit: 20)
+                case .nextUp:
+                    page = try await jellyfin.nextUpAsync(base: requestBase, token: requestToken, userId: requestUserId, limit: 20)
+                }
+                guard !Task.isCancelled, isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId) else { return }
+                switch feed {
+                case .continueWatching:
+                    continueWatchingItems = page.items
+                    continueWatchingLoadedOnce = true
+                    continueWatchingError = nil
+                case .nextUp:
+                    nextUpItems = page.items
+                    nextUpLoadedOnce = true
+                    nextUpError = nil
+                }
+            } catch {
+                guard !Task.isCancelled, isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId) else { return }
+                if JellyfinCancellation.isCancellation(error) { return }
+                if JellyfinCancellation.httpStatusCode(error) == 401 {
+                    expireSession(base: requestBase, token: requestToken, userId: requestUserId)
+                    return
+                }
+                setHomeFeedLoadedWithError(feed, Self.safeErrorMessage(error))
+            }
+        }
+        setHomeFeedTask(feed, task)
     }
 
-    func loadMoreLibrary() {
+    private func cancelHomeFeedTask(_ feed: HomeFeed) {
+        switch feed {
+        case .continueWatching:
+            continueWatchingTask?.cancel()
+            continueWatchingTask = nil
+        case .nextUp:
+            nextUpTask?.cancel()
+            nextUpTask = nil
+        }
+    }
+
+    private func setHomeFeedTask(_ feed: HomeFeed, _ task: Task<Void, Never>?) {
+        switch feed {
+        case .continueWatching: continueWatchingTask = task
+        case .nextUp: nextUpTask = task
+        }
+    }
+
+    private func setHomeFeedBusy(_ feed: HomeFeed, _ busy: Bool) {
+        switch feed {
+        case .continueWatching: continueWatchingBusy = busy
+        case .nextUp: nextUpBusy = busy
+        }
+    }
+
+    private func setHomeFeedError(_ feed: HomeFeed, _ error: String?) {
+        switch feed {
+        case .continueWatching: continueWatchingError = error
+        case .nextUp: nextUpError = error
+        }
+    }
+
+    private func setHomeFeedLoadedWithError(_ feed: HomeFeed, _ error: String) {
+        switch feed {
+        case .continueWatching:
+            continueWatchingLoadedOnce = true
+            continueWatchingError = error
+        case .nextUp:
+            nextUpLoadedOnce = true
+            nextUpError = error
+        }
+    }
+
+    func loadMoreBrowse() {
         if resetContentIfAccountChanged() { refreshCurrentLocation(); return }
-        guard canLoadMoreLibrary, !browseMoreBusy else { return }
+        guard canLoadMoreBrowse else { return }
         loadBrowsePage(append: true)
     }
 
     func refreshCurrentLocation() {
         _ = resetContentIfAccountChanged()
-        if isShowingSearchResults, let input = currentSearchInput, connected {
+        guard connected else { return }
+        if isShowingSearchResults, let input = currentSearchInput {
             startSearchPage(input, startIndex: 0, append: false, debounce: false)
-        } else {
+        } else if !searchPath.isEmpty {
             loadBrowsePage(reset: true)
+        } else {
+            refreshHome()
         }
     }
 
     func openFolder(_ item: JellyfinItem) {
         if resetContentIfAccountChanged() { refreshCurrentLocation(); return }
-        guard item.isFolder, connected else { return }
+        guard item.isFolder, isSearchActive, connected else { return }
         invalidatePendingPlayback()
-        if isSearchActive {
-            searchTask?.cancel()
-            searchTask = nil
-            searchBusy = false
-            searchMoreBusy = false
-            searchRequestIssued = false
-            searchExecutionInput = nil
-            searchPath.append(item)
-        } else {
-            libraryPath.append(item)
-        }
+        searchTask?.cancel()
+        searchTask = nil
+        searchBusy = false
+        searchMoreBusy = false
+        searchRequestIssued = false
+        searchExecutionInput = nil
+        searchPath.append(item)
         browseLoadedOnce = false
         loadBrowsePage(reset: true)
     }
 
     func goBack() {
         if resetContentIfAccountChanged() { refreshCurrentLocation(); return }
-        guard !currentPath.isEmpty else { return }
+        guard !searchPath.isEmpty else { return }
         invalidatePendingPlayback()
-        if isSearchActive {
-            if searchPath.count == 1 {
-                searchPath = []
-                browseTask?.cancel()
-                browseTask = nil
-                browseBusy = false
-                browseMoreBusy = false
-                browseLoadedOnce = false
-                browseItems = []
-                browseError = nil
-                return
-            }
-            searchPath.removeLast()
-        } else {
-            libraryPath.removeLast()
+        if searchPath.count == 1 {
+            backToSearchResults()
+            return
         }
+        searchPath.removeLast()
         browseLoadedOnce = false
         loadBrowsePage(reset: true)
     }
 
-    func backToRoot() {
+    func backToSearchResults() {
         if resetContentIfAccountChanged() { refreshCurrentLocation(); return }
-        guard !currentPath.isEmpty else { return }
+        guard !searchPath.isEmpty else { return }
         invalidatePendingPlayback()
-        if isSearchActive {
-            searchPath = []
-            browseTask?.cancel()
-            browseTask = nil
-            browseBusy = false
-            browseMoreBusy = false
-            browseLoadedOnce = false
-            browseItems = []
-            browseError = nil
-            return
-        }
-        libraryPath = []
-        refreshLibrary()
+        searchPath = []
+        resetBrowseState()
     }
-
     func clearSearch() {
         searchText = ""
         if lastSearchInput == nil { resetSearchResults() }
@@ -442,27 +540,12 @@ final class JellyfinViewModel: ObservableObject {
         searchTotalRecordCount = nil
 
         if let input {
-            browseTask?.cancel()
-            browseTask = nil
-            browseBusy = false
-            browseMoreBusy = false
-            browseLoadedOnce = false
-            browseItems = []
-            browseError = nil
-            browseMoreError = nil
-            browseStalled = false
+            resetBrowseState()
             searchBusy = true
             startSearchPage(input, startIndex: 0, append: false, debounce: true)
         } else if wasSearching && connected {
-            browseTask?.cancel()
-            browseTask = nil
-            browseBusy = false
-            browseMoreBusy = false
-            libraryItems = []
-            libraryLoadedOnce = false
-            browseLoadedOnce = false
-            browseError = nil
-            loadBrowsePage(reset: true)
+            resetBrowseState()
+            loadHomeIfNeeded()
         }
     }
 
@@ -535,7 +618,6 @@ final class JellyfinViewModel: ObservableObject {
                       currentSearchInput == input,
                       isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
                 else { return }
-                if JellyfinCancellation.isCancellation(error) { return }
                 if JellyfinCancellation.httpStatusCode(error) == 401 {
                     expireSession(base: requestBase, token: requestToken, userId: requestUserId)
                     return
@@ -550,22 +632,22 @@ final class JellyfinViewModel: ObservableObject {
     }
 
     private struct BrowseTarget: Equatable {
-        let isSearchFolder: Bool
         let parentId: String?
     }
 
     private var activeBrowseTarget: BrowseTarget {
-        BrowseTarget(isSearchFolder: isSearchActive && !searchPath.isEmpty, parentId: currentPath.last?.id)
+        BrowseTarget(parentId: searchPath.last?.id)
     }
 
     private var activeBrowseOrder: JellyfinBrowseOrder {
-        let parentType = currentPath.last?.type.lowercased()
+        let parentType = searchPath.last?.type.lowercased()
         return parentType == "series" || parentType == "season" ? .episode : .name
     }
 
     private func loadBrowsePage(append: Bool = false, reset: Bool = false) {
         guard connected else { return }
         let accountChanged = resetContentIfAccountChanged()
+        guard !searchPath.isEmpty else { return }
         let append = append && !accountChanged
         let target = activeBrowseTarget
         let parentId = target.parentId
@@ -573,8 +655,7 @@ final class JellyfinViewModel: ObservableObject {
         let startIndex = append ? browseNextOffset : 0
         if reset || !append {
             browseTask?.cancel()
-            browseItems = target.isSearchFolder ? [] : browseItems
-            if !target.isSearchFolder { libraryItems = [] }
+            browseItems = []
             browseLoadedOnce = false
             browseNextOffset = 0
             browseLastReceivedCount = 0
@@ -608,19 +689,12 @@ final class JellyfinViewModel: ObservableObject {
                     limit: 50,
                     order: order
                 )
-                guard !Task.isCancelled, target == activeBrowseTarget,
+                guard !Task.isCancelled, target == activeBrowseTarget, !searchPath.isEmpty,
                       isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
                 else { return }
-                let existing = target.isSearchFolder ? browseItems : libraryItems
-                let merged = Self.merge(page.items, into: append ? existing : [])
-                if target.isSearchFolder {
-                    browseItems = merged.items
-                    browseError = nil
-                } else {
-                    libraryItems = merged.items
-                    libraryLoadedOnce = true
-                    libraryError = nil
-                }
+                let merged = Self.merge(page.items, into: append ? browseItems : [])
+                browseItems = merged.items
+                browseError = nil
                 browseNextOffset = Self.nextOffset(startIndex, page.receivedCount)
                 browseLastReceivedCount = page.receivedCount
                 browseTotalRecordCount = page.totalRecordCount?.int32Value
@@ -630,21 +704,17 @@ final class JellyfinViewModel: ObservableObject {
                 browseLoadedOnce = true
             } catch {
                 guard !Task.isCancelled, !JellyfinCancellation.isCancellation(error),
-                      target == activeBrowseTarget,
+                      target == activeBrowseTarget, !searchPath.isEmpty,
                       isCurrentAccount(base: requestBase, token: requestToken, userId: requestUserId)
                 else { return }
-                if JellyfinCancellation.isCancellation(error) { return }
                 if JellyfinCancellation.httpStatusCode(error) == 401 {
                     expireSession(base: requestBase, token: requestToken, userId: requestUserId)
                     return
                 }
                 if append {
                     browseMoreError = Self.safeErrorMessage(error)
-                } else if target.isSearchFolder {
-                    browseError = Self.safeErrorMessage(error)
                 } else {
-                    libraryLoadedOnce = true
-                    libraryError = Self.safeErrorMessage(error)
+                    browseError = Self.safeErrorMessage(error)
                 }
             }
         }
@@ -655,23 +725,12 @@ final class JellyfinViewModel: ObservableObject {
         guard account != contentAccount else { return false }
         contentAccount = account
         invalidateInFlight()
-        libraryItems = []
-        browseItems = []
-        libraryPath = []
+        resetHomeFeeds()
+        resetBrowseState()
         searchPath = []
-        libraryLoadedOnce = false
-        browseLoadedOnce = false
-        libraryError = nil
-        browseError = nil
-        browseMoreError = nil
-        browseNextOffset = 0
-        browseLastReceivedCount = 0
-        browseTotalRecordCount = nil
-        browseStalled = false
         resetSearchResults()
         return true
     }
-
     private func resetSearchResults() {
         searchResults = []
         searchNextOffset = 0
@@ -852,13 +911,18 @@ final class JellyfinViewModel: ObservableObject {
 
     private func invalidateInFlight() {
         connectTask?.cancel()
-
+        continueWatchingTask?.cancel()
+        nextUpTask?.cancel()
         browseTask?.cancel()
         searchTask?.cancel()
         connectTask = nil
+        continueWatchingTask = nil
+        nextUpTask = nil
         browseTask = nil
         searchTask = nil
         connectBusy = false
+        continueWatchingBusy = false
+        nextUpBusy = false
         browseBusy = false
         browseMoreBusy = false
         searchBusy = false
@@ -888,15 +952,9 @@ final class JellyfinViewModel: ObservableObject {
         searchFilter = .all
         suppressSearchInputChanges = false
         lastSearchInput = nil
-        libraryItems = []
-        browseItems = []
-        libraryPath = []
+        resetHomeFeeds()
+        resetBrowseState()
         searchPath = []
-        libraryLoadedOnce = false
-        browseLoadedOnce = false
-        libraryError = nil
-        browseError = nil
-        browseMoreError = nil
         resetSearchResults()
         notice = "Session expired. Sign in again."
         noticeIsError = true

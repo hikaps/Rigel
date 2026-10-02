@@ -178,6 +178,9 @@ targets:
     sources:
       - path: ../RigelUITests
         createIntermediateGroups: false
+      - path: ../RigelTests/Fixtures
+        buildPhase: resources
+        createIntermediateGroups: false
     dependencies:
       - target: Rigel
     settings:

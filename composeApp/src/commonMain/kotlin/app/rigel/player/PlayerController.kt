@@ -103,6 +103,10 @@ class PlayerController(
     private var pendingSessionId: String? = null
     private var proxySessionSubtitleUrl: String? = null
     private var jellyfinStopJob: Job? = null
+    private var jellyfinPlaybackStopJob: Job? = null
+    private var ownedJellyfinPlaybackContext: JellyfinPlaybackContext? = null
+    private var ownedJellyfinPlaybackUrl: String? = null
+    private var ownedJellyfinPlaySessionId: String? = null
     private var receiverStopJob: Job? = null
     private var pendingReceiverTarget: CastTarget? = null
     private var pendingReceiverStopJob: Job? = null
@@ -123,6 +127,7 @@ class PlayerController(
         val request = UrlIntake.parse(rawUrl)
         if (request == null) {
             stopJellyfinIfActive()
+            stopOwnedJellyfinPlayback()
             invalidatePendingWork()
             CastDispatcher.detachActive()?.let(::stopDetachedReceiver)
             clearPlaybackContext()
@@ -134,21 +139,23 @@ class PlayerController(
         return true
     }
     fun loadJellyfinItem(
-        rawUrl: String,
         title: String,
         subtitleTracks: List<SubtitleTrack>,
         baseUrl: String,
         token: String,
         userId: String,
         itemId: String,
-        mediaSourceId: String,
+        mediaSourceId: String?,
     ): Boolean {
-        val request = UrlIntake.parse(rawUrl) ?: return false
+        val context = JellyfinPlaybackContext(baseUrl, token, userId, itemId, mediaSourceId)
         loadRequest(
-            request.copy(
-                title = title,
+            IntakeRequest(
+                sourceUrl = JellyfinApi.itemDetailsUrl(baseUrl, userId, itemId),
+                filename = null,
                 subtitleTracks = subtitleTracks,
-                jellyfinContext = JellyfinPlaybackContext(baseUrl, token, userId, itemId, mediaSourceId),
+                successCallbackUrl = null,
+                title = title,
+                jellyfinContext = context,
             ),
         )
         return true
@@ -156,8 +163,10 @@ class PlayerController(
 
     fun loadRequest(request: IntakeRequest, destinationOverride: PlaybackDestination? = null) {
         val outstandingStop = jellyfinStopJob
+        val outstandingPlaybackStop = jellyfinPlaybackStopJob
         val outstandingReceiverStop = receiverStopJob
         val staleStop = stopJellyfinIfActive()
+        val stalePlaybackStop = stopOwnedJellyfinPlayback()
         val pendingReceiverStop = invalidatePendingWork()
         val detachedTarget = CastDispatcher.detachActive()
         val detachedStop = detachedTarget?.let(::stopDetachedReceiver)
@@ -190,16 +199,36 @@ class PlayerController(
         if (jellyfinTarget != null) {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
+                awaitStaleStops(
+                    outstandingStop,
+                    staleStop,
+                    outstandingPlaybackStop,
+                    stalePlaybackStop,
+                    outstandingReceiverStop,
+                    pendingReceiverStop,
+                    detachedStop,
+                )
+                jellyfinPlaybackStopJob?.join()
                 playJellyfin(request, generation, jellyfinTarget)
             }
         } else {
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
-                probeAndRoute(request, generation)
+                awaitStaleStops(
+                    outstandingStop,
+                    staleStop,
+                    outstandingPlaybackStop,
+                    stalePlaybackStop,
+                    outstandingReceiverStop,
+                    pendingReceiverStop,
+                    detachedStop,
+                )
+                jellyfinPlaybackStopJob?.join()
+                if (request.jellyfinContext == null) probeAndRoute(request, generation)
+                else prepareJellyfinPlayback(request, generation)
             }
         }
     }
+
     fun selectLocal(positionMs: Long) = selectDestination(PlaybackDestination.Local, positionMs)
 
     fun selectAirPlay(routeId: String, name: String, positionMs: Long) =
@@ -261,9 +290,13 @@ class PlayerController(
         val probe = current.probe
         // Leaving a Jellyfin destination must stop that session too; all
         // superseded stops complete before replacement playback is issued.
+        val jellyfinTarget = (destination as? PlaybackDestination.Receiver)?.target
+            as? CastTarget.JellyfinSessionTarget
         val outstandingStop = jellyfinStopJob
+        val outstandingPlaybackStop = jellyfinPlaybackStopJob
         val outstandingReceiverStop = receiverStopJob
         val staleStop = stopJellyfinIfActive()
+        val stalePlaybackStop = if (jellyfinTarget != null) stopOwnedJellyfinPlayback() else null
         val detachedStop = CastDispatcher.detachActive()
             ?.let(::stopDetachedReceiver)
         currentDestination = destination
@@ -286,18 +319,39 @@ class PlayerController(
             startPositionMs = resume,
             error = null,
         )
-        val jellyfinTarget = (destination as? PlaybackDestination.Receiver)?.target
-            as? CastTarget.JellyfinSessionTarget
         if (jellyfinTarget != null) {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.CONNECTING_OUTPUT)
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
+                awaitStaleStops(
+                    outstandingStop,
+                    staleStop,
+                    outstandingPlaybackStop,
+                    stalePlaybackStop,
+                    outstandingReceiverStop,
+                    pendingReceiverStop,
+                    detachedStop,
+                )
+                jellyfinPlaybackStopJob?.join()
                 playJellyfin(request, generation, jellyfinTarget)
             }
         } else {
+            val reusableJellyfinProbe = if (
+                request.jellyfinContext?.let(::isMatchingJellyfinAccount) == true &&
+                current.sourceUrl == request.sourceUrl &&
+                isNegotiatedJellyfinPlayback(request)
+            ) probe else null
             pendingJob = scope.launch {
-                awaitStaleStops(outstandingStop, staleStop, outstandingReceiverStop, pendingReceiverStop, detachedStop)
-                probeAndRoute(request, generation, probe)
+                awaitStaleStops(
+                    outstandingStop,
+                    staleStop,
+                    outstandingPlaybackStop,
+                    outstandingReceiverStop,
+                    pendingReceiverStop,
+                    detachedStop,
+                )
+                jellyfinPlaybackStopJob?.join()
+                if (request.jellyfinContext == null) probeAndRoute(request, generation, probe)
+                else prepareJellyfinPlayback(request, generation, knownProbe = reusableJellyfinProbe)
             }
         }
     }
@@ -505,9 +559,10 @@ class PlayerController(
 
     private fun invalidatePendingWork(): Job? {
         val sessionId = pendingSessionId ?: _uiState.value.proxyUrl?.let(::extractSessionId)
-        val cancellationStop = schedulePendingReceiverStop(pendingJob)
+        val pending = pendingJob
+        val cancellationStop = schedulePendingReceiverStop(pending)
         loadGeneration += 1
-        pendingJob?.cancel()
+        pending?.cancel()
         pendingJob = null
         if (sessionId != null) {
             Bridges.stopHlsSession(sessionId)
@@ -515,7 +570,10 @@ class PlayerController(
         }
         pendingSessionId = null
         proxySessionSubtitleUrl = null
-        return cancellationStop
+        return if (pending == null) cancellationStop else scope.launch {
+            cancellationStop?.join()
+            pending.join()
+        }
     }
 
     private fun schedulePendingReceiverStop(pending: Job?): Job? {
@@ -568,6 +626,7 @@ class PlayerController(
         generation: Long,
         target: CastTarget.JellyfinSessionTarget,
     ) {
+        if (!isCurrent(generation)) return
         val context = request.jellyfinContext
         if (context == null) {
             _uiState.value = _uiState.value.copy(
@@ -586,6 +645,17 @@ class PlayerController(
         }
         val client = jellyfin ?: run {
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "Jellyfin client is not configured")
+            return
+        }
+        if (!isMatchingJellyfinAccount(context)) {
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                route = null,
+                proxyUrl = null,
+                remotePlayback = false,
+                castActive = false,
+                error = "Jellyfin account changed; reopen this item",
+            )
             return
         }
         val startPositionTicks = JellyfinApi.startPositionTicks(_uiState.value.startPositionMs)
@@ -639,6 +709,19 @@ class PlayerController(
             false
         }
         if (!isCurrent(generation)) return
+        if (!isMatchingJellyfinAccount(context)) {
+            if (sent) scheduleJellyfinSessionStop(context, target)?.join()
+            if (!isCurrent(generation)) return
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                route = null,
+                proxyUrl = null,
+                remotePlayback = false,
+                castActive = false,
+                error = "Jellyfin account changed; reopen this item",
+            )
+            return
+        }
         if (sent) {
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.PLAYING,
@@ -656,15 +739,130 @@ class PlayerController(
         }
     }
 
+    private fun isMatchingJellyfinAccount(context: JellyfinPlaybackContext): Boolean =
+        JellyfinApi.normalizeServerBase(settings.jellyfinServer()) == JellyfinApi.normalizeServerBase(context.baseUrl) &&
+            settings.jellyfinToken() == context.token && settings.jellyfinUserId() == context.userId
+
+    private fun isNegotiatedJellyfinPlayback(request: IntakeRequest): Boolean =
+        request.jellyfinContext != null &&
+            request.jellyfinContext == ownedJellyfinPlaybackContext &&
+            request.sourceUrl == ownedJellyfinPlaybackUrl
+
+    private fun stopOwnedJellyfinPlaybackFor(request: IntakeRequest?) {
+        if (request != null && isNegotiatedJellyfinPlayback(request)) stopOwnedJellyfinPlayback()
+    }
+
+    private suspend fun prepareJellyfinPlayback(
+        request: IntakeRequest,
+        generation: Long,
+        preferenceOverride: RouteOverride? = null,
+        knownProbe: ProbeResult? = null,
+    ) {
+        val context = request.jellyfinContext ?: return probeAndRoute(request, generation)
+        if (!isCurrent(generation)) return
+        if (!isMatchingJellyfinAccount(context)) {
+            stopOwnedJellyfinPlaybackFor(request)
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                route = null,
+                proxyUrl = null,
+                remotePlayback = false,
+                castActive = false,
+                error = "Jellyfin account changed; reopen this item",
+            )
+            return
+        }
+        if (isNegotiatedJellyfinPlayback(request)) {
+            val reusableProbe = knownProbe?.takeIf { _uiState.value.sourceUrl == request.sourceUrl }
+            probeAndRoute(request, generation, reusableProbe, preferenceOverride)
+            return
+        }
+        val identityRequest = request.copy(
+            sourceUrl = JellyfinApi.itemDetailsUrl(context.baseUrl, context.userId, context.itemId),
+        )
+        val client = jellyfin ?: run {
+            currentRequest = identityRequest
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                sourceUrl = identityRequest.sourceUrl,
+                error = "Jellyfin client is not configured",
+            )
+            return
+        }
+        currentRequest = identityRequest
+        _uiState.value = _uiState.value.copy(sourceUrl = identityRequest.sourceUrl)
+        val playback = try {
+            client.playback(context.baseUrl, context.token, context.userId, context.itemId, context.mediaSourceId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: JellyfinRequestException) {
+            if (!isCurrent(generation)) return
+            val requestBase = JellyfinApi.normalizeServerBase(context.baseUrl)
+            val currentAccount = failure.statusCode == 401 && isMatchingJellyfinAccount(context)
+            val accountCleared = currentAccount && settings.setJellyfinToken("")
+            if (accountCleared) outputSelection.clearJellyfinServer(requestBase)
+            val error = when {
+                currentAccount && !accountCleared -> "Unable to securely clear Jellyfin credentials"
+                accountCleared -> "Jellyfin session expired. Sign in again."
+                else -> "Jellyfin request failed (${failure.statusCode})"
+            }
+            _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = error)
+            return
+        } catch (_: Exception) {
+            if (isCurrent(generation)) {
+                _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "Jellyfin playback negotiation failed")
+            }
+            return
+        }
+        if (!isCurrent(generation) || !isMatchingJellyfinAccount(context)) {
+            scheduleJellyfinEncodingStop(context, playback.playSessionId)
+            if (isCurrent(generation)) {
+                _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "Jellyfin account changed; reopen this item")
+            }
+            return
+        }
+        val negotiatedContext = context.copy(mediaSourceId = playback.mediaSourceId)
+        val negotiatedRequest = identityRequest.copy(
+            sourceUrl = playback.url,
+            subtitleTracks = playback.subtitleTracks,
+            jellyfinContext = negotiatedContext,
+        )
+        ownedJellyfinPlaybackContext = negotiatedContext
+        ownedJellyfinPlaybackUrl = playback.url
+        ownedJellyfinPlaySessionId = playback.playSessionId
+        currentRequest = negotiatedRequest
+        val tracks = playback.subtitleTracks
+        _uiState.value = _uiState.value.copy(
+            sourceUrl = playback.url,
+            subtitleTracks = tracks,
+            selectedExternalSubtitleUrl = tracks.firstOrNull { it.url.isNotBlank() }?.url,
+        )
+        probeAndRoute(negotiatedRequest, generation, preferenceOverride = preferenceOverride)
+    }
+
     private suspend fun probeAndRoute(
         request: IntakeRequest,
         generation: Long,
         knownProbe: ProbeResult? = null,
+        preferenceOverride: RouteOverride? = null,
     ) {
         val (probe, probeError) = knownProbe?.let { it to null } ?: Bridges.probe(request.sourceUrl, emptyMap())
         if (!isCurrent(generation)) return
+        if (request.jellyfinContext?.let(::isMatchingJellyfinAccount) == false) {
+            stopOwnedJellyfinPlaybackFor(request)
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                route = null,
+                proxyUrl = null,
+                remotePlayback = false,
+                castActive = false,
+                error = "Jellyfin account changed; reopen this item",
+            )
+            return
+        }
         if (probe == null) {
             Logger.w(tag) { "probe failed: $probeError" }
+            stopOwnedJellyfinPlaybackFor(request)
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
                 error = probeError ?: "Could not read the stream",
@@ -676,6 +874,7 @@ class PlayerController(
         }
         val destination = currentDestination
         if (destination is PlaybackDestination.Receiver && destination.target is CastTarget.JellyfinSessionTarget) {
+            stopOwnedJellyfinPlaybackFor(request)
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
                 probe = probe,
@@ -688,6 +887,19 @@ class PlayerController(
             is PlaybackDestination.AirPlay -> OutputMediaProfiles.airPlay(destination.displayName)
             is PlaybackDestination.Receiver -> capabilityResolver.profileFor(destination.target)
         }
+        if (!isCurrent(generation)) return
+        if (request.jellyfinContext?.let(::isMatchingJellyfinAccount) == false) {
+            stopOwnedJellyfinPlaybackFor(request)
+            _uiState.value = _uiState.value.copy(
+                phase = PlayerPhase.ERROR,
+                route = null,
+                proxyUrl = null,
+                remotePlayback = false,
+                castActive = false,
+                error = "Jellyfin account changed; reopen this item",
+            )
+            return
+        }
         currentOutputProfile = profile
         val remoteTarget = (destination as? PlaybackDestination.Receiver)?.target
         val remoteReachable = remoteTarget == null ||
@@ -697,11 +909,12 @@ class PlayerController(
             probe = probe,
             profile = profile,
             hasSelectedExternalSubtitle = hasSelectedExternalSubtitle,
-            preference = settings.routeOverride(),
+            preference = preferenceOverride ?: settings.routeOverride(),
             sourceIsRemotelyReachable = remoteReachable,
         )
         if (!isCurrent(generation)) return
         val playable = routeDecision as? RouteDecision.Playable ?: run {
+            stopOwnedJellyfinPlaybackFor(request)
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
                 probe = probe,
@@ -747,6 +960,7 @@ class PlayerController(
         // receiver here so a remote session never silently drops to local.
         val remoteTarget = (currentDestination as? PlaybackDestination.Receiver)?.target
         val sourceUrl = _uiState.value.sourceUrl ?: run {
+            stopOwnedJellyfinPlaybackFor(currentRequest)
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = "No source URL")
             return
         }
@@ -757,6 +971,7 @@ class PlayerController(
             state.selectedExternalSubtitleUrl?.let { selectedUrl ->
                 state.subtitleTracks.firstOrNull { it.url == selectedUrl }?.let(::listOf)
                     ?: run {
+                        stopOwnedJellyfinPlaybackFor(currentRequest)
                         _uiState.value = state.copy(
                             phase = PlayerPhase.ERROR,
                             proxyUrl = null,
@@ -794,6 +1009,7 @@ class PlayerController(
             if (pendingSessionId == sessionId) pendingSessionId = null
             val error = if (selectedSubtitle) "Could not prepare the selected subtitle"
                 else transcodeError ?: "Transcode/remux failed"
+            stopOwnedJellyfinPlaybackFor(currentRequest)
             _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = error)
             return
         }
@@ -808,6 +1024,7 @@ class PlayerController(
             if (pendingSessionId == sessionId) pendingSessionId = null
             Bridges.stopHlsSession(sessionId)
             Bridges.stopHttpServer()
+            stopOwnedJellyfinPlaybackFor(currentRequest)
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
                 error = serverError ?: "Local server failed",
@@ -821,6 +1038,7 @@ class PlayerController(
             Bridges.stopHttpServer()
             if (pendingSessionId == sessionId) pendingSessionId = null
             val destinationName = remoteTarget?.name ?: currentDestination.displayName
+            stopOwnedJellyfinPlaybackFor(currentRequest)
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
                 error = "No local network address is available for $destinationName",
@@ -887,6 +1105,7 @@ class PlayerController(
                 prepareProxy(probe, PlaybackRoute.TRANSCODE, generation, emptySet())
                 return
             }
+            stopOwnedJellyfinPlaybackFor(currentRequest)
             _uiState.value = _uiState.value.copy(
                 phase = PlayerPhase.ERROR,
                 proxyUrl = null,
@@ -1044,6 +1263,7 @@ class PlayerController(
         if (pendingSessionId == sessionId) pendingSessionId = null
         Bridges.stopHlsSession(sessionId)
         Bridges.stopHttpServer()
+        stopOwnedJellyfinPlaybackFor(currentRequest)
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = message)
     }
     private suspend fun proxyRetryDecision(probe: ProbeResult): RouteDecision {
@@ -1067,12 +1287,19 @@ class PlayerController(
     fun retryWithProxy() {
         val current = _uiState.value
         val sourceUrl = current.sourceUrl ?: return
+        val request = currentRequest
+        val outstandingPlaybackStop = jellyfinPlaybackStopJob
         val pendingReceiverStop = invalidatePendingWork()
         directFallbackUsed = true
         val generation = loadGeneration
         _uiState.value = current.copy(phase = PlayerPhase.PROBING, error = null, route = null, proxyUrl = null)
         pendingJob = scope.launch {
-            awaitStaleStops(pendingReceiverStop)
+            awaitStaleStops(pendingReceiverStop, outstandingPlaybackStop)
+            jellyfinPlaybackStopJob?.join()
+            if (request?.jellyfinContext != null) {
+                prepareJellyfinPlayback(request, generation, RouteOverride.ALWAYS_PROXY)
+                return@launch
+            }
             val (probe, _) = Bridges.probe(sourceUrl, emptyMap())
             if (!isCurrent(generation)) return@launch
             if (probe == null) {
@@ -1112,10 +1339,45 @@ class PlayerController(
         return job
     }
 
+    private fun scheduleJellyfinEncodingStop(context: JellyfinPlaybackContext, playSessionId: String?): Job? {
+        if (playSessionId == null) return jellyfinPlaybackStopJob
+        val client = jellyfin ?: return jellyfinPlaybackStopJob
+        val previous = jellyfinPlaybackStopJob
+        val job = scope.launch {
+            previous?.join()
+            runCatching { client.stopPlayback(context.baseUrl, context.token, playSessionId) }
+        }
+        jellyfinPlaybackStopJob = job
+        job.invokeOnCompletion {
+            if (jellyfinPlaybackStopJob === job) jellyfinPlaybackStopJob = null
+        }
+        return job
+    }
+
+    private fun stopOwnedJellyfinPlayback(): Job? {
+        val context = ownedJellyfinPlaybackContext
+        val playSessionId = ownedJellyfinPlaySessionId
+        ownedJellyfinPlaybackContext = null
+        ownedJellyfinPlaybackUrl = null
+        ownedJellyfinPlaySessionId = null
+        return if (context != null && playSessionId != null) {
+            scheduleJellyfinEncodingStop(context, playSessionId)
+        } else {
+            jellyfinPlaybackStopJob
+        }
+    }
+
     private fun stopJellyfinIfActive(): Job? {
         val target = (currentDestination as? PlaybackDestination.Receiver)?.target
             as? CastTarget.JellyfinSessionTarget ?: return null
         val context = currentRequest?.jellyfinContext ?: return null
+        return scheduleJellyfinSessionStop(context, target)
+    }
+
+    private fun scheduleJellyfinSessionStop(
+        context: JellyfinPlaybackContext,
+        target: CastTarget.JellyfinSessionTarget,
+    ): Job? {
         val client = jellyfin ?: return null
         val previous = jellyfinStopJob
         val job = scope.launch {
@@ -1137,6 +1399,7 @@ class PlayerController(
     override fun stopPlayback() {
         val stopJob = stopJellyfinIfActive()
         if (stopJob != null) jellyfinStopJob = stopJob
+        stopOwnedJellyfinPlayback()
         invalidatePendingWork()
         val callbackUrl = successCallbackUrl
         clearPlaybackContext()
@@ -1183,6 +1446,7 @@ class PlayerController(
             directFallbackUsed = true
             val fallback = airPlayFallbackDecision(airPlayProbe)
             if (fallback == null) {
+                stopOwnedJellyfinPlaybackFor(currentRequest)
                 _uiState.value = current.copy(
                     phase = PlayerPhase.ERROR,
                     error = "AirPlay fallback route unavailable",
@@ -1220,6 +1484,7 @@ class PlayerController(
             }
             return
         }
+        stopOwnedJellyfinPlaybackFor(currentRequest)
         _uiState.value = _uiState.value.copy(phase = PlayerPhase.ERROR, error = message)
     }
 

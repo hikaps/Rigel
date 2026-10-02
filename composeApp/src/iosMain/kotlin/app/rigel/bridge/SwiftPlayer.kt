@@ -32,15 +32,14 @@ object SwiftPlayer {
     ): Boolean = RigelCore.controller.loadRaw(url, title, subtitleTracks)
 
     fun loadJellyfinItem(
-        url: String,
         title: String,
         subtitleTracks: List<SubtitleTrack>,
         baseUrl: String,
         token: String,
         userId: String,
         itemId: String,
-        mediaSourceId: String,
-    ): Boolean = RigelCore.controller.loadJellyfinItem(url, title, subtitleTracks, baseUrl, token, userId, itemId, mediaSourceId)
+        mediaSourceId: String?,
+    ): Boolean = RigelCore.controller.loadJellyfinItem(title, subtitleTracks, baseUrl, token, userId, itemId, mediaSourceId)
 
     fun stop() = RigelCore.controller.stopPlayback()
 

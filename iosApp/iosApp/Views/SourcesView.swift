@@ -121,7 +121,7 @@ struct SourcesView: View {
                 }
             }
 
-            if !model.currentPath.isEmpty {
+            if !model.searchPath.isEmpty {
                 Section {
                     HStack {
                         Button("Back") { model.goBack() }
@@ -131,7 +131,7 @@ struct SourcesView: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         Spacer(minLength: 4)
-                        Button(model.isSearchActive ? "Search results" : "Library") { model.backToRoot() }
+                        Button("Search results") { model.backToSearchResults() }
                             .buttonStyle(.borderless)
                     }
                 }
@@ -178,52 +178,100 @@ struct SourcesView: View {
                 }
             }
 
-            Section(model.currentFolderName) {
-                if model.isShowingSearchResults, let error = model.searchError {
-                    Text(error)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                    Button("Retry search") { model.searchNow() }
-                } else if model.isShowingSearchResults && !model.searchBusy && model.searchResults.isEmpty {
-                    Text("No matches")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else if !model.isShowingSearchResults {
-                    if model.isSearchActive, let error = model.browseError {
-                        Text(error)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                        Button("Retry folder") { model.refreshCurrentLocation() }
-                    } else if !model.isSearchActive, let error = model.libraryError {
-                        Text(error)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                        Button("Retry library") { model.refreshCurrentLocation() }
-                    } else if model.browseBusy || (!model.isSearchActive && model.busy && !model.playbackBusy) {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                            Text("Loading library…")
+            if model.isSearchActive {
+                Section(model.currentFolderName) {
+                    if model.isShowingSearchResults {
+                        if let error = model.searchError {
+                            Text(error).font(.footnote).foregroundStyle(.red)
+                            Button("Retry search") { model.searchNow() }
+                        } else if !model.searchBusy && model.searchResults.isEmpty {
+                            Text("No matches")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
-                    } else if !model.browseLoadedOnce && !model.isSearchActive {
-                        Button("Load library") { model.loadLibraryIfNeeded() }
-                    } else if model.currentItems.isEmpty && !model.browseBusy {
+                    } else if let error = model.browseError {
+                        Text(error).font(.footnote).foregroundStyle(.red)
+                        Button("Retry folder") { model.refreshCurrentLocation() }
+                    } else if model.browseBusy && model.browseItems.isEmpty {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Loading folder…")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if model.browseLoadedOnce && model.browseItems.isEmpty {
                         Text("This folder is empty")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                }
 
-                ForEach(model.currentItems, id: \.id) { item in
-                    LibraryRow(item: item) {
-                        model.openFolder(item)
-                    } onPlay: {
-                        play(item)
+                    ForEach(model.currentItems, id: \.id) { item in
+                        JellyfinItemRow(item: item) {
+                            model.openFolder(item)
+                        } onPlay: {
+                            play(item)
+                        }
+                    }
+
+                    if model.isShowingSearchResults {
+                        if let error = model.searchMoreError {
+                            Text(error).font(.footnote).foregroundStyle(.red)
+                        }
+                        if model.canLoadMoreSearch || model.searchMoreError != nil {
+                            Button(model.searchMoreError == nil ? "Load more results" : "Retry loading results") {
+                                model.loadMoreSearch()
+                            }
+                            .disabled(model.searchMoreBusy)
+                        }
+                        if model.searchStalledWithRemainingItems {
+                            Text("Jellyfin returned no additional items. Refresh to try again.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        if let error = model.browseMoreError {
+                            Text(error).font(.footnote).foregroundStyle(.red)
+                        }
+                        if model.canLoadMoreBrowse || model.browseMoreError != nil {
+                            Button(model.browseMoreError == nil ? "Load more" : "Retry loading more") {
+                                model.loadMoreBrowse()
+                            }
+                            .disabled(model.browseMoreBusy)
+                        }
+                        if model.browseStalledWithRemainingItems {
+                            Text("Jellyfin returned no additional items. Refresh to try again.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if model.searchMoreBusy || model.browseMoreBusy {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
                     }
                 }
+            } else {
+                feedSection(
+                    title: "Continue Watching",
+                    items: model.continueWatchingItems,
+                    isLoading: model.continueWatchingBusy,
+                    loadedOnce: model.continueWatchingLoadedOnce,
+                    error: model.continueWatchingError,
+                    retryTitle: "Retry Continue Watching",
+                    retry: model.retryContinueWatching
+                )
+                feedSection(
+                    title: "Next Up",
+                    items: model.nextUpItems,
+                    isLoading: model.nextUpBusy,
+                    loadedOnce: model.nextUpLoadedOnce,
+                    error: model.nextUpError,
+                    retryTitle: "Retry Next Up",
+                    retry: model.retryNextUp
+                )
+            }
 
-                if model.playbackBusy {
+            if model.playbackBusy {
+                Section {
                     HStack(spacing: 10) {
                         ProgressView()
                         Text("Preparing playback…")
@@ -231,51 +279,17 @@ struct SourcesView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                if let error = model.playbackError {
-                    Text(error)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
+            }
+            if let error = model.playbackError {
+                Section {
+                    Text(error).font(.footnote).foregroundStyle(.red)
                     if model.canRetryPlayback {
                         Button("Reload versions") { model.retryPlayback() }
                     }
                 }
-
-                if model.isShowingSearchResults {
-                    if let error = model.searchMoreError {
-                        Text(error).font(.footnote).foregroundStyle(.red)
-                    }
-                    if model.canLoadMoreSearch || model.searchMoreError != nil {
-                        Button(model.searchMoreError == nil ? "Load more results" : "Retry loading results") {
-                            model.loadMoreSearch()
-                        }
-                        .disabled(model.searchMoreBusy)
-                    }
-                    if model.searchStalledWithRemainingItems {
-                        Text("Jellyfin returned no additional items. Refresh to try again.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    if let error = model.browseMoreError {
-                        Text(error).font(.footnote).foregroundStyle(.red)
-                    }
-                    if model.canLoadMoreLibrary || model.browseMoreError != nil {
-                        Button(model.browseMoreError == nil ? "Load more" : "Retry loading more") {
-                            model.loadMoreLibrary()
-                        }
-                        .disabled(model.browseMoreBusy)
-                    }
-                    if model.browseStalledWithRemainingItems {
-                        Text("Jellyfin returned no additional items. Refresh to try again.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                if model.searchMoreBusy || model.browseMoreBusy {
-                    ProgressView()
-                        .frame(maxWidth: .infinity)
-                }
-                if let notice = model.notice {
+            }
+            if let notice = model.notice {
+                Section {
                     Text(notice)
                         .font(.footnote)
                         .foregroundStyle(model.noticeIsError ? .red : Color.rigelStar)
@@ -285,7 +299,7 @@ struct SourcesView: View {
             Section {
                 HStack {
                     Button("Refresh") { model.refreshCurrentLocation() }
-                        .disabled(model.browseBusy || model.searchBusy || model.connectBusy)
+                        .disabled(model.searchBusy || model.browseBusy || model.connectBusy)
                     Spacer()
                     Text("Playback Destination controls where playable items open.")
                         .font(.footnote)
@@ -293,19 +307,48 @@ struct SourcesView: View {
                 }
             }
         }
-        .onAppear { model.loadLibraryIfNeeded() }
+        .onAppear { model.loadHomeIfNeeded() }
+    }
+
+    private func feedSection(
+        title: String,
+        items: [JellyfinItem],
+        isLoading: Bool,
+        loadedOnce: Bool,
+        error: String?,
+        retryTitle: String,
+        retry: @escaping () -> Void
+    ) -> some View {
+        Section(title) {
+            if let error {
+                Text(error).font(.footnote).foregroundStyle(.red)
+                Button(retryTitle, action: retry)
+            }
+            if isLoading {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text(items.isEmpty ? "Loading…" : "Refreshing…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else if error == nil && loadedOnce && items.isEmpty {
+                Text("Nothing here yet")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(items, id: \.id) { item in
+                JellyfinItemRow(item: item) {
+                    model.openFolder(item)
+                } onPlay: {
+                    play(item)
+                }
+            }
+        }
     }
 
     private func play(_ item: JellyfinItem) {
         model.play(item) { selection in
-            let url = JellyfinApi.shared.streamUrl(
-                base: selection.base,
-                itemId: selection.item.id,
-                token: selection.token,
-                mediaSourceId: selection.source.id
-            )
-            return player.openJellyfin(
-                url: url,
+            player.openJellyfin(
                 title: selection.item.name,
                 subtitleTracks: selection.source.subtitleTracks,
                 baseUrl: selection.base,
@@ -385,7 +428,7 @@ struct SourcesView: View {
 
 }
 
-private struct LibraryRow: View {
+private struct JellyfinItemRow: View {
     let item: JellyfinItem
     let onOpenFolder: () -> Void
     let onPlay: () -> Void
