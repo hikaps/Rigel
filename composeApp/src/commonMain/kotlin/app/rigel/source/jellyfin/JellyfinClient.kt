@@ -726,7 +726,8 @@ class JellyfinClient(private val http: HttpClient) {
                     ?.let { it.equals("true", ignoreCase = true) }
                     ?: fields["SupportsRemoteControl"]
                         ?.let { it.equals("true", ignoreCase = true) }
-                if (supportsMediaControl == false) return@JsonObjectReader
+                // Match Jellyfin Web sessionPlayer: the server decides controllability.
+                if (fields["DeviceId"] == "rigel-ios") return@JsonObjectReader
                 out += JellyfinSession(id, deviceName, client, normalizedBase, supportsMediaControl)
             },
         ).parseObjectsWithPaths()

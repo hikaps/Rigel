@@ -228,23 +228,27 @@ class JellyfinClientTest {
     }
 
     @Test
-    fun sessionsFilterControllableClientsAndIgnorePropertyOrder() = kotlinx.coroutines.test.runTest {
-        val requested = mutableListOf<String>()
+    fun sessionsTrustServerEligibilityAndExcludeThisDevice() = kotlinx.coroutines.test.runTest {
         val json = """[
             {"Id":"s1","Client":"Jellyfin Mobile","DeviceName":"iPhone","SupportsMediaControl":true},
-            {"Id":"s2","Client":"Jellyfin Web","DeviceName":"Browser","SupportsMediaControl":false}
+            {"Id":"s2","Client":"Jellyfin Web","DeviceName":"Browser","SupportsMediaControl":false,"SupportsRemoteControl":true},
+            {"Id":"s3","Client":"Jellyfin TV","DeviceName":"TV"},
+            {"Id":"self","Client":"Rigel","DeviceName":"Rigel iOS","DeviceId":"rigel-ios","SupportsMediaControl":true}
         ]"""
+        val requested = mutableListOf<String>()
         val engine = MockEngine { request ->
             requested += request.url.toString()
             respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
         }
         val sessions = JellyfinClient(HttpClient(engine)).sessions(base, "tok", "user-1")
-
         assertEquals("$base/Sessions?controllableByUserId=user-1", requested.single())
-        assertEquals(1, sessions.size)
         assertEquals(
-            JellyfinSession("s1", "iPhone", "Jellyfin Mobile", base, supportsMediaControl = true),
-            sessions.single(),
+            listOf(
+                JellyfinSession("s1", "iPhone", "Jellyfin Mobile", base, supportsMediaControl = true),
+                JellyfinSession("s2", "Browser", "Jellyfin Web", base, supportsMediaControl = false),
+                JellyfinSession("s3", "TV", "Jellyfin TV", base),
+            ),
+            sessions,
         )
     }
 
