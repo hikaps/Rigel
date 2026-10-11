@@ -385,9 +385,9 @@ class PlayerController(
     }
 
     /**
-     * Selects an external text subtitle without changing a compatible direct
-     * playback route. Existing proxy playback is rebuilt so its HLS session
-     * carries the selected sidecar rendition.
+     * Keeps compatible local playback direct. AirPlay packages the selected
+     * sidecar as an HLS rendition because the on-phone overlay is not sent
+     * to the receiver; existing proxy playback is rebuilt for any output.
      */
     fun selectExternalSubtitle(track: SubtitleTrack?, positionMs: Long) {
         val current = _uiState.value
@@ -485,7 +485,11 @@ class PlayerController(
                 probe = probe,
                 profile = currentOutputProfile ?: profileForCurrentDestination(),
                 hasSelectedExternalSubtitle = true,
-                preference = settings.routeOverride(),
+                preference = if (currentDestination is PlaybackDestination.AirPlay) {
+                    RouteOverride.ALWAYS_PROXY
+                } else {
+                    settings.routeOverride()
+                },
             )
             val playable = routeDecision as? RouteDecision.Playable ?: run {
                 _uiState.value = selected.copy(
@@ -909,7 +913,11 @@ class PlayerController(
             probe = probe,
             profile = profile,
             hasSelectedExternalSubtitle = hasSelectedExternalSubtitle,
-            preference = preferenceOverride ?: settings.routeOverride(),
+            preference = if (destination is PlaybackDestination.AirPlay && hasSelectedExternalSubtitle) {
+                RouteOverride.ALWAYS_PROXY
+            } else {
+                preferenceOverride ?: settings.routeOverride()
+            },
             sourceIsRemotelyReachable = remoteReachable,
         )
         if (!isCurrent(generation)) return

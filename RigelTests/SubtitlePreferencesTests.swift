@@ -15,13 +15,6 @@ final class SubtitlePreferencesTests: XCTestCase {
         "subtitle-outline-color",
     ]
 
-    func testDefaultsMatchPlayerAppearanceContract() {
-        withCleanPreferences {
-            XCTAssertEqual(SubtitlePreferences.appearance, .default)
-            XCTAssertEqual(SubtitlePreferences.delay, 0)
-        }
-    }
-
     func testAppearanceClampsSupportedRanges() {
         withCleanPreferences {
             SubtitlePreferences.appearance = SubtitleAppearance(

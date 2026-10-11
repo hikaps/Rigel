@@ -208,6 +208,57 @@ final class OpenSubtitlesTests: XCTestCase {
         }
     }
 
+    func testOfficialOpenSubtitlesLinkHostDownloadsWithoutSendingCredentials() async throws {
+        var requests: [URLRequest] = []
+        let lock = NSLock()
+        let link = "https://www.opensubtitles.com/download/capability/subfile/subtitle.en.srt"
+        serve([
+            "/api/v1/download": (200, Self.data("{\"link\":\"\(link)\"}")),
+            "/download/capability/subfile/subtitle.en.srt": (200, Self.data("1\n00:00:00,000 --> 00:00:01,000\nHello\n")),
+        ])
+        OpenSubtitlesURLProtocol.observer = { request in
+            lock.lock()
+            requests.append(request)
+            lock.unlock()
+        }
+        defer {
+            OpenSubtitlesURLProtocol.handler = nil
+            OpenSubtitlesURLProtocol.observer = nil
+        }
+
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opensubtitles-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let fileURL = try await makeAuthorizedClient().download(
+            makeResult(id: 10, title: "Official link", fileName: "subtitle.en.srt"),
+            destinationDirectory: destination
+        )
+
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), "1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+        let fileRequest = try XCTUnwrap(requests.first(where: { $0.url?.host == "www.opensubtitles.com" }))
+        XCTAssertNil(fileRequest.value(forHTTPHeaderField: "Api-Key"))
+        XCTAssertNil(fileRequest.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testDownloadReportsMissingLinkOnlyWhenResponseOmitsIt() async throws {
+        serve([
+            "/api/v1/download": (200, Self.data("{\"file_name\":\"subtitle.srt\"}")),
+        ])
+        defer { OpenSubtitlesURLProtocol.handler = nil }
+
+        do {
+            _ = try await makeAuthorizedClient().download(
+                makeResult(id: 11, title: "Missing link", fileName: "subtitle.srt")
+            )
+            XCTFail("a missing API link must be reported")
+        } catch let error as OpenSubtitlesError {
+            guard case .missingDownloadLink = error else {
+                return XCTFail("expected missingDownloadLink, got \(error)")
+            }
+        }
+    }
+
     func testDownloadRejectsInsecureLookalikeAndNonstandardPortLinks() async throws {
         let links = [
             "http://dl.opensubtitles.com/subtitle.srt",
@@ -230,7 +281,9 @@ final class OpenSubtitlesTests: XCTestCase {
                 )
                 XCTFail("unsafe link must be rejected: \(link)")
             } catch let error as OpenSubtitlesError {
-                XCTAssertEqual(error.localizedDescription, OpenSubtitlesError.missingDownloadLink.localizedDescription)
+                guard case .invalidDownloadLink = error else {
+                    return XCTFail("expected invalidDownloadLink, got \(error)")
+                }
             }
         }
     }

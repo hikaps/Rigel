@@ -399,6 +399,48 @@ class PlayerControllerTest {
     }
 
     @Test
+    fun airPlayHandoffPackagesSelectedSidecarEvenWithDirectPreference() = runTest(dispatcher.scheduler) {
+        lanBase = "http://192.168.1.50:8090"
+        probeResult = probeResult!!.copy(width = 1280, height = 720, videoLevel = 40, frameRate = 24.0)
+        val c = controller(SettingsStore(MapSettings(mutableMapOf("route_override" to "DIRECT"))))
+        val track = SubtitleTrack("https://subtitles.example/movie.srt", "eng", "English")
+        c.loadRequest(request.copy(subtitleTracks = listOf(track)))
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+
+        c.selectAirPlay("air-1", "Living Room", 15_000)
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals("http://192.168.1.50:8090/hls/s1/out.m3u8", c.uiState.value.proxyUrl)
+        assertEquals(track.url, c.uiState.value.selectedExternalSubtitleUrl)
+        assertEquals(listOf(track), hlsSubtitleTracks.single())
+        assertEquals(15_000, hlsOffsets.single())
+    }
+
+    @Test
+    fun selectingSidecarDuringDirectAirPlayPackagesItAtCurrentPosition() = runTest(dispatcher.scheduler) {
+        lanBase = "http://192.168.1.50:8090"
+        probeResult = probeResult!!.copy(width = 1280, height = 720, videoLevel = 40, frameRate = 24.0)
+        val c = controller()
+        c.loadRequest(request, PlaybackDestination.AirPlay("air-1", "Living Room"))
+        advanceUntilIdle()
+        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
+        val track = SubtitleTrack("https://subtitles.example/movie.srt", "eng", "English")
+
+        c.selectExternalSubtitle(track, 30_000)
+        advanceUntilIdle()
+
+        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
+        assertEquals(PlaybackRoute.REMUX, c.uiState.value.route)
+        assertEquals("http://192.168.1.50:8090/hls/s1/out.m3u8", c.uiState.value.proxyUrl)
+        assertEquals(track.url, c.uiState.value.selectedExternalSubtitleUrl)
+        assertEquals(listOf(track), hlsSubtitleTracks.single())
+        assertEquals(30_000, hlsOffsets.single())
+    }
+
+    @Test
     fun selectingSubtitleOnDirectVideoKeepsDirectPlayback() = runTest(dispatcher.scheduler) {
         val c = controller()
         c.loadRequest(request)
@@ -2217,42 +2259,6 @@ class PlayerControllerTest {
 
         assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
         assertTrue(c.uiState.value.error!!.contains("No local network address"), "error=${c.uiState.value.error}")
-    }
-
-    @Test
-    fun airPlaySubtitleSelectionKeepsDirectPlayback() = runTest(dispatcher.scheduler) {
-        val settings = SettingsStore(MapSettings(mutableMapOf("route_override" to "DIRECT")))
-        probeResult = ProbeResult(
-            "mp4",
-            "h264",
-            listOf("aac"),
-            emptyList(),
-            60_000,
-            isLive = false,
-            pixFmt = "yuv420p",
-            width = 1280,
-            height = 720,
-            videoLevel = 40,
-            frameRate = 24.0,
-        )
-        lanBase = "http://192.168.1.50:8090"
-        val c = controller(settings)
-        c.loadRequest(
-            request.copy(sourceUrl = "http://h/movie.mp4"),
-            PlaybackDestination.AirPlay("air-1", "Living Room"),
-        )
-        advanceUntilIdle()
-        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
-
-        val track = SubtitleTrack("https://subtitles.example/movie.srt", "en", "English")
-        c.selectExternalSubtitle(track, positionMs = 15_000)
-        advanceUntilIdle()
-
-        assertEquals(PlayerPhase.PLAYING, c.uiState.value.phase)
-        assertEquals(PlaybackRoute.DIRECT, c.uiState.value.route)
-        assertNull(c.uiState.value.proxyUrl)
-        assertEquals(track.url, c.uiState.value.selectedExternalSubtitleUrl)
-        assertTrue(hlsSessionIds.isEmpty())
     }
 
     @Test

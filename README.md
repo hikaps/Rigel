@@ -9,14 +9,15 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 - Play `http(s)` links, local files, and HLS playlists — entered on the home screen, opened from the share sheet or Files, or handed over by other apps.
 - Direct AVPlayer playback when the format fits. Otherwise FFmpeg probes the media and Rigel remuxes or transcodes it to HLS on the fly, served from a local HTTP server — conversion happens on your device.
 - Buffering indicators follow the current media and reset when playback is replaced.
-- External subtitle URLs, Picture in Picture, and background audio.
-- OpenSubtitles search and downloads from the player subtitle picker; configure the account under Settings, with credentials kept in the iOS Keychain.
+- External subtitle URLs, Picture in Picture, and background audio. Sidecar captions default to 40 points above the bottom safe-area edge; the subtitle customization sheet can change their position.
+- OpenSubtitles search and downloads from the player subtitle picker; configure the account under Settings, with credentials kept in the iOS Keychain. Downloads are saved locally; invalid download links are reported separately from missing links.
 
 ## Screens & casting
 
 - Cast to DLNA/UPnP renderers, Kodi, Roku, and Chromecast/Google Cast. Devices are discovered automatically via SSDP, Google Cast mDNS, or added manually by IP address.
 - Jellyfin clients appear in Devices after connecting to the server under Sources. Like Jellyfin’s cast picker, Rigel lists sessions the server allows your account to control, excluding Rigel itself; LAN presence alone is not enough. These destinations play Jellyfin library items, not arbitrary URLs.
 - AirPlay out to Apple TV and AirPlay-2 TVs, picked from the player screen. Non-AAC audio is converted to AAC for compatibility, copying compatible video without re-encoding it.
+- AirPlay subtitles use native media tracks or WebVTT renditions in Rigel-generated HLS. Selecting an external subtitle packages it into HLS for the TV while local playback can stay direct. Non-live AirPlay exports finish before playback starts, so preparation can take longer. The receiver controls subtitle styling and placement.
 - Remote renderers always receive a LAN-reachable stream URL, never a loopback address.
 - Outbound receiver families share the Kotlin `ReceiverAdapter` registry; inbound UPnP renderer mode remains a separate native bridge.
 

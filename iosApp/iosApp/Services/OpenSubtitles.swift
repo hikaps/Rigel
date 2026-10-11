@@ -130,6 +130,7 @@ enum OpenSubtitlesError: LocalizedError {
     case invalidResponse
     case httpStatus(Int, String?)
     case missingDownloadLink
+    case invalidDownloadLink
     case unsupportedFile
     case fileTooLarge
     var errorDescription: String? {
@@ -145,6 +146,8 @@ enum OpenSubtitlesError: LocalizedError {
             return "OpenSubtitles error (HTTP \(status))."
         case .missingDownloadLink:
             return "OpenSubtitles did not provide a subtitle download link."
+        case .invalidDownloadLink:
+            return "OpenSubtitles returned an invalid subtitle download link."
         case .unsupportedFile:
             return "The downloaded subtitle file is not a supported text format."
         case .fileTooLarge:
@@ -166,6 +169,12 @@ final class OpenSubtitlesClient {
     ]
     private static let downloadAuthorities: Set<String> = [
         "dl.opensubtitles.com",
+    ]
+    // The API's documented signed download links use www.opensubtitles.com;
+    // keep Api-Key delivery restricted to downloadAuthorities above.
+    private static let subtitleLinkAuthorities: Set<String> = [
+        "dl.opensubtitles.com",
+        "www.opensubtitles.com",
     ]
 
     private let store: OpenSubtitlesCredentialStore
@@ -270,8 +279,11 @@ final class OpenSubtitlesClient {
         let (data, response) = try await session.data(for: request, delegate: redirectDelegate)
         try Self.validate(response: response, data: data)
         let decoded = try JSONDecoder().decode(DownloadResponse.self, from: data)
-        guard let link = Self.validatedSubtitleURL(decoded.link) else {
+        guard let rawLink = decoded.link, !rawLink.isEmpty else {
             throw OpenSubtitlesError.missingDownloadLink
+        }
+        guard let link = Self.validatedSubtitleURL(rawLink) else {
+            throw OpenSubtitlesError.invalidDownloadLink
         }
         return try await Self.fetchSubtitleFile(
             from: link,
@@ -290,7 +302,7 @@ final class OpenSubtitlesClient {
         directory: URL?
     ) async throws -> URL {
         guard let link = validatedSubtitleURL(link) else {
-            throw OpenSubtitlesError.missingDownloadLink
+            throw OpenSubtitlesError.invalidDownloadLink
         }
         var request = URLRequest(url: link)
         request.timeoutInterval = 30
@@ -481,7 +493,7 @@ final class OpenSubtitlesClient {
 
     private static func isOpenSubtitlesLookalike(_ host: String) -> Bool {
         guard host.contains("opensubtitles") else { return false }
-        return !apiAuthorities.contains(host) && !downloadAuthorities.contains(host)
+        return !apiAuthorities.contains(host) && !subtitleLinkAuthorities.contains(host)
     }
 
     enum RedirectPolicy {
@@ -616,7 +628,7 @@ final class OpenSubtitlesClient {
     }
 
     private struct DownloadResponse: Decodable {
-        let link: String
+        let link: String?
     }
 
     private struct APIErrorResponse: Decodable {

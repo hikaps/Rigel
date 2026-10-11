@@ -90,7 +90,7 @@ struct SubtitleAppearance: Equatable {
         backgroundOpacity: 0,
         outlineEnabled: true,
         outlineColor: .black,
-        bottomInset: 100
+        bottomInset: 40
     )
 }
 
