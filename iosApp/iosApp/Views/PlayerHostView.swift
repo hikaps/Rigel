@@ -56,9 +56,9 @@ struct PlayerHostView: View {
         .onDisappear {
             PlayerOrientation.restore()
             nativeBufferingState = NativeBufferingState()
-            // Belt-and-braces: if the cover is dismissed by any path other than
-            // the back/close buttons, make sure the native player stops.
-            if player.phase != .idle {
+            // Closing remote controls must not tear down the receiver session or its proxy.
+            let remotePlaying = player.remotePlayback && (player.phase == .playing || player.phase == .buffering)
+            if player.phase != .idle && !remotePlaying {
                 player.stop()
             }
         }
@@ -200,7 +200,7 @@ struct PlayerHostView: View {
                                 .padding(.vertical, 10)
                                 .contentShape(Rectangle())
                         }
-                        Button("Close", role: .cancel) { player.stop() }
+                        Button("Close", role: .cancel) { player.showPlayer = false }
                             .buttonStyle(.plain)
                             .foregroundStyle(.white.opacity(0.8))
                             .padding(.vertical, 10)

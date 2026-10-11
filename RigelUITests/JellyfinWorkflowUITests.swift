@@ -3,6 +3,67 @@ import Network
 import XCTest
 
 final class JellyfinWorkflowUITests: XCTestCase {
+    func testJellyfinHandoffAutoClosesAndControlsCanReopen() throws {
+        let server = try JellyfinFixtureServer(remoteSession: true)
+        try server.start()
+        defer { server.stop() }
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-jellyfin_server", "http://127.0.0.1:\(server.port)",
+            "-jellyfin_token", "fixture-token",
+            "-jellyfin_userid", "fixture-user",
+            "-jellyfin_username", "fixture-user",
+        ]
+        app.launch()
+        defer { app.terminate() }
+        app.buttons.matching(identifier: "Devices").firstMatch.tap()
+        let receiver = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Fixture TV")).firstMatch
+        XCTAssertTrue(receiver.waitForExistence(timeout: 20))
+        app.staticTexts["Fixture TV"].tap()
+        XCTAssertTrue(app.staticTexts["Selected Fixture TV"].waitForExistence(timeout: 5), app.debugDescription)
+        app.buttons.matching(identifier: "Sources").firstMatch.tap()
+        let search = app.textFields["Movies, shows, or episodes"]
+        XCTAssertTrue(search.waitForExistence(timeout: 15))
+        search.tap()
+        search.typeText("smoke\n")
+        let play = app.buttons.matching(identifier: "Play").firstMatch
+        XCTAssertTrue(play.waitForExistence(timeout: 15))
+        play.tap()
+        let version = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "1080p master")).firstMatch
+        XCTAssertTrue(version.waitForExistence(timeout: 10))
+        version.tap()
+        let returnedToBrowsing = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                server.remoteCommands == ["play"]
+                    && app.buttons.matching(identifier: "Home").firstMatch.isHittable
+            },
+            object: app.buttons.matching(identifier: "Home").firstMatch
+        )
+        wait(for: [returnedToBrowsing], timeout: 15)
+        XCTAssertEqual(server.remoteCommands, ["play"])
+        let home = app.buttons.matching(identifier: "Home").firstMatch
+        XCTAssertTrue(home.waitForExistence(timeout: 10))
+        home.tap()
+        let nowPlaying = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Now playing")).firstMatch
+        XCTAssertTrue(nowPlaying.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Playing on Fixture TV"].exists)
+        XCTAssertEqual(server.remoteCommands, ["play"], "dismissal must not send Stop")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "Jellyfin playback continues after automatic dismissal"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        nowPlaying.tap()
+        XCTAssertTrue(app.buttons["Close"].waitForExistence(timeout: 10))
+        app.buttons["Close"].tap()
+        XCTAssertTrue(home.waitForExistence(timeout: 10))
+        XCTAssertEqual(server.remoteCommands, ["play"])
+        nowPlaying.tap()
+        XCTAssertTrue(app.buttons["Stop"].waitForExistence(timeout: 10))
+        app.buttons["Stop"].tap()
+        XCTAssertTrue(home.waitForExistence(timeout: 10))
+        XCTAssertEqual(server.remoteCommands, ["play", "stop"])
+    }
+
     func testVersionPickerCancelAndSelectionUseTheChosenSource() throws {
         let server = try JellyfinFixtureServer()
         try server.start()
@@ -153,6 +214,13 @@ final class JellyfinWorkflowUITests: XCTestCase {
 private final class JellyfinFixtureServer: @unchecked Sendable {
     private let listener: NWListener
     private let emptyFirstSearchPage: Bool
+    private let remoteSession: Bool
+    private var commands: [String] = []
+    var remoteCommands: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return commands
+    }
     private let queue = DispatchQueue(label: "rigel.jellyfin-fixture")
     private let ready = DispatchSemaphore(value: 0)
     private let lock = NSLock()
@@ -245,7 +313,8 @@ private final class JellyfinFixtureServer: @unchecked Sendable {
         return rootItemsRequestTotal
     }
 
-    init(emptyFirstSearchPage: Bool = false) throws {
+    init(emptyFirstSearchPage: Bool = false, remoteSession: Bool = false) throws {
+        self.remoteSession = remoteSession
         self.emptyFirstSearchPage = emptyFirstSearchPage
         listener = try NWListener(using: .tcp, on: .any)
     }
@@ -325,6 +394,14 @@ private final class JellyfinFixtureServer: @unchecked Sendable {
                     lock.unlock()
                 }
                 switch (method, url?.path) {
+                case ("GET", "/Sessions"):
+                    let sessions = remoteSession ? #"[{"Id":"fixture-session","DeviceName":"Fixture TV","Client":"Jellyfin Web","SupportsMediaControl":true}]"# : "[]"
+                    self.send(connection, contentType: "application/json", body: Data(sessions.utf8))
+                case ("POST", "/Sessions/fixture-session/Playing"), ("POST", "/Sessions/fixture-session/Playing/Stop"):
+                    lock.lock()
+                    commands.append(url?.path.hasSuffix("/Stop") == true ? "stop" : "play")
+                    lock.unlock()
+                    self.send(connection, status: 204, contentType: "application/json", body: Data())
                 case ("POST", "/Users/AuthenticateByName"):
                     self.send(connection, contentType: "application/json", body: Data(#"{"AccessToken":"fixture-token","User":{"Id":"fixture-user"}}"#.utf8))
                 case ("GET", "/UserItems/Resume"):

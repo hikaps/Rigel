@@ -16,6 +16,7 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 - Cast to DLNA/UPnP renderers, Kodi, Roku, and Chromecast/Google Cast. Devices are discovered automatically via SSDP, Google Cast mDNS, or added manually by IP address.
 - Jellyfin clients appear in Devices after connecting to the server under Sources. Like Jellyfin’s cast picker, Rigel lists sessions the server allows your account to control, excluding Rigel itself; LAN presence alone is not enough. These destinations play Jellyfin library items, not arbitrary URLs.
+- Jellyfin playback status closes automatically once the server accepts the handoff. Reopen remote controls from Home → Now playing; Close leaves the stream running, while Stop ends playback.
 - AirPlay out to Apple TV and AirPlay-2 TVs, picked from the player screen. Non-AAC audio is converted to AAC for compatibility, copying compatible video without re-encoding it.
 - AirPlay subtitles use native media tracks or WebVTT renditions in Rigel-generated HLS. Selecting an external subtitle packages it into HLS for the TV while local playback can stay direct. Non-live AirPlay exports finish before playback starts, so preparation can take longer. The receiver controls subtitle styling and placement.
 - Remote renderers always receive a LAN-reachable stream URL, never a loopback address.

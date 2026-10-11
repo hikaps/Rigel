@@ -14,7 +14,7 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     brand
 
-                    if player.phase == .playing {
+                    if player.phase == .playing || player.phase == .buffering {
                         nowPlayingCard
                     }
 
@@ -93,7 +93,7 @@ struct HomeView: View {
                             .font(.headline)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Text("Playing on this device" + (player.sender.map { " · via \($0)" } ?? ""))
+                        Text("Playing on \(player.destinationName)" + (player.sender.map { " · via \($0)" } ?? ""))
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
