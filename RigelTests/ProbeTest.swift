@@ -1,6 +1,8 @@
 import XCTest
 import Network
 import ComposeApp
+import AVFoundation
+import AVKit
 
 @testable import Rigel
 
@@ -660,6 +662,7 @@ final class ProbeTest: XCTestCase {
         XCTAssertEqual(localized, "4,250")
         XCTAssertEqual(RigelHlsExporter.hlsPlaylistDuration(4.25), "4.250")
     }
+    @MainActor
     func testSidecarWebVttPublishesSubtitleRendition() throws {
         let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
         let sidecar = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_sidecar", withExtension: "vtt"))
@@ -686,6 +689,7 @@ final class ProbeTest: XCTestCase {
                     title: "Sidecar"
                 )
             ],
+            waitForCompletion: true,
             onReady: { path, message in
                 readyPath = path
                 error = message
@@ -703,6 +707,50 @@ final class ProbeTest: XCTestCase {
         let master = try String(contentsOf: outputDir.appendingPathComponent("index.m3u8"), encoding: .utf8)
         XCTAssertTrue(master.contains("TYPE=SUBTITLES"))
         XCTAssertTrue(master.contains("LANGUAGE=\"eng\""))
+        let server = RigelHttpServer(documentRoot: RigelHttpServer.proxyRootURL())
+        defer { server.stop() }
+        let started = expectation(description: "subtitle test server starts")
+        var port: Int32?
+        server.start { value, _ in
+            port = value
+            started.fulfill()
+        }
+        wait(for: [started], timeout: 5)
+        let proxyURL = "http://127.0.0.1:\(try XCTUnwrap(port))/\(sessionId)/index.m3u8"
+        let selected = expectation(description: "external playback selects the exported rendition")
+        weak var loadedController: RigelPlayerViewController?
+        let controller = RigelPlayerViewController(events: PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})) { asset, completion in
+            Task { @MainActor in
+                do {
+                    let loadedGroup = try await asset.loadMediaSelectionGroup(for: .legible)
+                    let group = try XCTUnwrap(loadedGroup)
+                    completion(.success((audio: nil, subtitles: group)))
+                    DispatchQueue.main.async {
+                        do {
+                            let controller = try XCTUnwrap(loadedController)
+                            let native = try XCTUnwrap(controller.children.first as? AVPlayerViewController)
+                            let player = try XCTUnwrap(native.player)
+                            let item = try XCTUnwrap(player.currentItem)
+                            let option = try XCTUnwrap(group.options.first)
+                            player.appliesMediaSelectionCriteriaAutomatically = false
+                            item.select(nil, in: group)
+                            controller.reconcileSubtitlePresentation(externalPlaybackActive: true)
+                            XCTAssertEqual(item.currentMediaSelection.selectedMediaOption(in: group), option)
+                        } catch {
+                            XCTFail("native subtitle selection failed: \(error)")
+                        }
+                        selected.fulfill()
+                    }
+                } catch {
+                    XCTFail("native subtitle discovery failed: \(error)")
+                    selected.fulfill()
+                }
+            }
+        }
+        loadedController = controller
+        defer { controller.stopPlayback() }
+        controller.load(url: proxyURL, title: nil, sender: nil, longFormVideoAirPlayEligible: false, subtitleTracks: [], selectedExternalSubtitleUrl: sidecar.absoluteString, isProxy: true)
+        wait(for: [selected], timeout: 10)
     }
     func testSidecarPlaylistPreservesLateCueTimeline() throws {
         let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))

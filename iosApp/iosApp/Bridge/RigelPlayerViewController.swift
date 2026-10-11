@@ -90,9 +90,9 @@ final class RigelPlayerViewController: UIViewController {
     /// Called with an absolute media position for remote seek forwarding or
     /// proxy session restart.
     var onSeekRequested: ((Double) -> Void)?
-    /// Called when the active subtitle selection changes. Direct playback keeps
-    /// its source URL; an existing proxy session is rebuilt so its HLS rendition
-    /// carries the selected sidecar for outputs that require proxy delivery.
+    /// Reports subtitle selection to Kotlin. Compatible local playback stays
+    /// direct; AirPlay packages the sidecar, and an existing proxy is rebuilt
+    /// so its HLS rendition carries the selected subtitle.
     var onExternalSubtitleSelected: ((SubtitleTrack?, Double) -> Void)?
     /// Reports whether AVPlayer is waiting for its next frame; the host
     /// keeps the buffering spinner up until this clears.
@@ -608,8 +608,13 @@ final class RigelPlayerViewController: UIViewController {
 
     private func selectedExternalOption(in group: AVMediaSelectionGroup?) -> AVMediaSelectionOption? {
         guard isProxyPlayback, selectedExternalSubtitleUrl != nil, let group else { return nil }
-        return group.options.first {
-            $0.displayName.hasPrefix(Self.selectedSubtitleMarker)
+        // AVPlayer localizes displayName (for example, "English"); the HLS
+        // rendition NAME, including our marker, remains in title metadata.
+        return group.options.first { option in
+            option.commonMetadata.contains {
+                $0.commonKey == .commonKeyTitle &&
+                    $0.stringValue?.hasPrefix(Self.selectedSubtitleMarker) == true
+            }
         }
     }
 
