@@ -70,6 +70,10 @@ final class PlayerModel: ObservableObject {
     }
 
     func apply(_ state: PlayerUiState) {
+        let wasRemotePlayback = remotePlayback
+        let jellyfinHandoffCompleted = state.destinationKind == .jellyfin
+            && state.remotePlayback && state.phase == .playing
+            && (!wasRemotePlayback || destinationId != state.destinationId)
         phase = state.phase
         sourceUrl = state.sourceUrl
         filename = state.filename
@@ -92,7 +96,13 @@ final class PlayerModel: ObservableObject {
         } else {
             probeDurationMs = nil
         }
-        showPlayer = state.phase != .idle
+        if state.phase == .idle || jellyfinHandoffCompleted {
+            showPlayer = false
+        } else if !state.remotePlayback || !wasRemotePlayback
+                    || (state.phase != .playing && state.phase != .buffering) {
+            // Remote controls may stay dismissed; preparation and local playback need the host.
+            showPlayer = true
+        }
     }
 
     func applyFutureSelection(_ state: OutputSelectionState) {

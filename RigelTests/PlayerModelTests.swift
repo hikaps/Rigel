@@ -55,7 +55,7 @@ private extension ProbeResult {
 }
 
 /// Guards the Kotlin→SwiftUI state mapping: PlayerModel must mirror
-/// PlayerUiState exactly, and showPlayer must track phase != idle.
+/// PlayerUiState and preserve user dismissal of remote playback controls.
 final class PlayerModelTests: XCTestCase {
 
     @MainActor
@@ -1334,7 +1334,7 @@ final class PlayerModelTests: XCTestCase {
         phase: PlayerPhase = .playing,
         route: PlaybackRoute = .direct,
         proxyUrl: String? = nil,
-        probe: ProbeResult
+        probe: ProbeResult? = nil
     ) -> PlayerUiState {
         PlayerUiState(
             phase: phase,
@@ -1352,9 +1352,37 @@ final class PlayerModelTests: XCTestCase {
         )
     }
     @MainActor
+    func testJellyfinHandoffDismissesControlsButAllowsReopening() {
+        let model = PlayerModel()
+        model.apply(state(phase: .connectingOutput))
+        XCTAssertTrue(model.showPlayer)
+        let playing = PlayerUiState(
+            phase: .playing, sourceUrl: "http://origin/Items/movie", filename: nil,
+            title: "Movie", subtitleTracks: [], selectedExternalSubtitleUrl: nil,
+            route: nil, proxyUrl: nil, probe: nil, error: nil, castActive: true,
+            startPositionMs: 0, sender: nil, destinationKind: .jellyfin,
+            destinationName: "Fixture TV", destinationId: "jellyfin:session",
+            remotePlayback: true, planDetail: nil
+        )
+        model.apply(playing)
+        XCTAssertFalse(model.showPlayer, "accepted Jellyfin handoff must dismiss preparation")
+        XCTAssertTrue(model.castActive)
+        XCTAssertEqual(model.phase, .playing)
+        model.showPlayer = true
+        model.apply(playing)
+        XCTAssertTrue(model.showPlayer, "updates must preserve manually reopened controls")
+        model.apply(state(phase: .connectingOutput))
+        XCTAssertTrue(model.showPlayer)
+        model.apply(playing)
+        XCTAssertFalse(model.showPlayer, "the next handoff must dismiss again")
+        model.apply(state(phase: .error))
+        XCTAssertTrue(model.showPlayer, "errors remain visible")
+    }
+
+    @MainActor
     func testRemoteDestinationHidesNativePlayerSurface() {
         let model = PlayerModel()
-        model.apply(PlayerUiState(
+        let remoteState = PlayerUiState(
             phase: .playing,
             sourceUrl: "http://origin/movie.mp4",
             filename: "movie.mp4",
@@ -1373,9 +1401,28 @@ final class PlayerModelTests: XCTestCase {
             destinationId: "roku:r1",
             remotePlayback: true,
             planDetail: "Direct play on Living Room"
-        ))
+        )
+        model.apply(remoteState)
         XCTAssertTrue(model.remotePlayback)
         XCTAssertFalse(model.rendersNativePlayer)
         XCTAssertEqual(model.destinationName, "Living Room")
+        XCTAssertTrue(model.showPlayer)
+
+        model.showPlayer = false
+        model.apply(remoteState)
+        XCTAssertFalse(model.showPlayer, "remote state updates must not reopen dismissed controls")
+        XCTAssertEqual(model.phase, .playing)
+        XCTAssertTrue(model.castActive)
+
+        model.showPlayer = true
+        model.apply(remoteState)
+        XCTAssertTrue(model.showPlayer, "Now Playing can reopen remote controls")
+
+        model.showPlayer = false
+        model.apply(state(phase: .probing))
+        XCTAssertTrue(model.showPlayer, "a new load must show preparation")
+        model.showPlayer = false
+        model.apply(state(phase: .playing))
+        XCTAssertTrue(model.showPlayer, "local playback must keep its native host visible")
     }
 }
