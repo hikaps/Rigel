@@ -83,6 +83,7 @@ The `Rigel` scheme runs both `RigelTests` and `RigelUITests`; append `-only-test
 - Branch from current `develop` into a descriptive feature/fix branch and linked worktree per change. Do not commit feature work directly to `develop` or release branch `main`.
 - Push and open feature PRs with base **`develop`**. Run affected local checks and wait for required GitHub CI before merging.
 - Merge approved feature PRs **on GitHub with squash merge**, not a local merge/fast-forward. Update local `develop` afterward, then remove the merged remote branch/disposable worktree when no longer needed.
+- Commit messages and PR titles use Conventional Commits: `type: imperative lowercase summary`, with `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci` or `perf` (e.g. `fix: load downloaded subtitles from local files`). Squash merges take the PR title and append `(#N)`, so the title must follow this form.
 - Release through a `develop` → `main` PR, merged **on GitHub with a merge commit**, never squash, after release checks pass.
 
 ## Code Conventions & Common Patterns
