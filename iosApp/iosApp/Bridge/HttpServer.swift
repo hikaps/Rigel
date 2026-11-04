@@ -457,16 +457,26 @@ final class RigelHttpServer {
         })
     }
 
-    private func respond(connection: NWConnection, frame: RigelHTTPFrame, halfClosed: Bool) {
+    private func respond(connection: NWConnection, frame: RigelHTTPFrame, halfClosed: Bool, allowOnDemandWait: Bool = true) {
         guard let request = Self.parseRequest(frame.head) else {
             closeOnQueue(connection)
             return
         }
         // A half-closed connection cannot carry another request.
         let keepAlive = request.keepAlive && !halfClosed
+        if allowOnDemandWait { RigelHlsExporter.noteOnDemandRequest(requestPath: request.path) }
         guard let fileURL = Self.resolve(root: documentRoot, path: request.path),
               let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
               let fileSize = (attrs[.size] as? NSNumber)?.int64Value else {
+            // On-demand VOD segments are produced when first requested.
+            if allowOnDemandWait, RigelHlsExporter.awaitOnDemandFile(requestPath: request.path, completion: { [weak self, weak connection] _ in
+                self?.queue.async { [weak self, weak connection] in
+                    guard let self, let connection, self.connectionStates[ObjectIdentifier(connection)] != nil else { return }
+                    self.respond(connection: connection, frame: frame, halfClosed: halfClosed, allowOnDemandWait: false)
+                }
+            }) {
+                return
+            }
             sendSimple(connection, status: "404 Not Found", extraHeaders: "", body: Data("Not found".utf8), keepAlive: keepAlive)
             return
         }

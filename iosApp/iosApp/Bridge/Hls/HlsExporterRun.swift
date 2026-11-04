@@ -184,6 +184,35 @@ extension RigelHlsExporter {
         } else {
             outputAudioIndices = selectedAudioIndices
         }
+        if session.waitForCompletion, mode == "remux", let videoIndex = selectedVideoIndex,
+           let plan = makeOnDemandPlan(
+               ctx,
+               session: session,
+               videoIndex: videoIndex,
+               audioIndices: outputAudioIndices,
+               passthroughAudioCodecs: passthroughAudioCodecs
+           ) {
+            let failure = runOnDemand(
+                session: session,
+                sessionId: sessionId,
+                outDir: outDir,
+                ctx: ctx,
+                plan: plan,
+                defaultAudioIndex: defaultAudioIndex,
+                subtitleInputs: subtitleInputs,
+                publish: {
+                    notified = publishReady(
+                        session: session,
+                        sessionId: sessionId,
+                        path: "\(sessionId)/index.m3u8",
+                        onReady: onReady
+                    )
+                    return notified
+                }
+            )
+            if let failure { reportFailure(failure) }
+            return
+        }
         if session.startOffsetMs > 0 {
             let seekOrigin90k = sourceTimestampOrigin90k(
                 ctx,
@@ -305,55 +334,17 @@ extension RigelHlsExporter {
         var primarySubtitleOutputs: [Int32: SubtitleRendition] = [:]
         var externalSubtitleOutputs: [Int: SubtitleRendition] = [:]
         if mainVideoOutput != nil {
-            for input in subtitleInputs {
-                let isSelectedExternal = input.sourceID != 0
-                guard let inputStream = input.context.pointee.streams[Int(input.streamIndex)],
-                      let codecpar = inputStream.pointee.codecpar else {
-                    if isSelectedExternal {
-                        reportFailure("Could not prepare the selected subtitle")
-                        return
-                    }
-                    continue
-                }
-                let codec = codecpar.pointee.codec_id
-                let chain: SubtitleChain?
-                if codec == AV_CODEC_ID_WEBVTT {
-                    chain = nil
+            let made = makeSubtitleRenditions(subtitleInputs, outDir: outDir, timestampMapMpegTS: subtitleMapMpegTS)
+            subtitleRenditions = made.renditions
+            if let error = made.error {
+                reportFailure(error)
+                return
+            }
+            for rendition in subtitleRenditions {
+                if rendition.input.sourceID == 0 {
+                    primarySubtitleOutputs[rendition.input.streamIndex] = rendition
                 } else {
-                    guard let decoded = makeSubtitleChain(inputStream: inputStream) else {
-                        if isSelectedExternal {
-                            reportFailure("Could not prepare the selected subtitle")
-                            return
-                        }
-                        NSLog(
-                            "[RigelHlsExporter] failed to initialize subtitle decoder for stream %d codec %d",
-                            input.streamIndex,
-                            codec.rawValue
-                        )
-                        continue
-                    }
-                    chain = decoded
-                }
-                guard let rendition = makeSubtitleRendition(
-                    input: input,
-                    ordinal: subtitleRenditions.count,
-                    outDir: outDir,
-                    chain: chain,
-                    timestampMapMpegTS: subtitleMapMpegTS,
-                    isSelectedExternal: isSelectedExternal
-                ) else {
-                    if isSelectedExternal {
-                        reportFailure("Could not prepare the selected subtitle")
-                        return
-                    }
-                    NSLog("[RigelHlsExporter] failed to create subtitle rendition for stream %d", input.streamIndex)
-                    continue
-                }
-                subtitleRenditions.append(rendition)
-                if input.sourceID == 0 {
-                    primarySubtitleOutputs[input.streamIndex] = rendition
-                } else {
-                    externalSubtitleOutputs[input.sourceID] = rendition
+                    externalSubtitleOutputs[rendition.input.sourceID] = rendition
                 }
             }
         }
@@ -908,6 +899,60 @@ extension RigelHlsExporter {
         } else if !notified {
             reportFailure("HLS presentation was not ready")
         }
+    }
+
+    /// Builds text renditions; a failed selected sidecar returns an error with
+    /// the renditions created so far (the caller releases them).
+    static func makeSubtitleRenditions(
+        _ inputs: [SubtitleInput],
+        outDir: URL,
+        timestampMapMpegTS: Int64
+    ) -> (renditions: [SubtitleRendition], error: String?) {
+        var renditions: [SubtitleRendition] = []
+        for input in inputs {
+            let isSelectedExternal = input.sourceID != 0
+            guard let inputStream = input.context.pointee.streams[Int(input.streamIndex)],
+                  let codecpar = inputStream.pointee.codecpar else {
+                if isSelectedExternal {
+                    return (renditions, "Could not prepare the selected subtitle")
+                }
+                continue
+            }
+            let codec = codecpar.pointee.codec_id
+            let chain: SubtitleChain?
+            if codec == AV_CODEC_ID_WEBVTT {
+                chain = nil
+            } else {
+                guard let decoded = makeSubtitleChain(inputStream: inputStream) else {
+                    if isSelectedExternal {
+                        return (renditions, "Could not prepare the selected subtitle")
+                    }
+                    NSLog(
+                        "[RigelHlsExporter] failed to initialize subtitle decoder for stream %d codec %d",
+                        input.streamIndex,
+                        codec.rawValue
+                    )
+                    continue
+                }
+                chain = decoded
+            }
+            guard let rendition = makeSubtitleRendition(
+                input: input,
+                ordinal: renditions.count,
+                outDir: outDir,
+                chain: chain,
+                timestampMapMpegTS: timestampMapMpegTS,
+                isSelectedExternal: isSelectedExternal
+            ) else {
+                if isSelectedExternal {
+                    return (renditions, "Could not prepare the selected subtitle")
+                }
+                NSLog("[RigelHlsExporter] failed to create subtitle rendition for stream %d", input.streamIndex)
+                continue
+            }
+            renditions.append(rendition)
+        }
+        return (renditions, nil)
     }
 
     static let pacingRunAheadLimitUs: Int64 = 20_000_000

@@ -15,6 +15,8 @@
 		1CA27631AEC10F690E9AD45C /* HlsSubtitlePipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = F58112060374FD74F145B776 /* HlsSubtitlePipeline.swift */; };
 		20FD37328E9554A8C5741BFE /* RigelApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13A2B46286CE87F507945849 /* RigelApp.swift */; };
 		211F091C9F4963728F4CE561 /* fixture_subtitles.mkv in Resources */ = {isa = PBXBuildFile; fileRef = 042B766CD39661881D8D5D03 /* fixture_subtitles.mkv */; };
+		23121ACE56489D970563191E /* HlsOnDemand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3139DE90EEFABF141D295047 /* HlsOnDemand.swift */; };
+		23E3EAEEF5FB12D176E2AEAD /* fixture_gop.mkv in Resources */ = {isa = PBXBuildFile; fileRef = DFE9610941199E3A4A83C6EB /* fixture_gop.mkv */; };
 		249C1FBDC464C9205176311D /* PlayerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09F3E4E0C6B00EC13043EECB /* PlayerModel.swift */; };
 		28F9FA6F92D2384F3E17BE53 /* JellyfinAsyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD09AB63F5771E7ACEFB345F /* JellyfinAsyncTests.swift */; };
 		2E0642A414B7D622683BD3F7 /* ProbeTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14898089F0C862B81383FBEB /* ProbeTest.swift */; };
@@ -26,6 +28,7 @@
 		48B6F1631ABCC70A154B9517 /* HlsAudioPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 649D9C1E86721B3D0FAD5299 /* HlsAudioPipeline.swift */; };
 		4E42AEF9C060214750F4BA34 /* HlsSubtitleChain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C456137CAB6FE330200F972 /* HlsSubtitleChain.swift */; };
 		4FDA46F1E38B929A93CECB72 /* OpenSubtitlesSearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D9328475D81883279D9EB6F /* OpenSubtitlesSearchSheet.swift */; };
+		50044F2D591B68AEC84A6E09 /* fixture_gop.mkv in Resources */ = {isa = PBXBuildFile; fileRef = DFE9610941199E3A4A83C6EB /* fixture_gop.mkv */; };
 		50E863DAF61D44CB9B2F2939 /* Bridges.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28078C8B475E60D15BD05567 /* Bridges.swift */; };
 		544CAC01A1432B532B25CD10 /* fixture_dts.mkv in Resources */ = {isa = PBXBuildFile; fileRef = 2132299F6DEDABD1CFAAEBA6 /* fixture_dts.mkv */; };
 		549522DBA5339D80E06F74DC /* OpenSubtitlesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C441C2B991587F00FB44566 /* OpenSubtitlesTests.swift */; };
@@ -58,6 +61,7 @@
 		A46049877E4FF3742A7FB16A /* BridgeAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1783BE55CF934AA43EC8DE34 /* BridgeAdapters.swift */; };
 		A4FF8D3A5DDA81FE7A7F4D5A /* seg000.ts in Resources */ = {isa = PBXBuildFile; fileRef = 6A8D75C2D0EECFD767071079 /* seg000.ts */; };
 		A736676548D0CC33C02ECFA7 /* HlsExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0C01D2B513E5A89B689474 /* HlsExporter.swift */; };
+		AA95E406875C0E4C98E3082F /* fixture_gop.srt in Resources */ = {isa = PBXBuildFile; fileRef = C8CA6D8B4C6A93D37E83014A /* fixture_gop.srt */; };
 		ADA3FF30BDA344083A60F755 /* index.m3u8 in Resources */ = {isa = PBXBuildFile; fileRef = 8A8EE6C9BB661255A193ACE5 /* index.m3u8 */; };
 		AE75FB2DD4C32966C09253C6 /* seg001.ts in Resources */ = {isa = PBXBuildFile; fileRef = A6FAB1CC165A0943FBA614CC /* seg001.ts */; };
 		B1B54FB9747983ED1F464C07 /* fixture_sidecar.vtt in Resources */ = {isa = PBXBuildFile; fileRef = 202FF823F8847A5C186D9926 /* fixture_sidecar.vtt */; };
@@ -84,6 +88,7 @@
 		F4B1AD0E21573717A8A1F728 /* DeviceSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2051C23C328C7C22C8B3632A /* DeviceSetupView.swift */; };
 		F9254DF13AA8D1E8B8F12B26 /* Ssdp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A0A77D73BD53FB477190213 /* Ssdp.swift */; };
 		FABF00F346D31526946B6F8E /* HlsVideoPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1931CB8B2731B064F91DB089 /* HlsVideoPipeline.swift */; };
+		FE583C6774A2D487CBD399D5 /* fixture_gop.srt in Resources */ = {isa = PBXBuildFile; fileRef = C8CA6D8B4C6A93D37E83014A /* fixture_gop.srt */; };
 		FE6501ADC8903E3517CDED07 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E20CC30AFCA65D53397B118 /* HomeView.swift */; };
 		FEFAD4FE14DF390979D2DED1 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 523A8D7C5525838C63DC0274 /* ShareViewController.swift */; };
 /* End PBXBuildFile section */
@@ -146,6 +151,7 @@
 		2132299F6DEDABD1CFAAEBA6 /* fixture_dts.mkv */ = {isa = PBXFileReference; path = fixture_dts.mkv; sourceTree = "<group>"; };
 		23506D9F47ACB0814B259811 /* PlayerChromeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerChromeViews.swift; sourceTree = "<group>"; };
 		28078C8B475E60D15BD05567 /* Bridges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bridges.swift; sourceTree = "<group>"; };
+		3139DE90EEFABF141D295047 /* HlsOnDemand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HlsOnDemand.swift; sourceTree = "<group>"; };
 		3995BE78A381573663358A1E /* SubtitleCustomizationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleCustomizationSheet.swift; sourceTree = "<group>"; };
 		3E4280FB564D181C3EF80346 /* JellyfinAsync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinAsync.swift; sourceTree = "<group>"; };
 		43A80DAD29CA264E11AE1E2A /* RigelPlayerViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigelPlayerViewController.swift; sourceTree = "<group>"; };
@@ -193,8 +199,10 @@
 		AE601FA4AE0C0908D4745F69 /* RigelFfmpeg.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RigelFfmpeg.h; sourceTree = "<group>"; };
 		AF5AE7D1F6263C9B396A58B0 /* fixture.mp4 */ = {isa = PBXFileReference; path = fixture.mp4; sourceTree = "<group>"; };
 		C48440E2919BF020921FCA05 /* JellyfinWorkflowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinWorkflowUITests.swift; sourceTree = "<group>"; };
+		C8CA6D8B4C6A93D37E83014A /* fixture_gop.srt */ = {isa = PBXFileReference; path = fixture_gop.srt; sourceTree = "<group>"; };
 		C8CE17963A2289F4B9263B94 /* Probe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Probe.swift; sourceTree = "<group>"; };
 		DC43E506FA9974EFA8872E6C /* TrackPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackPickerSheet.swift; sourceTree = "<group>"; };
+		DFE9610941199E3A4A83C6EB /* fixture_gop.mkv */ = {isa = PBXFileReference; path = fixture_gop.mkv; sourceTree = "<group>"; };
 		EFB95112E586DE9EC94C62B3 /* UpnpRendererService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpnpRendererService.swift; sourceTree = "<group>"; };
 		F58112060374FD74F145B776 /* HlsSubtitlePipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HlsSubtitlePipeline.swift; sourceTree = "<group>"; };
 		FCEC029B215DB7990B1A8B1F /* fixture_sub_en.srt */ = {isa = PBXFileReference; path = fixture_sub_en.srt; sourceTree = "<group>"; };
@@ -223,6 +231,8 @@
 			isa = PBXGroup;
 			children = (
 				2132299F6DEDABD1CFAAEBA6 /* fixture_dts.mkv */,
+				DFE9610941199E3A4A83C6EB /* fixture_gop.mkv */,
+				C8CA6D8B4C6A93D37E83014A /* fixture_gop.srt */,
 				659FA6FDBCB7688DA8AF7056 /* fixture_multi.mkv */,
 				202FF823F8847A5C186D9926 /* fixture_sidecar.vtt */,
 				FCEC029B215DB7990B1A8B1F /* fixture_sub_en.srt */,
@@ -314,6 +324,7 @@
 				6149C13D84A4ADF6B8A96411 /* HlsExporterIO.swift */,
 				96F87820A73BAB443DDACBCF /* HlsExporterReadiness.swift */,
 				89BD10D0E92B2A1D4BA7E188 /* HlsExporterRun.swift */,
+				3139DE90EEFABF141D295047 /* HlsOnDemand.swift */,
 				91D33B49993864B6004681B2 /* HlsPlaylistAndRemux.swift */,
 				9C456137CAB6FE330200F972 /* HlsSubtitleChain.swift */,
 				F58112060374FD74F145B776 /* HlsSubtitlePipeline.swift */,
@@ -503,6 +514,8 @@
 			files = (
 				738210E62716D4405D4F8273 /* fixture.mp4 in Resources */,
 				544CAC01A1432B532B25CD10 /* fixture_dts.mkv in Resources */,
+				23E3EAEEF5FB12D176E2AEAD /* fixture_gop.mkv in Resources */,
+				FE583C6774A2D487CBD399D5 /* fixture_gop.srt in Resources */,
 				006ED9F08C9C91717D4EF639 /* fixture_multi.mkv in Resources */,
 				B52C34C9EBE0A170A9E5C5C5 /* fixture_sidecar.vtt in Resources */,
 				05A94795346AD764051BE2DD /* fixture_sub_en.srt in Resources */,
@@ -521,6 +534,8 @@
 			files = (
 				560907BCC69C27B2E8C43023 /* fixture.mp4 in Resources */,
 				5A52CD987F49FF50AA068D12 /* fixture_dts.mkv in Resources */,
+				50044F2D591B68AEC84A6E09 /* fixture_gop.mkv in Resources */,
+				AA95E406875C0E4C98E3082F /* fixture_gop.srt in Resources */,
 				8C7A43B936E1C8DEE8FA4E5B /* fixture_multi.mkv in Resources */,
 				B1B54FB9747983ED1F464C07 /* fixture_sidecar.vtt in Resources */,
 				620D4F203A48C13CB246006D /* fixture_sub_en.srt in Resources */,
@@ -620,6 +635,7 @@
 				992C5F304BCD67E08D16EAF8 /* HlsExporterIO.swift in Sources */,
 				E6B7D8A55C72256E1E1CC76E /* HlsExporterReadiness.swift in Sources */,
 				30BCF81934AC8B3124D2C772 /* HlsExporterRun.swift in Sources */,
+				23121ACE56489D970563191E /* HlsOnDemand.swift in Sources */,
 				8706C6DA54655EDBCB069AE1 /* HlsPlaylistAndRemux.swift in Sources */,
 				4E42AEF9C060214750F4BA34 /* HlsSubtitleChain.swift in Sources */,
 				1CA27631AEC10F690E9AD45C /* HlsSubtitlePipeline.swift in Sources */,

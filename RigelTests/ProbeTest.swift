@@ -486,6 +486,132 @@ final class ProbeTest: XCTestCase {
         )
     }
 
+    func testOnDemandSegmentBoundaries() {
+        let keyframes: [Int64] = stride(from: 0, through: 38, by: 2).map { Int64($0) }
+        XCTAssertEqual(
+            RigelHlsExporter.onDemandSegmentBoundaries(keyframes: keyframes, start: 0, end: 40, minimum: 4, maximum: 30),
+            [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40]
+        )
+        // A start between keyframes begins at the previous keyframe.
+        XCTAssertEqual(
+            RigelHlsExporter.onDemandSegmentBoundaries(keyframes: keyframes, start: 7, end: 40, minimum: 4, maximum: 30)?.first,
+            6
+        )
+        // A tail shorter than the minimum folds into the previous segment.
+        XCTAssertEqual(
+            RigelHlsExporter.onDemandSegmentBoundaries(keyframes: [0, 4, 8], start: 0, end: 9, minimum: 4, maximum: 30),
+            [0, 4, 9]
+        )
+        XCTAssertNil(RigelHlsExporter.onDemandSegmentBoundaries(keyframes: [0, 40], start: 0, end: 80, minimum: 4, maximum: 30))
+        XCTAssertNil(RigelHlsExporter.onDemandSegmentBoundaries(keyframes: [], start: 0, end: 40, minimum: 4, maximum: 30))
+    }
+
+    func testAirPlayOnDemandServesNonSequentialSegments() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_gop", withExtension: "mkv"))
+        let sessionId = "test-on-demand-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "on-demand session becomes ready")
+        var readyPath: String?
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            passthroughAudioCodecs: ["aac"],
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: true,
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 10)
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "on-demand session did not become ready")
+        XCTAssertNil(error)
+        for name in ["variant_0.m3u8", "variant_1.m3u8"] {
+            let playlist = try String(contentsOf: outputDir.appendingPathComponent(name), encoding: .utf8)
+            XCTAssertTrue(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"), playlist)
+            XCTAssertTrue(playlist.contains("#EXT-X-ENDLIST"), playlist)
+            // 2 s GOPs group into 4 s segments; the short tail folds into segment 8.
+            XCTAssertEqual(playlist.components(separatedBy: "#EXTINF:").count - 1, 9, playlist)
+            XCTAssertEqual(playlist.components(separatedBy: "#EXTINF:4.000").count - 1, 8, playlist)
+        }
+
+        let server = RigelHttpServer(documentRoot: RigelHttpServer.proxyRootURL())
+        defer { server.stop() }
+        let started = expectation(description: "on-demand test server starts")
+        var port: Int32?
+        server.start { value, _ in
+            port = value
+            started.fulfill()
+        }
+        wait(for: [started], timeout: 5)
+        let base = "http://127.0.0.1:\(try XCTUnwrap(port))/\(sessionId)/"
+        func get(_ name: String) throws -> (status: Int, body: Data) {
+            let done = expectation(description: "GET \(name)")
+            var status = 0
+            var body = Data()
+            URLSession.shared.dataTask(with: try XCTUnwrap(URL(string: base + name))) { data, response, _ in
+                status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                body = data ?? Data()
+                done.fulfill()
+            }.resume()
+            wait(for: [done], timeout: 30)
+            return (status, body)
+        }
+
+        XCTAssertEqual(try get("seg0_00008.ts").status, 200)
+        let packets = try readVideoPackets(from: outputDir.appendingPathComponent("seg0_00008.ts"))
+        let firstPTS = try XCTUnwrap(packets.map(\.pts).min())
+        XCTAssertEqual(Double(firstPTS), Double((32 + 1) * 90_000), accuracy: 9_000)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: outputDir.appendingPathComponent("seg0_00006.ts").path),
+            "segment 8 must come from a seek, not a sequential run"
+        )
+
+        XCTAssertEqual(try get("seg1_00008.ts").status, 200)
+        let (audioProbe, audioError) = RigelProbe.probe(
+            url: outputDir.appendingPathComponent("seg1_00008.ts").absoluteString,
+            headers: [:]
+        )
+        XCTAssertNil(audioError)
+        XCTAssertEqual(audioProbe?.audioCodecs, ["aac"])
+
+        let subtitle = try get("subtitle_0_00008.vtt")
+        XCTAssertEqual(subtitle.status, 200)
+        let vtt = String(decoding: subtitle.body, as: UTF8.self)
+        XCTAssertTrue(vtt.contains("Late cue"), vtt)
+        // The cue maps to its source time on the shifted TS clock: (33 + 1) s.
+        let mpegts = try XCTUnwrap(vtt.range(of: #"MPEGTS:(\d+)"#, options: .regularExpression)
+            .flatMap { Double(vtt[$0].dropFirst("MPEGTS:".count)) })
+        let cueStart = try XCTUnwrap(vtt.range(of: #"\d\d:\d\d:\d\d\.\d\d\d -->"#, options: .regularExpression)
+            .map { vtt[$0].prefix(12).split(separator: ":").reduce(0.0) { $0 * 60 + (Double($1) ?? 0) } })
+        XCTAssertEqual(mpegts + cueStart * 90_000, Double(34 * 90_000), accuracy: 900, vtt)
+
+        XCTAssertEqual(try get("seg0_00099.ts").status, 404)
+
+        RigelHlsExporter.stopSession(sessionId: sessionId)
+        let removed = expectation(description: "on-demand session directory removed")
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+            if !FileManager.default.fileExists(atPath: outputDir.path) {
+                timer.invalidate()
+                removed.fulfill()
+            }
+        }
+        wait(for: [removed], timeout: 10)
+    }
+
     func testStopSessionDeletesSessionDirectory() throws {
         let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
         let sessionId = "test-cleanup-\(UUID().uuidString)"

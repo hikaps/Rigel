@@ -63,6 +63,19 @@ WEBVTT
 00:00.000 --> 00:01.000
 Sidecar subtitle
 EOF
+# 40s MKV (H264 2s GOP + E-AC3 + late SRT cue) — on-demand AirPlay VOD segments
+cat > "$OUT/fixture_gop.srt" <<'EOF'
+1
+00:00:33,000 --> 00:00:34,000
+Late cue
+EOF
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc=duration=40:size=320x240:rate=10" \
+  -f lavfi -i "sine=frequency=440:duration=40:sample_rate=48000" \
+  -f srt -i "$OUT/fixture_gop.srt" \
+  -map 0:v -map 1:a -map 2:0 -metadata:s:s:0 language=eng \
+  -c:v libx264 -pix_fmt yuv420p -g 20 -keyint_min 20 -sc_threshold 0 -bf 2 \
+  -c:a eac3 -c:s srt -t 40 "$OUT/fixture_gop.mkv"
 # 2s HLS (H264+AAC, 2 segments) — bundled as RigelTests resources
 # (fixture_hls/ is referenced by project.pbxproj; without these files the
 # Swift test target's resource phase fails on fresh checkouts)

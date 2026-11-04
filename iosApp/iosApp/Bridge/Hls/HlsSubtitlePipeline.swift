@@ -479,6 +479,15 @@ extension RigelHlsExporter {
 
     private static func appendSubtitleCue(_ cue: SubtitleCue, to rendition: SubtitleRendition) {
         guard cue.endMs > cue.startMs, !cue.text.isEmpty else { return }
+        if rendition.onDemand {
+            // Re-demuxed regions after on-demand seeks repeat cues.
+            guard !rendition.pendingCues.contains(where: {
+                $0.startMs == cue.startMs && $0.endMs == cue.endMs && $0.text == cue.text
+            }) else { return }
+            rendition.pendingCues.append(cue)
+            rendition.wrotePacket = true
+            return
+        }
         rendition.pendingCues.append(cue)
         rendition.timelineEndMs = max(rendition.timelineEndMs, cue.endMs)
         rendition.wrotePacket = true
@@ -520,21 +529,10 @@ extension RigelHlsExporter {
         to periodEnd: Int64,
         in rendition: SubtitleRendition
     ) -> Bool {
-        let activeCues = rendition.pendingCues.filter {
-            $0.startMs < periodEnd && $0.endMs > periodStart
-        }
-        let map = "X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:\(max(0, rendition.timestampMapMpegTS))"
-        var vttLines = ["WEBVTT", map, ""]
-        for cue in activeCues {
-            let settings = cue.settings.map { " \($0)" } ?? ""
-            vttLines.append("\(vttTimestamp(cue.startMs)) --> \(vttTimestamp(cue.endMs))\(settings)")
-            vttLines.append(cue.text)
-            vttLines.append("")
-        }
         let fileName = "subtitle_\(rendition.ordinal)_\(String(format: "%05d", rendition.segments.count)).vtt"
         let fileURL = rendition.outDir.appendingPathComponent(fileName)
         do {
-            try (vttLines.joined(separator: "\n") + "\n")
+            try subtitlePeriodVTT(rendition, from: periodStart, to: periodEnd)
                 .write(to: fileURL, atomically: true, encoding: .utf8)
         } catch {
             return false
@@ -549,6 +547,21 @@ extension RigelHlsExporter {
         }
         rendition.segments.append((name: fileName, duration: duration))
         return true
+    }
+
+    static func subtitlePeriodVTT(_ rendition: SubtitleRendition, from periodStart: Int64, to periodEnd: Int64) -> String {
+        let activeCues = rendition.pendingCues.filter {
+            $0.startMs < periodEnd && $0.endMs > periodStart
+        }
+        let map = "X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:\(max(0, rendition.timestampMapMpegTS))"
+        var vttLines = ["WEBVTT", map, ""]
+        for cue in activeCues {
+            let settings = cue.settings.map { " \($0)" } ?? ""
+            vttLines.append("\(vttTimestamp(cue.startMs)) --> \(vttTimestamp(cue.endMs))\(settings)")
+            vttLines.append(cue.text)
+            vttLines.append("")
+        }
+        return vttLines.joined(separator: "\n") + "\n"
     }
 
     private static func initializeSubtitlePlaylist(_ rendition: SubtitleRendition) {
