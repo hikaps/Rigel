@@ -4,7 +4,9 @@ import ComposeApp
 /// Local ffmpeg remux/transcode → HLS session. Writes a master playlist,
 /// variant playlists, and segments into Documents/proxy/<sessionId>/ and
 /// signals readiness when enough media is available.
-/// AirPlay VOD sessions defer readiness until the completed playlist is rewritten from EVENT to VOD.
+/// AirPlay VOD remux sessions produce keyframe-aligned segments on demand
+/// (HlsOnDemand.swift); other AirPlay VOD sessions defer readiness until the
+/// completed playlist is rewritten from EVENT to VOD.
 /// REMUX: video stream-copy; each audio stream is copied when AAC/MP3/FLAC/ALAC
 /// or decoded→AAC otherwise. TRANSCODE: video decode→VideoToolbox H.264,
 /// each audio stream decode→AAC.
@@ -26,6 +28,8 @@ final class RigelHlsExporter {
         /// Local playhead feed (absolute media ms) driving export pacing.
         var playheadMs: Int64 = -1
         var playheadUpdatedAt: DispatchTime?
+        /// Set for on-demand AirPlay VOD sessions; guarded by RigelHlsExporter.lock.
+        var onDemand: OnDemandRequests?
 
         init(
             queue: DispatchQueue,
@@ -95,7 +99,7 @@ final class RigelHlsExporter {
         return child.hasPrefix(prefix)
     }
 
-    private static func activeSessionKey(for sessionId: String) -> String? {
+    static func activeSessionKey(for sessionId: String) -> String? {
         sessions.keys.first { $0.caseInsensitiveCompare(sessionId) == .orderedSame }
     }
     private static func reportStartFailure(

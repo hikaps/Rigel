@@ -40,6 +40,8 @@ final class SubtitleRendition {
     var pendingCues: [SubtitleCue] = []
     var nextPeriodStartMs: Int64 = 0
     var timelineEndMs: Int64 = 0
+    /// On-demand VOD: cues accumulate across seeks; the producer writes periods.
+    var onDemand = false
 
     init(
         input: SubtitleInput,

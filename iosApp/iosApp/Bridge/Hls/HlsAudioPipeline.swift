@@ -10,6 +10,8 @@ final class AudioChain {
     let fifo: OpaquePointer
     var nextPts: Int64 = 0
     var error: String?
+    /// Replaces av_interleaved_write_frame for on-demand per-segment muxers.
+    var packetSink: ((UnsafeMutablePointer<AVPacket>) -> Int32)?
 
     func recordError(_ message: String) {
         if error == nil {
@@ -292,7 +294,7 @@ extension RigelHlsExporter {
             packet.stream_index = outStream.pointee.index
             av_packet_rescale_ts(&packet, chain.encCtx.pointee.time_base, outStream.pointee.time_base)
             packet.pos = -1
-            let writeRet = av_interleaved_write_frame(out, &packet)
+            let writeRet = chain.packetSink?(&packet) ?? av_interleaved_write_frame(out, &packet)
             av_packet_unref(&packet)
             if writeRet < 0 {
                 chain.recordError("audio packet write failed: \(avErrorString(writeRet))")
