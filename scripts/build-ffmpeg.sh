@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build FFmpeg static libraries for iosSimulatorArm64 and install into
-# iosApp/vendor/ffmpeg/{include,lib}. LGPL-3.0; source offer: https://ffmpeg.org
+# iosApp/vendor/ffmpeg/{include,lib}. FFmpeg is LGPL-3.0 (see NOTICE); source offer: https://ffmpeg.org
 set -euo pipefail
 
 FF_VERSION="${FF_VERSION:-7.1}"
