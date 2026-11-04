@@ -56,4 +56,4 @@ The published IPAs are ad-hoc signed; AltStore or SideStore re-signs them with y
 
 ## License
 
-Code is licensed under the [GPL-3.0](LICENSE). The bundled FFmpeg libraries are LGPL-3.0 — see [NOTICE](NOTICE).
+Code is licensed under the [Apache-2.0](LICENSE). The bundled FFmpeg libraries are LGPL-3.0 — see [NOTICE](NOTICE).

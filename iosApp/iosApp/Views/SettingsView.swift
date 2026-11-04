@@ -245,7 +245,7 @@ struct SettingsView: View {
                 Image(systemName: "star.fill")
                     .foregroundStyle(Color.rigelStar)
             }
-            Text("Licenses: Rigel GPL-3.0 · FFmpeg LGPL-3.0 (source: ffmpeg.org)")
+            Text("Licenses: Rigel Apache-2.0 · FFmpeg LGPL-3.0 (source: ffmpeg.org)")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
