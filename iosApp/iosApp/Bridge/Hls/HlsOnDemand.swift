@@ -26,7 +26,7 @@ final class OnDemandRequests {
         case subtitle(rendition: Int, period: Int)
     }
 
-    static let timeoutSeconds: Double = 25
+    static let timeoutSeconds: Double = 40
 
     let segmentCount: Int
     let periodCount: Int
@@ -36,6 +36,7 @@ final class OnDemandRequests {
     private var ready = Set<Key>()
     private var waiters: [Key: [OnDemandCompletion]] = [:]
     private var lastRequested = 0
+    private var newestWaiting: Key?
     private var closed = false
 
     init(segmentCount: Int, periodCount: Int, renditionCount: Int, streamCount: Int) {
@@ -82,16 +83,38 @@ final class OnDemandRequests {
             return true
         }
         waiters[key, default: []].append(once)
+        newestWaiting = key
         if case .segment(let segment) = key { lastRequested = segment }
         condition.signal()
         condition.unlock()
-        DispatchQueue.global().asyncAfter(deadline: .now() + Self.timeoutSeconds) { once.call(false) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.timeoutSeconds) { [weak self] in
+            // A timed-out request must stop steering the producer.
+            self?.abandon(key, once)
+            once.call(false)
+        }
         return true
     }
 
-    func pending() -> (keys: [Key], lastRequested: Int) {
+    /// Waiting keys plus the most recent one: after a seek the player no
+    /// longer wants what it asked for before, so production follows the newest.
+    func pending() -> (keys: [Key], newest: Key?, lastRequested: Int) {
         condition.lock(); defer { condition.unlock() }
-        return (Array(waiters.keys), lastRequested)
+        return (Array(waiters.keys), newestWaiting.flatMap { waiters[$0] != nil ? $0 : nil }, lastRequested)
+    }
+
+    private func abandon(_ key: Key, _ completion: OnDemandCompletion) {
+        condition.lock(); defer { condition.unlock() }
+        guard var list = waiters[key] else { return }
+        list.removeAll { $0 === completion }
+        waiters[key] = list.isEmpty ? nil : list
+    }
+
+    /// Fails requests the producer will no longer serve (superseded by a seek).
+    func drop(_ keys: [Key]) {
+        condition.lock()
+        let callbacks = keys.flatMap { waiters.removeValue(forKey: $0) ?? [] }
+        condition.unlock()
+        callbacks.forEach { $0.call(false) }
     }
 
     /// Tracks the playback position from every segment request, including
@@ -721,15 +744,21 @@ final class OnDemandProducer {
     /// Serves requests until cancellation; returns a failure message or nil.
     func serve() -> String? {
         while !Exporter.isCancelled(session) {
-            let (keys, lastRequested) = requests.pending()
-            let targets = keys.map { key -> Int in
+            let (keys, newest, lastRequested) = requests.pending()
+            func segmentOf(_ key: OnDemandRequests.Key) -> Int {
                 switch key {
                 case .segment(let segment): return segment
                 case .subtitle(_, let period): return periodSegment[period]
                 }
             }
             let target: Int?
-            if let wanted = targets.min() {
+            if let newest {
+                // Stay with the newest burst of requests; older far-away ones are stale.
+                let anchor = segmentOf(newest)
+                target = keys.map(segmentOf).filter { abs($0 - anchor) <= 3 }.min() ?? anchor
+                let stale = keys.filter { abs(segmentOf($0) - anchor) > 3 }
+                if !stale.isEmpty { requests.drop(stale) }
+            } else if let wanted = keys.map(segmentOf).min() {
                 target = wanted
             } else if cursor < plan.segmentCount, cursor <= lastRequested + Exporter.onDemandPrefetchSegments {
                 target = cursor
@@ -740,10 +769,16 @@ final class OnDemandProducer {
                 requests.waitForRequest(seconds: 0.25)
                 continue
             }
+            let began = DispatchTime.now()
+            var seekSeconds = 0.0
             if target < cursor || target > cursor + 2 {
                 if let error = startRun(at: target) { return Exporter.isCancelled(session) ? nil : error }
+                seekSeconds = Double(DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1e9
             }
+            let produced = cursor
             if let error = produceNext() { return Exporter.isCancelled(session) ? nil : error }
+            let total = Double(DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1e9
+            NSLog("[RigelOnDemand] segment %d produced in %.2f s (seek %.2f s, wanted %d)", produced, total, seekSeconds, target)
             evict(around: lastRequested)
         }
         return nil
