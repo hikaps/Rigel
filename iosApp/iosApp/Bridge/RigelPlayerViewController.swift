@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import AVKit
+import MediaPlayer
 import UIKit
 import SwiftUI
 import ComposeApp
@@ -485,6 +486,14 @@ final class RigelPlayerViewController: UIViewController {
         transportControls.translatesAutoresizingMaskIntoConstraints = false
         bottomBar.addSubview(transportControls)
 
+        // System volume; while AirPlaying this adjusts the receiver's volume.
+        let volumeView = MPVolumeView(frame: .zero)
+        volumeView.showsRouteButton = false
+        volumeView.tintColor = .white
+        volumeView.accessibilityIdentifier = "player.volumeSlider"
+        volumeView.translatesAutoresizingMaskIntoConstraints = false
+        bottomBar.addSubview(volumeView)
+
         NSLayoutConstraint.activate([
             bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -497,8 +506,13 @@ final class RigelPlayerViewController: UIViewController {
 
             transportControls.centerXAnchor.constraint(equalTo: bottomBar.centerXAnchor),
             transportControls.topAnchor.constraint(equalTo: timeline.bottomAnchor, constant: 2),
-            transportControls.bottomAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.bottomAnchor),
-            bottomBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 116),
+            transportControls.bottomAnchor.constraint(equalTo: volumeView.topAnchor, constant: -4),
+
+            volumeView.leadingAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.leadingAnchor, constant: 24),
+            volumeView.trailingAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.trailingAnchor, constant: -24),
+            volumeView.heightAnchor.constraint(equalToConstant: 30),
+            volumeView.bottomAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.bottomAnchor),
+            bottomBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 152),
         ])
     }
 
@@ -1494,6 +1508,7 @@ final class RigelPlayerViewController: UIViewController {
     @objc private func progressChanged() {
         guard isScrubbing else { return }
         pendingScrubValue = progressSlider.value
+        updatePlaybackControls()
         showControls()
     }
 
@@ -1520,12 +1535,16 @@ final class RigelPlayerViewController: UIViewController {
     /// would otherwise dirty the view hierarchy for nothing.
     private func updatePlaybackControls() {
         guard customPlaybackControls, let player, let item = player.currentItem else { return }
-        let elapsed = mediaSeconds
+        let duration = effectiveDuration(item)
+        // While scrubbing, show the position being sought to, not the playhead.
+        var elapsed = mediaSeconds
+        if let pendingScrubValue, duration.isFinite, duration > 0 {
+            elapsed = Double(pendingScrubValue) * duration
+        }
         let elapsedText = Self.formatTime(elapsed)
         if elapsedLabel.text != elapsedText {
             elapsedLabel.text = elapsedText
         }
-        let duration = effectiveDuration(item)
         if duration.isFinite, duration > 0 {
             progressSlider.isHidden = false
             if let pendingScrubValue {
