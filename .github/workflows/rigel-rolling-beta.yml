@@ -8,7 +8,7 @@ name: Rigel Rolling Beta Release
 env:
   # SideStore currently compares semantic versions, not source buildVersion.
   # Keep beta builds on the current stable major/minor; each run becomes the patch version.
-  BETA_VERSION_PREFIX: "1.0"
+  BETA_VERSION_PREFIX: "1.1"
   FFMPEG_VERSION: "7.1"
 
 on:

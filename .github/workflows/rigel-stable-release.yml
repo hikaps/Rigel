@@ -6,7 +6,7 @@ name: Rigel Stable Release
 # AltStore/SideStore re-signs the ad-hoc IPA with the installer's Apple ID.
 
 env:
-  STABLE_VERSION: "1.0.0"
+  STABLE_VERSION: "1.1.0"
   FFMPEG_VERSION: "7.1"
 
 on:
