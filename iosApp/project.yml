@@ -62,6 +62,7 @@ targets:
       path: iosApp/Info.plist
       properties:
         CFBundleDisplayName: "$(APP_DISPLAY_NAME)"
+        OpenSubtitlesAPIKey: "$(OPENSUBTITLES_API_KEY)"
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         CADisableMinimumFrameDurationOnPhone: true

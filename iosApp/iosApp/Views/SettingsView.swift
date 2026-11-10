@@ -19,13 +19,12 @@ extension RouteOverride {
 
 struct SettingsView: View {
     private enum OpenSubtitlesField {
-        case apiKey, username, password
+        case username, password
     }
 
     @State private var routeKey = ""
     @State private var rendererOn = false
     @State private var rendererNotice: String?
-    @State private var openSubtitlesAPIKey = ""
     @State private var openSubtitlesUsername = ""
     @State private var openSubtitlesPassword = ""
     @State private var openSubtitlesConnected = false
@@ -33,7 +32,6 @@ struct SettingsView: View {
     @State private var openSubtitlesNotice: String?
     @State private var openSubtitlesNoticeIsError = false
     @FocusState private var openSubtitlesFocusedField: OpenSubtitlesField?
-    @State private var showOpenSubtitlesAPIKey = false
     @State private var showOpenSubtitlesPassword = false
     private var settings: SettingsStore { RigelCore.shared.settings }
 
@@ -115,21 +113,6 @@ struct SettingsView: View {
                     .disabled(openSubtitlesBusy)
                 }
             } else {
-                HStack {
-                    if showOpenSubtitlesAPIKey {
-                        TextField("API key", text: $openSubtitlesAPIKey)
-                            .focused($openSubtitlesFocusedField, equals: .apiKey)
-                    } else {
-                        SecureField("API key", text: $openSubtitlesAPIKey)
-                            .focused($openSubtitlesFocusedField, equals: .apiKey)
-                    }
-                    secretVisibilityButton($showOpenSubtitlesAPIKey, title: "API key")
-                }
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.next)
-                .onSubmit { openSubtitlesFocusedField = .username }
-
                 TextField("Username", text: $openSubtitlesUsername)
                     .focused($openSubtitlesFocusedField, equals: .username)
                     .textContentType(.username)
@@ -179,11 +162,6 @@ struct SettingsView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Color.rigelStar)
                 .listRowBackground(Color.clear)
-
-                Link(destination: URL(string: "https://www.opensubtitles.com/en/app-api")!) {
-                    Label("Get an API key at opensubtitles.com", systemImage: "arrow.up.right")
-                        .font(.footnote)
-                }
             }
         } header: {
             Text("OpenSubtitles")
@@ -193,8 +171,7 @@ struct SettingsView: View {
     }
 
     private var openSubtitlesFieldsFilled: Bool {
-        !openSubtitlesAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !openSubtitlesUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !openSubtitlesUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !openSubtitlesPassword.isEmpty
     }
 
@@ -261,7 +238,6 @@ struct SettingsView: View {
 
     private func loadOpenSubtitlesSettings() {
         let store = OpenSubtitlesKeychainStore.shared
-        openSubtitlesAPIKey = store.apiKey ?? ""
         openSubtitlesUsername = store.username ?? ""
         openSubtitlesPassword = ""
         openSubtitlesConnected = store.isConnected
@@ -271,7 +247,6 @@ struct SettingsView: View {
 
     private func disconnectOpenSubtitles() {
         OpenSubtitlesKeychainStore.shared.clear()
-        openSubtitlesAPIKey = ""
         openSubtitlesPassword = ""
         openSubtitlesConnected = false
         openSubtitlesNotice = "OpenSubtitles disconnected"
@@ -282,11 +257,15 @@ struct SettingsView: View {
         // The keyboard submit path bypasses the Connect button's disabled
         // state, so re-entry protection lives here rather than on the button.
         guard !openSubtitlesBusy else { return }
-        let apiKey = openSubtitlesAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let username = openSubtitlesUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = openSubtitlesPassword
-        guard !apiKey.isEmpty, !username.isEmpty, !password.isEmpty else {
-            openSubtitlesNotice = "Enter an API key, username, and password."
+        guard let apiKey = OpenSubtitlesKeychainStore.shared.apiKey, !apiKey.isEmpty else {
+            openSubtitlesNotice = "This build has no OpenSubtitles application key."
+            openSubtitlesNoticeIsError = true
+            return
+        }
+        guard !username.isEmpty, !password.isEmpty else {
+            openSubtitlesNotice = "Enter your username and password."
             openSubtitlesNoticeIsError = true
             openSubtitlesConnected = OpenSubtitlesKeychainStore.shared.isConnected
             return
@@ -303,7 +282,7 @@ struct SettingsView: View {
                     password: password
                 )
                 let store = OpenSubtitlesKeychainStore.shared
-                store.apiKey = apiKey
+                store.password = password
                 store.username = username
                 store.token = session.token
                 store.baseURL = session.baseURL

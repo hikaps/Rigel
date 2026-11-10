@@ -66,6 +66,7 @@ jobs:
       - name: Archive unsigned beta app
         env:
           CURRENT_PROJECT_VERSION: "${{ github.run_number }}"
+          OPENSUBTITLES_API_KEY: ${{ secrets.OPENSUBTITLES_API_KEY }}
         run: |
           set -euo pipefail
           MARKETING_VERSION="${BETA_VERSION_PREFIX}.${CURRENT_PROJECT_VERSION}"
@@ -79,6 +80,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             MARKETING_VERSION="$MARKETING_VERSION" \
             CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION" \
+            OPENSUBTITLES_API_KEY="$OPENSUBTITLES_API_KEY" \
             BUNDLE_SUFFIX=".beta" \
             APP_DISPLAY_NAME="Rigel Beta"
 
