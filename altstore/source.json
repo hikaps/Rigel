@@ -29,11 +29,12 @@
       },
       "versions": [
         {
-          "version": "1.0.0",
-          "date": "2026-08-24T23:10:38Z",
-          "downloadURL": "https://github.com/hikaps/Rigel/releases/download/v1.0.0/Rigel-stable-22bd9f5.ipa",
-          "localizedDescription": "Stable release build 3.",
-          "size": 9781426,
+          "version": "1.1.0",
+          "buildVersion": "4",
+          "date": "2026-11-10T12:07:51Z",
+          "downloadURL": "https://github.com/hikaps/Rigel/releases/download/v1.1.0/Rigel-stable-c8b2eba.ipa",
+          "localizedDescription": "Stable release build 4.",
+          "size": 10385467,
           "minOSVersion": "16.0"
         }
       ]
