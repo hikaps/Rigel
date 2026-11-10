@@ -198,6 +198,7 @@ final class RigelPlayerViewController: UIViewController {
     private var pendingScrubValue: Float?
     private var scrubGeneration = 0
     private var subtitleCustomizationModel: SubtitleCustomizationModel?
+    private var delayRebuildWork: DispatchWorkItem?
     private var subtitleCustomizationHost: UIViewController?
     private var appliedSubtitleAppearance: SubtitleAppearance?
     private var renderedSubtitleText: String?
@@ -763,7 +764,9 @@ final class RigelPlayerViewController: UIViewController {
             onChange: { [weak self] appearance, delay in
                 guard let self else { return }
                 self.subtitleAppearance = appearance
+                let delayChanged = self.subtitleDelay != delay
                 self.subtitleDelay = delay
+                if delayChanged { self.scheduleSubtitleDelayRebuild() }
                 self.applySubtitleAppearance(appearance)
                 self.subtitleBottomConstraint?.constant = -appearance.bottomInset
                 self.updateSidecarSubtitle()
@@ -774,6 +777,19 @@ final class RigelPlayerViewController: UIViewController {
         subtitleCustomizationHost = presentSheet(
             SubtitleCustomizationSheet(model: model)
         )
+    }
+
+    /// The overlay applies the delay live, but a receiver plays the exported
+    /// WebVTT track, so the proxy is rebuilt (once the slider settles) to bake it in.
+    private func scheduleSubtitleDelayRebuild() {
+        delayRebuildWork?.cancel()
+        guard isProxyPlayback, player?.isExternalPlaybackActive == true, selectedExternalSubtitleUrl != nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.disposed, self.isProxyPlayback else { return }
+            self.onSeekRequested?(self.mediaSeconds)
+        }
+        delayRebuildWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
     }
 
     /// Native track pickers own the selection after a user makes a choice.

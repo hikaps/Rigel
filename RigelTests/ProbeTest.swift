@@ -486,6 +486,21 @@ final class ProbeTest: XCTestCase {
         )
     }
 
+    func testSubtitleDelayShiftsTimestampMapAndWraps() {
+        func map(_ delayMs: Int64, origin: Int64 = 90_000) -> Int64 {
+            RigelHlsExporter.subtitleTimestampMapMpegTS(
+                mode: "remux",
+                sourceOrigin90k: origin,
+                requestedOffsetMs: 0,
+                encoderOrigin90k: 0,
+                delayMs: delayMs
+            )
+        }
+        XCTAssertEqual(map(1_500) - map(0), 135_000)
+        XCTAssertEqual(map(-500) - map(0), -45_000)
+        XCTAssertEqual(map(-2_000, origin: 0), (1 << 33) - 180_000, "negative results wrap into the 33-bit clock")
+    }
+
     func testOnDemandSegmentBoundaries() {
         let keyframes: [Int64] = stride(from: 0, through: 38, by: 2).map { Int64($0) }
         XCTAssertEqual(
