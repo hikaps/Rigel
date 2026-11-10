@@ -33,6 +33,8 @@ final class RigelHlsExporter {
         /// On-demand VOD covers the whole title from 0; this is the position the
         /// player must seek to instead of a shortened playlist. RigelHlsExporter.lock.
         var onDemandResumeMs: Int64?
+        /// Subtitle delay captured when the session starts; shifts exported WebVTT timing.
+        var subtitleDelayMs: Int64 = 0
 
         init(
             queue: DispatchQueue,
@@ -141,6 +143,7 @@ final class RigelHlsExporter {
             subtitleTracks: subtitleTracks,
             waitForCompletion: waitForCompletion
         )
+        session.subtitleDelayMs = Int64((SubtitlePreferences.delay * 1000).rounded())
         lock.lock()
         guard activeSessionKey(for: sessionId) == nil else {
             lock.unlock()

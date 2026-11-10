@@ -405,7 +405,8 @@ extension RigelHlsExporter {
             mode: "remux",
             sourceOrigin90k: plan.origin90k,
             requestedOffsetMs: session.startOffsetMs,
-            encoderOrigin90k: plan.origin90k
+            encoderOrigin90k: plan.origin90k,
+            delayMs: session.subtitleDelayMs
         ) + plan.shift90k) % (1 << 33)
         let made = makeSubtitleRenditions(subtitleInputs, outDir: outDir, timestampMapMpegTS: mapMpegTS)
         let renditions = made.renditions

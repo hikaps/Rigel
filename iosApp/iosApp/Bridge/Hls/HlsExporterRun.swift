@@ -7,14 +7,18 @@ extension RigelHlsExporter {
         mode: String,
         sourceOrigin90k: Int64,
         requestedOffsetMs: Int64,
-        encoderOrigin90k: Int64
+        encoderOrigin90k: Int64,
+        delayMs: Int64 = 0
     ) -> Int64 {
         let requestedOffset90k = av_rescale_q(
             requestedOffsetMs,
             AVRational(num: 1, den: 1_000),
             AVRational(num: 1, den: 90_000)
         )
+        // A cue's output time is MPEGTS + cue time, so a later MPEGTS delays every cue.
+        let delay90k = av_rescale_q(delayMs, AVRational(num: 1, den: 1_000), AVRational(num: 1, den: 90_000))
         let epoch = sourceOrigin90k.addingReportingOverflow(requestedOffset90k).partialValue
+            .addingReportingOverflow(delay90k).partialValue
         let outputClock = mode == "remux"
             ? epoch
             : epoch.subtractingReportingOverflow(encoderOrigin90k).partialValue
@@ -333,7 +337,8 @@ extension RigelHlsExporter {
             mode: mode,
             sourceOrigin90k: timestampOrigin90k,
             requestedOffsetMs: session.startOffsetMs,
-            encoderOrigin90k: mediaTimestampOrigin90k
+            encoderOrigin90k: mediaTimestampOrigin90k,
+            delayMs: session.subtitleDelayMs
         )
         var primarySubtitleOutputs: [Int32: SubtitleRendition] = [:]
         var externalSubtitleOutputs: [Int: SubtitleRendition] = [:]
@@ -500,7 +505,8 @@ extension RigelHlsExporter {
                             mode: mode,
                             sourceOrigin90k: timestampOrigin90k,
                             requestedOffsetMs: session.startOffsetMs,
-                            encoderOrigin90k: ringHeadPTS
+                            encoderOrigin90k: ringHeadPTS,
+                            delayMs: session.subtitleDelayMs
                         )
                     }
                 }
