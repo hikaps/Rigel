@@ -1,20 +1,110 @@
 import Foundation
 import AVFoundation
 import AVKit
+import MediaPlayer
+import UIKit
+import SwiftUI
 import ComposeApp
+import Combine
 
 /// AVPlayer host with native title, route, audio/subtitle, and transport controls.
 /// The overlay chrome follows normal player behavior: it appears on interaction
-/// and fades while playback runs. HLS proxy playlists are presented with
-/// Rigel's own transport bar because an in-progress VOD playlist is reported by
-/// AVPlayer as live and would otherwise hide seeking and skip controls.
+/// and fades while playback runs. HLS proxy playlists use Rigel's own
+/// transport bar because an in-progress VOD playlist is reported by AVPlayer
+/// as live; its probe duration supplies the full timeline until ENDLIST appears,
+/// and seeks past generated segments buffer until the exporter catches up.
 /// Direct VOD media keeps AVPlayer's controls. AirPlay video handoff and PiP
 /// come from AVPlayerViewController.
 /// Events fire on the main thread.
+struct AirPlayStartupWatchdog {
+    private static let timeout: TimeInterval = 15
+    private static let maxSamplingGap: TimeInterval = 2
+
+    private var startedAt: TimeInterval?
+    private var previousSample: (time: TimeInterval, position: Double, externalPlaying: Bool)?
+    private var didComplete = false
+
+    mutating func reset() {
+        startedAt = nil
+        previousSample = nil
+        didComplete = false
+    }
+
+    mutating func update(
+        now: TimeInterval,
+        eligible: Bool,
+        paused: Bool,
+        externalPlaying: Bool,
+        positionSeconds: Double,
+        rate: Float
+    ) -> Bool {
+        guard eligible else {
+            reset()
+            return false
+        }
+        guard !didComplete else { return false }
+        guard !paused else {
+            startedAt = nil
+            previousSample = nil
+            return false
+        }
+        guard now.isFinite else { return false }
+
+        guard let startedAt, let previousSample else {
+            self.startedAt = now
+            self.previousSample = (now, positionSeconds, externalPlaying)
+            return false
+        }
+
+        let sampleElapsed = now - previousSample.time
+        guard sampleElapsed > 0, sampleElapsed <= Self.maxSamplingGap else {
+            self.startedAt = now
+            self.previousSample = (now, positionSeconds, externalPlaying)
+            return false
+        }
+
+        let positionDelta = positionSeconds - previousSample.position
+        let currentRate = Double(rate)
+        let hasAdvanced = previousSample.externalPlaying && externalPlaying &&
+            positionSeconds.isFinite && positionSeconds >= 0 &&
+            previousSample.position.isFinite && previousSample.position >= 0 &&
+            currentRate.isFinite && currentRate > 0 &&
+            positionDelta > 0 &&
+            positionDelta <= sampleElapsed * currentRate + 0.25
+        self.previousSample = (now, positionSeconds, externalPlaying)
+        if hasAdvanced {
+            didComplete = true
+            return false
+        }
+
+        guard now >= startedAt, now - startedAt >= Self.timeout else { return false }
+        didComplete = true
+        return true
+    }
+}
+
 final class RigelPlayerViewController: UIViewController {
     private let events: PlayerEvents
+    /// Assigned by the SwiftUI host so the native control can present the
+    /// app-level destination picker without expanding the Kotlin event contract.
+    var onDevicesRequested: (() -> Void)?
+    /// Called with an absolute media position for remote seek forwarding or
+    /// proxy session restart.
+    var onSeekRequested: ((Double) -> Void)?
+    /// Reports subtitle selection to Kotlin. Compatible local playback stays
+    /// direct; AirPlay packages the sidecar, and an existing proxy is rebuilt
+    /// so its HLS rendition carries the selected subtitle.
+    var onExternalSubtitleSelected: ((SubtitleTrack?, Double) -> Void)?
+    /// Reports whether AVPlayer is waiting for its next frame; the host
+    /// keeps the buffering spinner up until this clears.
+    var onNativeBufferingChange: ((Bool) -> Void)?
+
     private var player: AVPlayer?
+    /// Raw URL of the item currently installed in AVPlayer. Delayed failures
+    /// from a replaced proxy item must not be attributed to the new item.
+    private(set) var loadedURL: String?
     private var playerVC: AVPlayerViewController?
+    private var timeJumpObserver: NSObjectProtocol?
     private var pollTimer: Timer?
     private var disposed = false
     private var audioSessionActivated = false
@@ -24,6 +114,21 @@ final class RigelPlayerViewController: UIViewController {
     private static var activeAudioSessionCount = 0
     private static let audioSessionLock = NSLock()
     private var notifiedPlaying = false
+    /// True while Kotlin is rebuilding the proxy (seek): the frame freezes
+    /// instead of playing a stale item whose session is being torn down.
+    private var phaseBufferingRequested = false
+    private var lastReportedNativeBuffering = false
+    private var airPlayStartupWatchdog = AirPlayStartupWatchdog()
+    private var isAirPlayDirectAttempt = false
+    /// True while a remote cast session owns playback: proxy seeks must then
+    /// rebuild the session for the renderer instead of seeking the local item.
+    var isCastPlayback = false
+    private var lastPlayheadReport = DispatchTime(uptimeNanoseconds: 0)
+    /// Preferences cache: the poll tick reads these instead of UserDefaults,
+    /// which only change through the customization sheet.
+    private var subtitleAppearance = SubtitlePreferences.appearance
+    private var subtitleDelay = SubtitlePreferences.delay
+    private var lastRenderedPlaying = false
 
     /// Configure AVAudioSession for the current media so only eligible
     /// long-form video selects the shared video AirPlay route.
@@ -36,35 +141,109 @@ final class RigelPlayerViewController: UIViewController {
         try audioSession.setActive(true)
     }
 
-    private let topBar = UIVisualEffectView()
+    private let topGradient = PlayerGradientView(
+        colors: [UIColor.black.withAlphaComponent(0.72), .clear]
+    )
+    private let bottomGradient = PlayerGradientView(
+        colors: [.clear, UIColor.black.withAlphaComponent(0.72)]
+    )
+    private let topBar = UIView()
     private let titleLabel = UILabel()
     private let senderLabel = UILabel()
     private let backButton = UIButton(type: .system)
-    private let routePicker = AVRoutePickerView()
+    private let audioButton = UIButton(type: .system)
+    private let devicesButton = UIButton(type: .system)
     private let tracksButton = UIButton(type: .system)
-    private let bottomBar = UIVisualEffectView()
+    private let trackButtonsStack = UIStackView()
+    private let bottomBar = UIView()
+    private let volumeView = MPVolumeView(frame: .zero)
     private let progressSlider = UISlider()
     private let skipBackwardButton = UIButton(type: .system)
     private let playPauseButton = UIButton(type: .system)
     private let skipForwardButton = UIButton(type: .system)
     private let elapsedLabel = UILabel()
     private let durationLabel = UILabel()
+    private let subtitleLabel = SubtitleInsetLabel()
     private var audioGroup: AVMediaSelectionGroup?
     private var subtitleGroup: AVMediaSelectionGroup?
-    private var trackGroupsLoadedFor: AVPlayerItem?
-    private var trackSelectionEnabled = true
+    /// Terminal state of native media-selection discovery for the current
+    /// item; drives picker copy and accessibility values.
+    private var trackGroupLoadState: TrackPickerModel.LoadState = .loading
+    private weak var trackPickerModel: TrackPickerModel?
+    private weak var trackPickerHost: UIViewController?
+    private struct SidecarSubtitle {
+        let order: Int
+        let track: SubtitleTrack
+        let name: String
+        let language: String?
+        let cues: [SubtitleParser.Cue]
+    }
+    private var sidecarSubtitles: [SidecarSubtitle] = []
+    private var activeSidecarSubtitleIndex: Int?
+    private var sidecarGeneration = 0
+    private var nextSidecarOrder = 0
+    private var subtitleBottomConstraint: NSLayoutConstraint?
     private var isScrubbing = false
+    private var knownDurationSeconds: Double?
+    private var loadedTitle: String?
+    private var startOffsetSeconds: Double = 0
+    private var isProxyPlayback = false
+    private var resumeSeekApplied = false
+    /// Resume point for a full-length on-demand proxy, whose timeline starts at 0.
+    private var zeroBasedResumeSeconds: Double = 0
+    private var selectedExternalSubtitleUrl: String?
+    private var selectedExternalSubtitleOption: AVMediaSelectionOption?
+    private var proxyExternalSubtitleUrl: String?
+    private var externalPlaybackObservation: NSKeyValueObservation?
     private var pendingScrubValue: Float?
     private var scrubGeneration = 0
-
+    private var subtitleCustomizationModel: SubtitleCustomizationModel?
+    private var delayRebuildWork: DispatchWorkItem?
+    private var subtitleCustomizationHost: UIViewController?
+    private var appliedSubtitleAppearance: SubtitleAppearance?
+    private var renderedSubtitleText: String?
+    private var renderedSubtitleAppearance: SubtitleAppearance?
     private var customPlaybackControls = false
     private var controlsHideTimer: Timer?
     private var controlsVisible = true
 
+    typealias TrackGroupLoadResult = Result<(audio: AVMediaSelectionGroup?, subtitles: AVMediaSelectionGroup?), Error>
+    typealias TrackGroupLoaderCompletion = (TrackGroupLoadResult) -> Void
+    typealias TrackGroupLoader = (AVAsset, @escaping TrackGroupLoaderCompletion) -> Void
 
-    init(events: PlayerEvents) {
+    private let trackGroupLoader: TrackGroupLoader
+
+    init(events: PlayerEvents, trackGroupLoader: @escaping TrackGroupLoader = RigelPlayerViewController.loadNativeTrackGroups) {
         self.events = events
+        self.trackGroupLoader = trackGroupLoader
         super.init(nibName: nil, bundle: nil)
+    }
+
+    /// Loads media-selection metadata on the asset's own queue. Success
+    /// includes nil groups for media without alternate tracks; any other key
+    /// status is a terminal failure.
+    static func loadNativeTrackGroups(
+        asset: AVAsset,
+        completion: @escaping (TrackGroupLoadResult) -> Void
+    ) {
+        let key = "availableMediaCharacteristicsWithMediaSelectionOptions"
+        asset.loadValuesAsynchronously(forKeys: [key]) {
+            var error: NSError?
+            let status = asset.statusOfValue(forKey: key, error: &error)
+            guard status == .loaded else {
+                let failure = error
+                    ?? NSError(
+                        domain: "RigelPlayer.TrackDiscovery",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Media selection metadata could not be loaded."]
+                    )
+                completion(.failure(failure))
+                return
+            }
+            let audio = asset.mediaSelectionGroup(forMediaCharacteristic: .audible)
+            let subtitles = asset.mediaSelectionGroup(forMediaCharacteristic: .legible)
+            completion(.success((audio, subtitles)))
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -79,62 +258,82 @@ final class RigelPlayerViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        setupOverlayGradients()
         setupTopBar()
         setupBottomBar()
+        // Sidecar subtitles are an in-app overlay and are not captured by
+        // AVPlayerViewController's PiP or AirPlay handoff.
+        subtitleLabel.numberOfLines = 0
+        subtitleLabel.textAlignment = .center
+        subtitleLabel.accessibilityIdentifier = "player.subtitleLabel"
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.isHidden = true
+        applySubtitleAppearance(SubtitlePreferences.appearance)
+        view.addSubview(subtitleLabel)
+        let bottomConstraint = subtitleLabel.bottomAnchor.constraint(
+            equalTo: view.safeAreaLayoutGuide.bottomAnchor,
+            constant: -SubtitlePreferences.appearance.bottomInset
+        )
+        subtitleBottomConstraint = bottomConstraint
+        NSLayoutConstraint.activate([
+            subtitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 40),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -40),
+            subtitleLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            bottomConstraint,
+        ])
         setupControlsGesture()
     }
-    /// Liquid Glass chrome on iOS 26; near-transparent dark blur before that.
-    private static func chromeEffect() -> UIVisualEffect {
-        if #available(iOS 26.0, *) {
-            return UIGlassEffect()
+
+    private func setupOverlayGradients() {
+        for gradient in [topGradient, bottomGradient] {
+            gradient.translatesAutoresizingMaskIntoConstraints = false
+            gradient.isUserInteractionEnabled = false
+            view.addSubview(gradient)
         }
-        return UIBlurEffect(style: .systemUltraThinMaterialDark)
+        bottomGradient.alpha = 0
+        NSLayoutConstraint.activate([
+            topGradient.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            topGradient.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            topGradient.topAnchor.constraint(equalTo: view.topAnchor),
+            topGradient.heightAnchor.constraint(equalToConstant: 180),
+
+            bottomGradient.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomGradient.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomGradient.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomGradient.heightAnchor.constraint(equalToConstant: 240),
+        ])
     }
 
-    private static func chromeCorners(_ view: UIView) {
-        view.layer.cornerRadius = 26
-        view.layer.cornerCurve = .continuous
-        view.clipsToBounds = true
-    }
-
-    /// Control-button chrome: Liquid Glass on iOS 26, translucent capsule before.
+    /// Controls use their own hit rectangles; there is no enclosing chrome.
     private static func controlConfiguration(symbolName: String, pointSize: CGFloat) -> UIButton.Configuration {
-        var configuration: UIButton.Configuration
-        if #available(iOS 26.0, *) {
-            configuration = .glass()
-        } else {
-            configuration = .filled()
-            configuration.baseBackgroundColor = .white.withAlphaComponent(0.16)
-            configuration.cornerStyle = .capsule
-        }
+        var configuration = UIButton.Configuration.plain()
         configuration.baseForegroundColor = .white
         configuration.image = UIImage(
             systemName: symbolName,
             withConfiguration: UIImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
         )
-        configuration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10)
+        configuration.contentInsets = .zero
         return configuration
     }
     private func setupTopBar() {
-        topBar.effect = Self.chromeEffect()
-        Self.chromeCorners(topBar)
+        topBar.backgroundColor = .clear
+        topBar.isOpaque = false
         topBar.translatesAutoresizingMaskIntoConstraints = false
         topBar.accessibilityIdentifier = "player.topBar"
+        topBar.layoutMargins = UIEdgeInsets(top: 6, left: 20, bottom: 10, right: 20)
         view.addSubview(topBar)
         NSLayoutConstraint.activate([
             topBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
-
-        topBar.contentView.layoutMargins = UIEdgeInsets(top: 6, left: 12, bottom: 10, right: 12)
 
         backButton.configuration = Self.controlConfiguration(symbolName: "xmark", pointSize: 15)
         backButton.accessibilityLabel = "Close player"
         backButton.accessibilityHint = "Return to Rigel"
         backButton.addTarget(self, action: #selector(backTapped), for: .touchUpInside)
         backButton.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(backButton)
+        topBar.addSubview(backButton)
 
         titleLabel.font = .preferredFont(forTextStyle: .headline)
         titleLabel.adjustsFontForContentSizeCategory = true
@@ -143,7 +342,7 @@ final class RigelPlayerViewController: UIViewController {
         titleLabel.numberOfLines = 1
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(titleLabel)
+        topBar.addSubview(titleLabel)
 
         senderLabel.font = .preferredFont(forTextStyle: .subheadline)
         senderLabel.adjustsFontForContentSizeCategory = true
@@ -151,38 +350,54 @@ final class RigelPlayerViewController: UIViewController {
         senderLabel.lineBreakMode = .byTruncatingTail
         senderLabel.numberOfLines = 1
         senderLabel.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(senderLabel)
+        topBar.addSubview(senderLabel)
 
-        routePicker.tintColor = .white
-        routePicker.accessibilityLabel = "Playback destination"
-        routePicker.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(routePicker)
+        audioButton.configuration = Self.controlConfiguration(symbolName: "waveform", pointSize: 17)
+        audioButton.accessibilityLabel = "Audio track"
+        audioButton.accessibilityHint = "Choose an audio track"
+        audioButton.addTarget(self, action: #selector(audioTapped), for: .touchUpInside)
+        audioButton.translatesAutoresizingMaskIntoConstraints = false
 
         tracksButton.configuration = Self.controlConfiguration(symbolName: "captions.bubble", pointSize: 17)
-        tracksButton.accessibilityLabel = "Audio and subtitles"
-        tracksButton.accessibilityHint = "Choose an audio track or subtitle"
-        tracksButton.addTarget(self, action: #selector(tracksTapped), for: .touchUpInside)
+        tracksButton.accessibilityLabel = "Subtitles"
+        tracksButton.accessibilityHint = "Choose a subtitle track"
+        tracksButton.addTarget(self, action: #selector(subtitlesTapped), for: .touchUpInside)
         tracksButton.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(tracksButton)
+
+        devicesButton.configuration = Self.controlConfiguration(symbolName: "airplayvideo", pointSize: 17)
+        devicesButton.accessibilityLabel = "Playback destinations"
+        devicesButton.accessibilityHint = "Choose AirPlay or a network device"
+        devicesButton.addTarget(self, action: #selector(devicesTapped), for: .touchUpInside)
+        devicesButton.translatesAutoresizingMaskIntoConstraints = false
+
+        trackButtonsStack.axis = .horizontal
+        trackButtonsStack.alignment = .center
+        trackButtonsStack.spacing = 4
+        trackButtonsStack.translatesAutoresizingMaskIntoConstraints = false
+        trackButtonsStack.addArrangedSubview(audioButton)
+        trackButtonsStack.addArrangedSubview(tracksButton)
+        trackButtonsStack.addArrangedSubview(devicesButton)
+        topBar.addSubview(trackButtonsStack)
 
         NSLayoutConstraint.activate([
-            backButton.leadingAnchor.constraint(equalTo: topBar.contentView.layoutMarginsGuide.leadingAnchor),
-            backButton.topAnchor.constraint(equalTo: topBar.contentView.layoutMarginsGuide.topAnchor),
+            backButton.leadingAnchor.constraint(equalTo: topBar.layoutMarginsGuide.leadingAnchor),
+            backButton.topAnchor.constraint(equalTo: topBar.layoutMarginsGuide.topAnchor),
             backButton.widthAnchor.constraint(equalToConstant: 44),
             backButton.heightAnchor.constraint(equalToConstant: 44),
 
-            routePicker.trailingAnchor.constraint(equalTo: topBar.contentView.layoutMarginsGuide.trailingAnchor),
-            routePicker.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
-            routePicker.widthAnchor.constraint(equalToConstant: 44),
-            routePicker.heightAnchor.constraint(equalToConstant: 44),
+            trackButtonsStack.trailingAnchor.constraint(equalTo: topBar.layoutMarginsGuide.trailingAnchor),
+            trackButtonsStack.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            trackButtonsStack.heightAnchor.constraint(equalToConstant: 44),
 
-            tracksButton.trailingAnchor.constraint(equalTo: routePicker.leadingAnchor, constant: -4),
-            tracksButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            audioButton.widthAnchor.constraint(equalToConstant: 44),
+            audioButton.heightAnchor.constraint(equalToConstant: 44),
             tracksButton.widthAnchor.constraint(equalToConstant: 44),
             tracksButton.heightAnchor.constraint(equalToConstant: 44),
+            devicesButton.widthAnchor.constraint(equalToConstant: 44),
+            devicesButton.heightAnchor.constraint(equalToConstant: 44),
 
             titleLabel.leadingAnchor.constraint(equalTo: backButton.trailingAnchor, constant: 8),
-            titleLabel.trailingAnchor.constraint(equalTo: tracksButton.leadingAnchor, constant: -8),
+            titleLabel.trailingAnchor.constraint(equalTo: trackButtonsStack.leadingAnchor, constant: -8),
             titleLabel.topAnchor.constraint(equalTo: backButton.topAnchor, constant: 2),
 
             senderLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
@@ -195,13 +410,13 @@ final class RigelPlayerViewController: UIViewController {
     }
 
     private func setupBottomBar() {
-        bottomBar.effect = Self.chromeEffect()
-        Self.chromeCorners(bottomBar)
+        bottomBar.backgroundColor = .clear
+        bottomBar.isOpaque = false
         bottomBar.accessibilityIdentifier = "player.bottomBar"
         bottomBar.translatesAutoresizingMaskIntoConstraints = false
         bottomBar.isHidden = true
+        bottomBar.layoutMargins = UIEdgeInsets(top: 10, left: 20, bottom: 10, right: 20)
         view.addSubview(bottomBar)
-        bottomBar.contentView.layoutMargins = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
 
         progressSlider.minimumValue = 0
         progressSlider.maximumValue = 1
@@ -234,7 +449,7 @@ final class RigelPlayerViewController: UIViewController {
         timeline.alignment = .center
         timeline.spacing = 10
         timeline.translatesAutoresizingMaskIntoConstraints = false
-        bottomBar.contentView.addSubview(timeline)
+        bottomBar.addSubview(timeline)
 
         let buttons: [(UIButton, String, String, Selector)] = [
             (skipBackwardButton, "gobackward.15", "Back 15 seconds", #selector(skipBackwardTapped)),
@@ -252,15 +467,13 @@ final class RigelPlayerViewController: UIViewController {
             }
         }
 
-        var playConfiguration = UIButton.Configuration.filled()
+        var playConfiguration = UIButton.Configuration.plain()
         playConfiguration.image = UIImage(
             systemName: "play.fill",
-            withConfiguration: UIImage.SymbolConfiguration(pointSize: 24, weight: .semibold)
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .semibold)
         )
-        playConfiguration.baseBackgroundColor = .white
-        playConfiguration.baseForegroundColor = .black
-        playConfiguration.cornerStyle = .capsule
-        playConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 18, leading: 18, bottom: 18, trailing: 18)
+        playConfiguration.baseForegroundColor = .white
+        playConfiguration.contentInsets = .zero
         playPauseButton.configuration = playConfiguration
         playPauseButton.widthAnchor.constraint(equalToConstant: 64).isActive = true
         playPauseButton.heightAnchor.constraint(equalToConstant: 64).isActive = true
@@ -275,25 +488,40 @@ final class RigelPlayerViewController: UIViewController {
         transportControls.alignment = .center
         transportControls.spacing = 28
         transportControls.translatesAutoresizingMaskIntoConstraints = false
-        bottomBar.contentView.addSubview(transportControls)
+        bottomBar.addSubview(transportControls)
+
+        // System volume (adjusts the receiver while AirPlaying), shown as a
+        // vertical slider on the trailing edge.
+        volumeView.showsRouteButton = false
+        volumeView.tintColor = .white
+        volumeView.accessibilityIdentifier = "player.volumeSlider"
+        volumeView.translatesAutoresizingMaskIntoConstraints = false
+        volumeView.transform = CGAffineTransform(rotationAngle: -.pi / 2)
+        volumeView.isHidden = true
+        view.addSubview(volumeView)
 
         NSLayoutConstraint.activate([
-            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
 
-            timeline.leadingAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.leadingAnchor),
-            timeline.trailingAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.trailingAnchor),
-            timeline.topAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.topAnchor),
+            timeline.leadingAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.leadingAnchor),
+            timeline.trailingAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.trailingAnchor),
+            timeline.topAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.topAnchor),
             progressSlider.heightAnchor.constraint(greaterThanOrEqualToConstant: 28),
 
-            transportControls.centerXAnchor.constraint(equalTo: bottomBar.contentView.centerXAnchor),
+            transportControls.centerXAnchor.constraint(equalTo: bottomBar.centerXAnchor),
             transportControls.topAnchor.constraint(equalTo: timeline.bottomAnchor, constant: 2),
-            transportControls.bottomAnchor.constraint(equalTo: bottomBar.contentView.layoutMarginsGuide.bottomAnchor),
+            transportControls.bottomAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.bottomAnchor),
             bottomBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 116),
+
+            // Laid out horizontally, then rotated about its centre.
+            volumeView.widthAnchor.constraint(equalToConstant: 160),
+            volumeView.heightAnchor.constraint(equalToConstant: 30),
+            volumeView.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24),
+            volumeView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
         ])
     }
-
 
     private func setupControlsGesture() {
         let tap = UITapGestureRecognizer(target: self, action: #selector(controlsTapped(_:)))
@@ -303,7 +531,7 @@ final class RigelPlayerViewController: UIViewController {
 
     @objc private func controlsTapped(_ gesture: UITapGestureRecognizer) {
         let point = gesture.location(in: view)
-        if topBar.frame.contains(point) || (customPlaybackControls && bottomBar.frame.contains(point)) {
+        if topBar.frame.contains(point) || (customPlaybackControls && (bottomBar.frame.contains(point) || volumeView.frame.contains(point))) {
             showControls()
             return
         }
@@ -318,6 +546,7 @@ final class RigelPlayerViewController: UIViewController {
         controlsVisible = true
         topBar.isHidden = false
         bottomBar.isHidden = !customPlaybackControls
+        volumeView.isHidden = !customPlaybackControls
         UIView.animate(
             withDuration: 0.25,
             delay: 0,
@@ -325,6 +554,9 @@ final class RigelPlayerViewController: UIViewController {
         ) {
             self.topBar.alpha = 1
             self.bottomBar.alpha = 1
+            self.volumeView.alpha = 1
+            self.topGradient.alpha = 1
+            self.bottomGradient.alpha = self.customPlaybackControls ? 1 : 0
         }
         scheduleControlsHide()
     }
@@ -340,12 +572,16 @@ final class RigelPlayerViewController: UIViewController {
             animations: {
                 self.topBar.alpha = 0
                 self.bottomBar.alpha = 0
+                self.volumeView.alpha = 0
+                self.topGradient.alpha = 0
+                self.bottomGradient.alpha = 0
             },
             completion: { _ in
                 if !self.controlsVisible {
                     self.topBar.isHidden = true
                     if self.customPlaybackControls {
                         self.bottomBar.isHidden = true
+                        self.volumeView.isHidden = true
                     }
                 }
             }
@@ -364,18 +600,9 @@ final class RigelPlayerViewController: UIViewController {
     @objc private func backTapped() {
         events.onBack()
     }
-    /// FFmpeg HLS proxy sessions currently contain only their selected audio
-    /// stream and no subtitle renditions. Keep the selector out of that UI
-    /// rather than presenting a control that can never change the track.
-    func setTrackSelectionEnabled(_ enabled: Bool) {
-        trackSelectionEnabled = enabled
-        tracksButton.isHidden = !enabled
-        tracksButton.isUserInteractionEnabled = enabled
-        if !enabled {
-            audioGroup = nil
-            subtitleGroup = nil
-            trackGroupsLoadedFor = nil
-        }
+    @objc private func devicesTapped() {
+        showControls()
+        onDevicesRequested?()
     }
 
     static func fallbackTitle(for rawURL: String) -> String {
@@ -396,86 +623,668 @@ final class RigelPlayerViewController: UIViewController {
         }
         return url.pathExtension.lowercased() == "m3u8"
     }
+    private static let selectedSubtitleMarker = "RigelSelected__"
 
-    @objc private func tracksTapped() {
+    private static func subtitleDisplayName(for option: AVMediaSelectionOption) -> String {
+        let name = option.displayName
+        guard name.hasPrefix(selectedSubtitleMarker) else { return name }
+        return String(name.dropFirst(selectedSubtitleMarker.count))
+    }
+
+    private func selectedExternalOption(in group: AVMediaSelectionGroup?) -> AVMediaSelectionOption? {
+        guard isProxyPlayback, selectedExternalSubtitleUrl != nil, let group else { return nil }
+        // AVPlayer localizes displayName (for example, "English"); the HLS
+        // rendition NAME, including our marker, remains in title metadata.
+        return group.options.first { option in
+            option.commonMetadata.contains {
+                $0.commonKey == .commonKeyTitle &&
+                    $0.stringValue?.hasPrefix(Self.selectedSubtitleMarker) == true
+            }
+        }
+    }
+
+    private func audioPickerOptions(item: AVPlayerItem?) -> [TrackPickerOption] {
+        guard let group = audioGroup, !group.options.isEmpty else { return [] }
+        let selected = item?.currentMediaSelection.selectedMediaOption(in: group)
+        return group.options.enumerated().map { index, option in
+            TrackPickerOption(
+                id: "audio-\(index)",
+                title: option.displayName,
+                isSelected: selected === option,
+                select: { [weak self, weak item] in
+                    guard let self,
+                          self.disposed == false,
+                          self.player?.currentItem === item,
+                          let currentGroup = self.audioGroup,
+                          currentGroup.options.indices.contains(index) else { return }
+                    self.selectMediaOption(currentGroup.options[index], in: currentGroup)
+                    self.updateTrackButtons()
+                }
+            )
+        }
+    }
+
+    private func subtitlePickerOptions(item: AVPlayerItem?) -> [TrackPickerOption] {
+        var options: [TrackPickerOption] = []
+        let nativeOptions = visibleNativeSubtitleOptions()
+        let selectedNative = subtitleGroup.flatMap {
+            item?.currentMediaSelection.selectedMediaOption(in: $0)
+        }
+        let canShowOff = nativeOptions.isEmpty || subtitleGroup?.allowsEmptySelection == true
+        if canShowOff && (!nativeOptions.isEmpty || !sidecarSubtitles.isEmpty) {
+            options.append(
+                TrackPickerOption(
+                    id: "subtitles-off",
+                    title: "Off",
+                    isSelected: activeSidecarSubtitleIndex == nil && selectedNative == nil,
+                    select: { [weak self, weak item] in
+                        guard let self,
+                              !self.disposed,
+                              self.player?.currentItem === item else { return }
+                        self.activeSidecarSubtitleIndex = nil
+                        self.selectedExternalSubtitleUrl = nil
+                        if let group = self.subtitleGroup {
+                            self.selectMediaOption(nil, in: group)
+                        }
+                        self.updateSidecarSubtitle()
+                        self.updateTrackButtons()
+                        self.onExternalSubtitleSelected?(nil, self.mediaSeconds)
+                    }
+                )
+            )
+        }
+        for (index, option) in nativeOptions.enumerated() {
+            options.append(
+                TrackPickerOption(
+                    id: "subtitle-\(index)",
+                    title: Self.subtitleDisplayName(for: option),
+                    isSelected: activeSidecarSubtitleIndex == nil && selectedNative === option,
+                    select: { [weak self, weak item] in
+                        guard let self,
+                              !self.disposed,
+                              self.player?.currentItem === item,
+                              let currentGroup = self.subtitleGroup,
+                              currentGroup.options.contains(where: { $0 === option }) else { return }
+                        self.activeSidecarSubtitleIndex = nil
+                        self.selectedExternalSubtitleUrl = nil
+                        self.selectMediaOption(option, in: currentGroup)
+                        self.updateSidecarSubtitle()
+                        self.updateTrackButtons()
+                        self.onExternalSubtitleSelected?(nil, self.mediaSeconds)
+                    }
+                )
+            )
+        }
+        for (index, sidecar) in sidecarSubtitles.enumerated() {
+            let order = sidecar.order
+            let label = sidecar.language ?? sidecar.name
+            options.append(
+                TrackPickerOption(
+                    id: "sidecar-\(order)",
+                    title: label,
+                    isSelected: activeSidecarSubtitleIndex == index,
+                    select: { [weak self, weak item] in
+                        guard let self,
+                              !self.disposed,
+                              self.player?.currentItem === item,
+                              let currentIndex = self.sidecarSubtitles.firstIndex(where: { $0.order == order }) else {
+                            return
+                        }
+                        self.activeSidecarSubtitleIndex = currentIndex
+                        self.selectedExternalSubtitleUrl = sidecar.track.url
+                        if let group = self.subtitleGroup {
+                            self.selectMediaOption(nil, in: group)
+                        }
+                        self.updateSidecarSubtitle()
+                        self.updateTrackButtons()
+                        self.onExternalSubtitleSelected?(sidecar.track, self.mediaSeconds)
+                    }
+                )
+            )
+        }
+        return options
+    }
+
+    @objc private func audioTapped() {
         showControls()
-        let alert = UIAlertController(title: "Audio & Subtitles", message: nil, preferredStyle: .actionSheet)
-        if let audioGroup, !audioGroup.options.isEmpty {
-            for option in audioGroup.options {
-                let selected = player?.currentItem?.currentMediaSelection.selectedMediaOption(in: audioGroup) === option
-                let title = "\(selected ? "✓ " : "")Audio: \(option.displayName)"
-                alert.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
-                    self?.player?.currentItem?.select(option, in: audioGroup)
-                    self?.updateTrackButton()
-                })
+        presentTrackPicker(kind: .audio)
+    }
+
+    @objc private func subtitlesTapped() {
+        showControls()
+        presentTrackPicker(kind: .subtitles)
+    }
+
+    private func presentSubtitleCustomization() {
+        guard let index = activeSidecarSubtitleIndex,
+              sidecarSubtitles.indices.contains(index) else {
+            return
+        }
+        let model = SubtitleCustomizationModel(
+            onChange: { [weak self] appearance, delay in
+                guard let self else { return }
+                self.subtitleAppearance = appearance
+                let delayChanged = self.subtitleDelay != delay
+                self.subtitleDelay = delay
+                if delayChanged { self.scheduleSubtitleDelayRebuild() }
+                self.applySubtitleAppearance(appearance)
+                self.subtitleBottomConstraint?.constant = -appearance.bottomInset
+                self.updateSidecarSubtitle()
             }
+        )
+        model.isExternalPlaybackActive = player?.isExternalPlaybackActive ?? false
+        subtitleCustomizationModel = model
+        subtitleCustomizationHost = presentSheet(
+            SubtitleCustomizationSheet(model: model)
+        )
+    }
+
+    /// The overlay applies the delay live, but a receiver plays the exported
+    /// WebVTT track, so the proxy is rebuilt (once the slider settles) to bake it in.
+    private func scheduleSubtitleDelayRebuild() {
+        delayRebuildWork?.cancel()
+        guard isProxyPlayback, player?.isExternalPlaybackActive == true, selectedExternalSubtitleUrl != nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.disposed, self.isProxyPlayback else { return }
+            self.onSeekRequested?(self.mediaSeconds)
         }
-        if let subtitleGroup, !subtitleGroup.options.isEmpty {
-            if subtitleGroup.allowsEmptySelection {
-                alert.addAction(UIAlertAction(title: "Subtitles: Off", style: .default) { [weak self] _ in
-                    guard let self else { return }
-                    self.player?.currentItem?.select(nil, in: subtitleGroup)
-                    self.updateTrackButton()
-                })
-            }
-            for option in subtitleGroup.options {
-                let selected = player?.currentItem?.currentMediaSelection.selectedMediaOption(in: subtitleGroup) === option
-                let title = "\(selected ? "✓ " : "")Subtitles: \(option.displayName)"
-                alert.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
-                    self?.player?.currentItem?.select(option, in: subtitleGroup)
-                    self?.updateTrackButton()
-                })
-            }
+        delayRebuildWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    /// Native track pickers own the selection after a user makes a choice.
+    /// AVPlayer's automatic language/accessibility criteria can otherwise
+    /// replace a manually selected legible option during HLS playback.
+    private func selectMediaOption(
+        _ option: AVMediaSelectionOption?,
+        in group: AVMediaSelectionGroup
+    ) {
+        guard let player, let item = player.currentItem else { return }
+        player.appliesMediaSelectionCriteriaAutomatically = false
+        item.select(option, in: group)
+    }
+
+    private func presentTrackPicker(kind: TrackPickerModel.Kind) {
+        guard !disposed else { return }
+        let isSubtitles = kind == .subtitles
+        let model = TrackPickerModel(
+            kind: kind,
+            options: isSubtitles ? subtitlePickerOptions(item: player?.currentItem) : audioPickerOptions(item: player?.currentItem),
+            loadState: trackGroupLoadState,
+            customizeEnabled: isSubtitles && (activeSidecarSubtitleIndex.map {
+                sidecarSubtitles.indices.contains($0)
+            } ?? false)
+        )
+        trackPickerModel = model
+        trackPickerHost = presentSheet(
+            TrackPickerSheet(
+                model: model,
+                moreAction: isSubtitles ? { [weak self] in
+                    self?.presentOpenSubtitlesSearch()
+                } : nil,
+                customizeAction: isSubtitles ? { [weak self] in
+                    self?.presentSubtitleCustomization()
+                } : nil
+            )
+        )
+    }
+
+    /// Rebuilds the already-presented picker from current groups, sidecars,
+    /// and discovery state; no-op when no picker is open.
+    private func refreshTrackPicker() {
+        guard let model = trackPickerModel,
+              trackPickerHost?.presentingViewController != nil || trackPickerHost?.view.window != nil else { return }
+        let isSubtitles = model.kind == .subtitles
+        model.options = isSubtitles
+            ? subtitlePickerOptions(item: player?.currentItem)
+            : audioPickerOptions(item: player?.currentItem)
+        model.loadState = trackGroupLoadState
+        model.customizeEnabled = isSubtitles && (activeSidecarSubtitleIndex.map {
+            sidecarSubtitles.indices.contains($0)
+        } ?? false)
+    }
+
+    private func presentOpenSubtitlesSearch() {
+        guard !disposed else { return }
+        let fallbackQuery = Self.fallbackTitle(for: loadedURL ?? "")
+        let query: String
+        if let loadedTitle {
+            let trimmed = loadedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            query = trimmed.isEmpty ? fallbackQuery : trimmed
+        } else {
+            query = fallbackQuery
         }
-        if alert.actions.isEmpty {
-            alert.message = "No alternate audio or subtitle tracks are available."
+        presentSheet(
+            OpenSubtitlesSearchSheet(
+                query: query,
+                client: OpenSubtitlesClient.shared,
+                onDownloaded: { [weak self] track in
+                    guard let self, !self.disposed else { return }
+                    self.loadSidecarSubtitles([track]) { [weak self] index in
+                        guard let self else { return }
+                        self.selectedExternalSubtitleUrl = track.url
+                        self.activeSidecarSubtitleIndex = index
+                        if let group = self.subtitleGroup {
+                            self.selectMediaOption(nil, in: group)
+                        }
+                        self.updateSidecarSubtitle()
+                        self.updateTrackButtons()
+                        self.onExternalSubtitleSelected?(track, self.mediaSeconds)
+                    }
+                }
+            )
+        )
+    }
+
+    /// Shared page-sheet presentation: medium+large detents with a grabber.
+    @discardableResult
+    private func presentSheet(_ root: some View) -> UIHostingController<some View> {
+        let sheet = UIHostingController(rootView: root)
+        sheet.modalPresentationStyle = .pageSheet
+        sheet.view.backgroundColor = .systemBackground
+        if let presentation = sheet.sheetPresentationController {
+            presentation.detents = [.medium(), .large()]
+            presentation.prefersGrabberVisible = true
         }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        if let popover = alert.popoverPresentationController {
-            popover.sourceView = tracksButton
-            popover.sourceRect = tracksButton.bounds
-        }
-        present(alert, animated: true)
+        present(sheet, animated: true)
+        return sheet
     }
 
     private func loadTrackGroups(for item: AVPlayerItem) {
-        guard trackSelectionEnabled, trackGroupsLoadedFor !== item else { return }
-        let asset = item.asset
-        let key = "availableMediaCharacteristicsWithMediaSelectionOptions"
-        asset.loadValuesAsynchronously(forKeys: [key]) { [weak self, weak item] in
-            guard let self, let item else { return }
-            var error: NSError?
-            guard asset.statusOfValue(forKey: key, error: &error) == .loaded else { return }
-            let audio = asset.mediaSelectionGroup(forMediaCharacteristic: .audible)
-            let subtitles = asset.mediaSelectionGroup(forMediaCharacteristic: .legible)
+        trackGroupLoadState = .loading
+        trackGroupLoader(item.asset) { [weak self, weak item] result in
             DispatchQueue.main.async {
-                guard !self.disposed, self.player?.currentItem === item else { return }
-                self.audioGroup = audio
-                self.subtitleGroup = subtitles
-                self.trackGroupsLoadedFor = item
-                self.updateTrackButton()
+                guard let self,
+                      !self.disposed,
+                      let item,
+                      self.player?.currentItem === item,
+                      self.trackGroupLoadState == .loading else { return }
+                switch result {
+                case .success(let groups):
+                    self.audioGroup = groups.audio
+                    self.subtitleGroup = groups.subtitles
+                    self.selectedExternalSubtitleOption = self.selectedExternalOption(in: groups.subtitles)
+                    self.trackGroupLoadState = .loaded
+                    self.reconcileSubtitlePresentation(
+                        externalPlaybackActive: self.player?.isExternalPlaybackActive ?? false
+                    )
+                case .failure:
+                    NSLog("[RigelPlayer] media selection metadata failed")
+                    self.audioGroup = nil
+                    self.subtitleGroup = nil
+                    self.selectedExternalSubtitleOption = nil
+                    self.trackGroupLoadState = .failed
+                }
+                self.updateTrackButtons()
             }
         }
     }
 
-    private func updateTrackButton() {
-        let audioCount = audioGroup?.options.count ?? 0
-        let subtitleCount = subtitleGroup?.options.count ?? 0
-        if audioCount == 0 && subtitleCount == 0 {
-            tracksButton.accessibilityValue = "No alternate tracks"
+    private var selectedSidecarIsLoaded: Bool {
+        guard let selectedExternalSubtitleUrl else { return false }
+        return sidecarSubtitles.contains { $0.track.url == selectedExternalSubtitleUrl }
+    }
+
+    private var proxySidecarIsLoaded: Bool {
+        guard let proxyExternalSubtitleUrl else { return false }
+        return sidecarSubtitles.contains { $0.track.url == proxyExternalSubtitleUrl }
+    }
+
+    private func visibleNativeSubtitleOptions() -> [AVMediaSelectionOption] {
+        guard let subtitleGroup else { return [] }
+        guard proxySidecarIsLoaded, let selectedExternalSubtitleOption else {
+            return subtitleGroup.options
+        }
+        return subtitleGroup.options.filter { $0 !== selectedExternalSubtitleOption }
+    }
+
+    func reconcileSubtitlePresentation(externalPlaybackActive: Bool) {
+        subtitleCustomizationModel?.isExternalPlaybackActive = externalPlaybackActive
+        guard selectedExternalSubtitleUrl != nil,
+              let subtitleGroup,
+              let selectedExternalSubtitleOption else {
+            if externalPlaybackActive, isProxyPlayback, selectedExternalSubtitleUrl != nil {
+                NSLog("[RigelPlayer] selected subtitle rendition is unavailable for external playback")
+            }
+            if externalPlaybackActive {
+                renderSubtitleText(nil)
+                subtitleLabel.isHidden = true
+            }
+            return
+        }
+        if externalPlaybackActive {
+            selectMediaOption(selectedExternalSubtitleOption, in: subtitleGroup)
+            renderSubtitleText(nil)
+            subtitleLabel.isHidden = true
+        } else if selectedSidecarIsLoaded {
+            selectMediaOption(nil, in: subtitleGroup)
+            updateSidecarSubtitle()
         } else {
-            tracksButton.accessibilityValue = "\(audioCount) audio, \(subtitleCount) subtitle"
-                + (subtitleCount == 1 ? "" : "s")
+            renderSubtitleText(nil)
+            subtitleLabel.isHidden = true
+        }
+        updateTrackButtons()
+    }
+
+    private func updateTrackButtons() {
+        let subtitleCount = visibleNativeSubtitleOptions().count + sidecarSubtitles.count
+        audioButton.accessibilityValue = Self.trackAccessibilityValue(
+            state: trackGroupLoadState,
+            count: audioGroup?.options.count ?? 0,
+            noun: "audio track",
+            loading: "Loading audio tracks",
+            empty: "No alternate audio tracks",
+            failed: "Unable to load audio tracks"
+        )
+        tracksButton.accessibilityValue = Self.trackAccessibilityValue(
+            state: trackGroupLoadState,
+            count: subtitleCount,
+            noun: "subtitle track",
+            loading: "Loading subtitle tracks",
+            empty: "No subtitle tracks",
+            failed: "Unable to load subtitle tracks"
+        )
+        refreshTrackPicker()
+    }
+
+    private static func trackAccessibilityValue(
+        state: TrackPickerModel.LoadState,
+        count: Int,
+        noun: String,
+        loading: String,
+        empty: String,
+        failed: String
+    ) -> String {
+        if count > 0 {
+            return "\(count) \(noun)" + (count == 1 ? "" : "s")
+        }
+        switch state {
+        case .loading: return loading
+        case .loaded: return empty
+        case .failed: return failed
+        }
+    }
+    private func applySubtitleAppearance(_ appearance: SubtitleAppearance) {
+        let weight: UIFont.Weight = appearance.bold ? .bold : .regular
+        let baseFont = UIFont.systemFont(ofSize: appearance.fontSizePoints, weight: weight)
+        subtitleLabel.font = UIFontMetrics(forTextStyle: .title3).scaledFont(for: baseFont)
+        subtitleLabel.adjustsFontForContentSizeCategory = true
+        subtitleLabel.backgroundColor = appearance.backgroundColor.color.withAlphaComponent(
+            appearance.backgroundOpacity
+        )
+        subtitleLabel.layer.cornerRadius = 6
+        subtitleLabel.layer.masksToBounds = true
+        appliedSubtitleAppearance = appearance
+        renderedSubtitleAppearance = nil
+        renderSubtitleText(renderedSubtitleText)
+    }
+
+    private func renderSubtitleText(_ text: String?) {
+        guard let appearance = appliedSubtitleAppearance else {
+            subtitleLabel.attributedText = text.map { NSAttributedString(string: $0) }
+            renderedSubtitleText = text
+            renderedSubtitleAppearance = nil
+            return
+        }
+        guard renderedSubtitleText != text || renderedSubtitleAppearance != appearance else {
+            return
+        }
+        renderedSubtitleText = text
+        renderedSubtitleAppearance = appearance
+        guard let text else {
+            subtitleLabel.attributedText = nil
+            return
+        }
+        let foreground = appearance.textColor.color.withAlphaComponent(appearance.textOpacity)
+        let outline = appearance.outlineEnabled ? appearance.outlineColor.color : .clear
+        subtitleLabel.attributedText = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: subtitleLabel.font as Any,
+                .foregroundColor: foreground,
+                .strokeColor: outline,
+                .strokeWidth: appearance.outlineEnabled ? -3 : 0,
+            ]
+        )
+    }
+
+    func installLoadedSidecar(
+        track: SubtitleTrack,
+        order: Int,
+        cues: [SubtitleParser.Cue],
+        onLoaded: @escaping (Int) -> Void = { _ in }
+    ) {
+        guard !cues.isEmpty, let url = URL(string: track.url) else { return }
+        let title = track.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = title?.isEmpty == false
+            ? title!
+            : Self.sidecarName(for: url, fallback: "Subtitles \(order + 1)")
+        let language = track.language?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let activeOrder = activeSidecarSubtitleIndex.flatMap { index in
+            sidecarSubtitles.indices.contains(index)
+                ? sidecarSubtitles[index].order
+                : nil
+        }
+        sidecarSubtitles.append(
+            SidecarSubtitle(
+                order: order,
+                track: track,
+                name: name,
+                language: language?.isEmpty == false ? language : nil,
+                cues: cues
+            )
+        )
+        sidecarSubtitles.sort { $0.order < $1.order }
+        guard let sidecarIndex = sidecarSubtitles.firstIndex(where: { $0.order == order }) else {
+            return
+        }
+        if selectedExternalSubtitleUrl == track.url {
+            activeSidecarSubtitleIndex = sidecarIndex
+        } else if let activeOrder {
+            activeSidecarSubtitleIndex = sidecarSubtitles.firstIndex {
+                $0.order == activeOrder
+            }
+        }
+        onLoaded(sidecarIndex)
+        updateTrackButtons()
+        updateSidecarSubtitle()
+        reconcileSubtitlePresentation(
+            externalPlaybackActive: player?.isExternalPlaybackActive ?? false
+        )
+    }
+
+    private func loadSidecarSubtitles(
+        _ tracks: [SubtitleTrack],
+        onLoaded: @escaping (Int) -> Void = { _ in }
+    ) {
+        let limitedTracks = Array(tracks.prefix(16))
+        if tracks.count > limitedTracks.count {
+            NSLog("[RigelPlayer] ignoring %ld sidecar subtitles over the limit", tracks.count - limitedTracks.count)
+        }
+        let generation = sidecarGeneration
+        for track in limitedTracks {
+            let sidecarOrder = nextSidecarOrder
+            nextSidecarOrder += 1
+            let rawURL = track.url
+            guard let url = URL(string: rawURL) else {
+                NSLog("[RigelPlayer] sidecar %ld failed: invalid URL", sidecarOrder)
+                continue
+            }
+            let extensionName = url.pathExtension.lowercased()
+            if extensionName == "ass" {
+                NSLog("[RigelPlayer] sidecar %ld skipped: ASS is unsupported", sidecarOrder)
+                continue
+            }
+            if url.isFileURL {
+                loadLocalSidecar(
+                    url: url,
+                    extensionName: extensionName,
+                    rawURL: rawURL,
+                    track: track,
+                    order: sidecarOrder,
+                    generation: generation,
+                    onLoaded: onLoaded
+                )
+                continue
+            }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 10
+            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                guard let self else { return }
+                guard error == nil,
+                      let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode),
+                      let data else {
+                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    NSLog("[RigelPlayer] sidecar %ld failed: HTTP status=%ld", sidecarOrder, statusCode)
+                    return
+                }
+                guard let cues = Self.decodeSidecarCues(
+                    data: data,
+                    encodingName: http.textEncodingName,
+                    extensionName: extensionName,
+                    rawURL: rawURL
+                ) else {
+                    return
+                }
+                DispatchQueue.main.async {
+                    guard self.sidecarGeneration == generation, !self.disposed else { return }
+                    self.installLoadedSidecar(
+                        track: track,
+                        order: sidecarOrder,
+                        cues: cues,
+                        onLoaded: onLoaded
+                    )
+                    NSLog("[RigelPlayer] sidecar %ld ok", sidecarOrder)
+                }
+            }.resume()
         }
     }
 
+    /// Downloaded subtitles arrive as local file URLs (the HLS exporter must
+    /// not be handed remote links), so read them straight from disk instead
+    /// of pretending they are HTTP resources.
+    private func loadLocalSidecar(
+        url: URL,
+        extensionName: String,
+        rawURL: String,
+        track: SubtitleTrack,
+        order: Int,
+        generation: Int,
+        onLoaded: @escaping (Int) -> Void
+    ) {
+        DispatchQueue.global().async { [weak self] in
+            guard let data = try? Data(contentsOf: url) else {
+                NSLog("[RigelPlayer] sidecar %ld failed: file not readable", order)
+                return
+            }
+            guard let cues = RigelPlayerViewController.decodeSidecarCues(
+                data: data,
+                encodingName: nil,
+                extensionName: extensionName,
+                rawURL: rawURL
+            ) else {
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self, self.sidecarGeneration == generation, !self.disposed else { return }
+                self.installLoadedSidecar(
+                    track: track,
+                    order: order,
+                    cues: cues,
+                    onLoaded: onLoaded
+                )
+                NSLog("[RigelPlayer] sidecar %ld ok", order)
+            }
+        }
+    }
 
-    func load(url: String, title: String?, sender: String?, longFormVideoAirPlayEligible: Bool) {
-        NSLog("[RigelPlayer] load %@ longFormVideo=%d", url, longFormVideoAirPlayEligible ? 1 : 0)
+    /// Decodes raw subtitle bytes into sorted cues, or nil (with a log) when
+    /// the payload is not decodable text with at least one valid cue.
+    static func decodeSidecarCues(
+        data: Data,
+        encodingName: String?,
+        extensionName: String,
+        rawURL: String
+    ) -> [SubtitleParser.Cue]? {
+        guard let text = SubtitleParser.decode(data: data, encodingName: encodingName) else {
+            NSLog("[RigelPlayer] sidecar failed: unsupported text encoding")
+            return nil
+        }
+        var cues = extensionName == "vtt"
+            ? SubtitleParser.parseVTT(text)
+            : SubtitleParser.parseSRT(text)
+        cues.sort { $0.start < $1.start }
+        guard !cues.isEmpty else {
+            NSLog("[RigelPlayer] sidecar failed: no valid cues")
+            return nil
+        }
+        return cues
+    }
+
+    private static func sidecarName(for url: URL, fallback: String) -> String {
+        let decoded = url.deletingPathExtension().lastPathComponent.removingPercentEncoding ?? ""
+        let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    private func updateSidecarSubtitle() {
+        if player?.isExternalPlaybackActive == true {
+            renderSubtitleText(nil)
+            subtitleLabel.isHidden = true
+            return
+        }
+        guard let index = activeSidecarSubtitleIndex,
+              sidecarSubtitles.indices.contains(index) else {
+            renderSubtitleText(nil)
+            subtitleLabel.isHidden = true
+            return
+        }
+        let appearance = subtitleAppearance
+        if appliedSubtitleAppearance != appearance {
+            applySubtitleAppearance(appearance)
+            subtitleBottomConstraint?.constant = -appearance.bottomInset
+        }
+        let seconds = mediaSeconds - subtitleDelay
+        guard seconds.isFinite else {
+            renderSubtitleText(nil)
+            subtitleLabel.isHidden = true
+            return
+        }
+        let cue = SubtitleParser.cue(at: seconds, in: sidecarSubtitles[index].cues)
+        renderSubtitleText(cue?.text)
+        subtitleLabel.isHidden = cue == nil
+    }
+
+    private func isCurrentAirPlayDirectPlayback(for url: String?) -> Bool {
+        let state = SwiftPlayer.shared.snapshot()
+        guard !isProxyPlayback,
+              state.phase == .playing,
+              state.destinationKind == .airplay,
+              state.route == .direct,
+              state.proxyUrl == nil else {
+            return false
+        }
+        return url == nil || state.sourceUrl == url
+    }
+
+    func load(
+        url: String,
+        title: String?,
+        sender: String?,
+        longFormVideoAirPlayEligible: Bool,
+        subtitleTracks: [SubtitleTrack] = [],
+        selectedExternalSubtitleUrl: String? = nil,
+        durationSeconds: Double? = nil,
+        isProxy: Bool = false,
+        startOffsetSeconds: Double = 0
+    ) {
+        NSLog("[RigelPlayer] load longFormVideo=%d", longFormVideoAirPlayEligible ? 1 : 0)
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        titleLabel.text = trimmedTitle?.isEmpty == false
-            ? trimmedTitle
+        let resolvedTitle = trimmedTitle?.isEmpty == false
+            ? trimmedTitle!
             : Self.fallbackTitle(for: url)
+        titleLabel.text = resolvedTitle
         let trimmedSender = sender?.trimmingCharacters(in: .whitespacesAndNewlines)
         senderLabel.text = trimmedSender.map { "via \($0)" }
         senderLabel.isHidden = trimmedSender?.isEmpty != false
@@ -484,6 +1293,8 @@ final class RigelPlayerViewController: UIViewController {
             return
         }
         tearDownPlayer()
+        loadedURL = url
+        loadedTitle = resolvedTitle
         do {
             try Self.configureAudioSession(
                 longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
@@ -495,30 +1306,73 @@ final class RigelPlayerViewController: UIViewController {
                 Self.audioSessionLock.unlock()
             }
         } catch {
-            NSLog("[RigelPlayer] audio session setup failed: %@", error.localizedDescription)
+            NSLog("[RigelPlayer] audio session setup failed")
         }
 
         disposed = false
-        notifiedPlaying = false
         isScrubbing = false
-        pendingScrubValue = nil
+        knownDurationSeconds = durationSeconds
+        self.startOffsetSeconds = max(0, startOffsetSeconds.isFinite ? startOffsetSeconds : 0)
+        if isProxy, let resumeMs = Self.proxySessionId(from: url).flatMap(RigelHlsExporter.onDemandResumeMs(sessionId:)) {
+            zeroBasedResumeSeconds = Double(resumeMs) / 1000
+            self.startOffsetSeconds = 0
+        } else {
+            zeroBasedResumeSeconds = 0
+        }
+        isProxyPlayback = isProxy
+        airPlayStartupWatchdog.reset()
+        isAirPlayDirectAttempt = !isProxy && isCurrentAirPlayDirectPlayback(for: url)
+        resumeSeekApplied = false
+        self.selectedExternalSubtitleUrl = selectedExternalSubtitleUrl
+        proxyExternalSubtitleUrl = isProxy ? selectedExternalSubtitleUrl : nil
+        applySubtitleAppearance(SubtitlePreferences.appearance)
         customPlaybackControls = Self.isHLSURL(url)
+        pendingScrubValue = nil
         bottomBar.isHidden = !customPlaybackControls
+        volumeView.isHidden = !customPlaybackControls
         progressSlider.isHidden = true
         progressSlider.value = 0
         elapsedLabel.text = "00:00"
         durationLabel.text = "—"
         audioGroup = nil
         subtitleGroup = nil
-        trackGroupsLoadedFor = nil
-        tracksButton.isHidden = !trackSelectionEnabled
-        tracksButton.accessibilityValue = trackSelectionEnabled ? "Loading tracks" : nil
+        selectedExternalSubtitleOption = nil
+        trackGroupLoadState = .loading
+        audioButton.isHidden = false
+        tracksButton.isHidden = false
+        updateTrackButtons()
         showControls()
 
         let item = AVPlayerItem(url: avURL)
         let p = AVPlayer(playerItem: item)
         p.allowsExternalPlayback = true
         player = p
+        externalPlaybackObservation = p.observe(
+            \.isExternalPlaybackActive,
+            options: [.initial, .new]
+        ) { [weak self, weak p] observedPlayer, _ in
+            let active = observedPlayer.isExternalPlaybackActive
+            DispatchQueue.main.async {
+                guard let self,
+                      let p,
+                      self.player === p,
+                      !self.disposed else { return }
+                self.reconcileSubtitlePresentation(externalPlaybackActive: active)
+            }
+        }
+        if !customPlaybackControls {
+            timeJumpObserver = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name.AVPlayerItemTimeJumped,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, !self.disposed else { return }
+                self.onSeekRequested?(self.mediaSeconds)
+            }
+        }
+        if !subtitleTracks.isEmpty {
+            loadSidecarSubtitles(subtitleTracks)
+        }
 
         let vc = AVPlayerViewController()
         vc.player = p
@@ -536,10 +1390,26 @@ final class RigelPlayerViewController: UIViewController {
         // AVPlayer queues this request until the item is ready. Do not call
         // play() from polling: that would override a user's pause.
         p.play()
+        loadTrackGroups(for: item)
         startPolling()
+        updatePlaybackControls()
+    }
+    /// Proxy output keeps the full probed VOD duration while its HLS playlist
+    /// grows; direct HLS uses AVPlayer's native duration behavior.
+    private func effectiveDuration(_ item: AVPlayerItem) -> Double {
+        if isProxyPlayback,
+           let knownDurationSeconds,
+           knownDurationSeconds.isFinite,
+           knownDurationSeconds > 0 {
+            return knownDurationSeconds
+        }
+        let reported = item.duration.seconds
+        return reported.isFinite && reported > 0 ? reported : .nan
     }
     @objc private func playPauseTapped() {
         showControls()
+        // Resuming during a proxy rebuild would play the stale, doomed item.
+        guard !phaseBufferingRequested else { return }
         guard let player else { return }
         if player.timeControlStatus == .playing {
             player.pause()
@@ -549,25 +1419,114 @@ final class RigelPlayerViewController: UIViewController {
         updatePlaybackControls()
     }
 
+    /// Kotlin's BUFFERING phase (proxy rebuild): freeze the current frame;
+    /// the replacement item plays once load() installs it.
+    func setPhaseBuffering(_ buffering: Bool) {
+        guard phaseBufferingRequested != buffering else { return }
+        phaseBufferingRequested = buffering
+        if buffering {
+            player?.pause()
+        }
+    }
+
+    private func reportNativeBuffering(_ buffering: Bool) {
+        guard buffering != lastReportedNativeBuffering else { return }
+        lastReportedNativeBuffering = buffering
+        onNativeBufferingChange?(buffering)
+    }
+
+    private var mediaSeconds: Double {
+        let current = player?.currentTime().seconds ?? 0
+        let offset = isProxyPlayback ? startOffsetSeconds : 0
+        guard current.isFinite else { return offset }
+        return max(0, offset + current)
+    }
+
+    /// Feed the live export session the local playhead (≈1 Hz) so it can pace
+    /// its run-ahead. Cast sessions skip this: the remote renderer consumes
+    /// the proxy and the local position would mislead the pacing.
+    private func reportPlayheadToExporter() {
+        guard isProxyPlayback, !isCastPlayback,
+              let sessionId = Self.proxySessionId(from: loadedURL) else { return }
+        let now = DispatchTime.now()
+        guard now.uptimeNanoseconds - lastPlayheadReport.uptimeNanoseconds >= 1_000_000_000 else { return }
+        lastPlayheadReport = now
+        RigelHlsExporter.updatePlayhead(sessionId: sessionId, positionMs: Int64(mediaSeconds * 1000))
+    }
+
+    /// Session id from a proxy URL (`.../<sessionId>/index.m3u8`).
+    static func proxySessionId(from url: String?) -> String? {
+        guard let url, let lastSlash = url.lastIndex(of: "/") else { return nil }
+        let beforeLast = url[..<lastSlash]
+        guard let previousSlash = beforeLast.lastIndex(of: "/") else { return nil }
+        let id = String(beforeLast[beforeLast.index(after: previousSlash)...])
+        return id.hasPrefix("session-") ? id : nil
+    }
+
+    private func performSeek(absoluteTarget: Double) {
+        showControls()
+        pendingScrubValue = nil
+        scrubGeneration &+= 1
+        guard let player, let item = player.currentItem, item.status != .failed else { return }
+        let duration = effectiveDuration(item)
+        guard duration.isFinite, duration > 0 else { return }
+        let target = min(max(absoluteTarget, 0), duration)
+        if isProxyPlayback {
+            // The live playlist retains every exported segment, so a target
+            // the player can already reach seeks natively — no rebuild. A
+            // cast renderer fetches the proxy independently, so while casting
+            // every seek still goes through the rebuild path.
+            if !isCastPlayback,
+               let local = Self.nativeProxySeekTarget(
+                   absoluteTarget: target,
+                   startOffsetSeconds: startOffsetSeconds,
+                   seekableEndSeconds: item.seekableTimeRanges.last?.timeRangeValue.end.seconds
+               ) {
+                seekLocally(to: local)
+                return
+            }
+            onSeekRequested?(target)
+            return
+        }
+        seekLocally(to: target)
+        onSeekRequested?(target)
+    }
+
+    /// Item-local seek target for a native proxy seek, or nil when the
+    /// published playlist does not cover the target yet (rebuild instead).
+    static func nativeProxySeekTarget(
+        absoluteTarget: Double,
+        startOffsetSeconds: Double,
+        seekableEndSeconds: Double?
+    ) -> Double? {
+        guard let seekableEnd = seekableEndSeconds, seekableEnd.isFinite, seekableEnd >= 2 else { return nil }
+        let localTarget = absoluteTarget - startOffsetSeconds
+        guard localTarget >= 0, localTarget <= seekableEnd - 1 else { return nil }
+        return localTarget
+    }
+
+    private func seekLocally(to seconds: Double) {
+        guard let player else { return }
+        let generation = scrubGeneration
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) { [weak self, weak player] finished in
+            DispatchQueue.main.async {
+                guard let self, let player, self.player === player, self.scrubGeneration == generation else { return }
+                if finished {
+                    self.updatePlaybackControls()
+                    self.scheduleControlsHide()
+                } else {
+                    self.updatePlaybackControls()
+                }
+            }
+        }
+    }
+
     @objc private func skipBackwardTapped() {
-        seek(by: -15)
+        performSeek(absoluteTarget: mediaSeconds - 15)
     }
 
     @objc private func skipForwardTapped() {
-        seek(by: 15)
-    }
-
-    private func seek(by offset: Double) {
-        showControls()
-        guard let player else { return }
-        let current = player.currentTime().seconds
-        let start = current.isFinite ? max(0, current) : 0
-        let duration = player.currentItem?.duration.seconds ?? .nan
-        let target = duration.isFinite && duration > 0
-            ? min(max(0, start + offset), duration)
-            : max(0, start + offset)
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
-        updatePlaybackControls()
+        performSeek(absoluteTarget: mediaSeconds + 15)
     }
 
     @objc private func progressTouchDown() {
@@ -582,57 +1541,73 @@ final class RigelPlayerViewController: UIViewController {
     @objc private func progressChanged() {
         guard isScrubbing else { return }
         pendingScrubValue = progressSlider.value
+        updatePlaybackControls()
         showControls()
     }
 
     @objc private func progressTouchUp() {
-        let value = pendingScrubValue ?? progressSlider.value
-        let generation = scrubGeneration
         isScrubbing = false
-        guard let player, let item = player.currentItem else {
+        pendingScrubValue = pendingScrubValue ?? progressSlider.value
+        guard let item = player?.currentItem else {
             pendingScrubValue = nil
             showControls()
             return
         }
-        let duration = item.duration.seconds
+        let duration = effectiveDuration(item)
         guard duration.isFinite, duration > 0 else {
             pendingScrubValue = nil
             showControls()
             return
         }
-        let target = Double(value) * duration
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { [weak self, weak player] _ in
-            DispatchQueue.main.async {
-                guard let self, let player, self.player === player, self.scrubGeneration == generation else { return }
-                self.pendingScrubValue = nil
-                self.updatePlaybackControls()
-                self.scheduleControlsHide()
-            }
-        }
+        let target = Double(pendingScrubValue ?? progressSlider.value) * duration
+        performSeek(absoluteTarget: target)
         showControls()
     }
+    /// Poll-tick control updates skip writes whose value did not change: the
+    /// tick also runs while paused with controls hidden, where every write
+    /// would otherwise dirty the view hierarchy for nothing.
     private func updatePlaybackControls() {
         guard customPlaybackControls, let player, let item = player.currentItem else { return }
-        let elapsed = player.currentTime().seconds
+        let duration = effectiveDuration(item)
+        // While scrubbing, show the position being sought to, not the playhead.
+        var elapsed = mediaSeconds
+        if let pendingScrubValue, duration.isFinite, duration > 0 {
+            elapsed = Double(pendingScrubValue) * duration
+        }
         let elapsedText = Self.formatTime(elapsed)
-        elapsedLabel.text = elapsedText
-        let duration = item.duration.seconds
+        if elapsedLabel.text != elapsedText {
+            elapsedLabel.text = elapsedText
+        }
         if duration.isFinite, duration > 0 {
             progressSlider.isHidden = false
             if let pendingScrubValue {
                 progressSlider.value = pendingScrubValue
             } else if !isScrubbing {
-                progressSlider.value = Float(min(max(elapsed / duration, 0), 1))
+                let value = Float(min(max(elapsed / duration, 0), 1))
+                if progressSlider.value != value {
+                    progressSlider.value = value
+                }
             }
             let durationText = Self.formatTime(duration)
-            durationLabel.text = durationText
-            progressSlider.accessibilityValue = "\(elapsedText) of \(durationText)"
+            if durationLabel.text != durationText {
+                durationLabel.text = durationText
+            }
+            let accessibilityValue = "\(elapsedText) of \(durationText)"
+            if progressSlider.accessibilityValue != accessibilityValue {
+                progressSlider.accessibilityValue = accessibilityValue
+            }
         } else {
             progressSlider.isHidden = true
-            durationLabel.text = "—"
-            progressSlider.accessibilityValue = elapsedText
+            if durationLabel.text != "—" {
+                durationLabel.text = "—"
+            }
+            if progressSlider.accessibilityValue != elapsedText {
+                progressSlider.accessibilityValue = elapsedText
+            }
         }
         let isPlaying = player.timeControlStatus == .playing
+        guard isPlaying != lastRenderedPlaying else { return }
+        lastRenderedPlaying = isPlaying
         var configuration = playPauseButton.configuration
         configuration?.image = UIImage(
             systemName: isPlaying ? "pause.fill" : "play.fill",
@@ -653,7 +1628,6 @@ final class RigelPlayerViewController: UIViewController {
             : String(format: "%02d:%02d", minutes, remaining)
     }
 
-
     func stopPlayback() {
         disposed = true
         pollTimer?.invalidate()
@@ -663,26 +1637,80 @@ final class RigelPlayerViewController: UIViewController {
         deactivateAudioSession()
     }
 
+
+    func currentPositionMs() -> Int64? {
+        guard let player else { return nil }
+        let seconds = player.currentTime().seconds + (isProxyPlayback ? startOffsetSeconds : 0)
+        guard seconds.isFinite, seconds >= 0 else { return nil }
+        return Int64((seconds * 1000).rounded(.down))
+    }
+
     private func tearDownPlayer() {
+        // A replacement or dismantle ends the old item's buffering state. The
+        // host tags this callback with the active replacement generation, so a
+        // late teardown from an old controller cannot clear a new item.
+        reportNativeBuffering(false)
+        externalPlaybackObservation?.invalidate()
+        externalPlaybackObservation = nil
+        subtitleCustomizationHost?.dismiss(animated: false)
+        subtitleCustomizationHost = nil
+        subtitleCustomizationModel = nil
         playerVC?.willMove(toParent: nil)
         playerVC?.view.removeFromSuperview()
         playerVC?.removeFromParent()
         playerVC = nil
         player = nil
+        loadedURL = nil
+        loadedTitle = nil
         controlsHideTimer?.invalidate()
+        if let observer = timeJumpObserver {
+            NotificationCenter.default.removeObserver(observer)
+            timeJumpObserver = nil
+        }
         controlsHideTimer = nil
         controlsVisible = true
         topBar.isHidden = false
         topBar.alpha = 1
         bottomBar.alpha = 1
+        volumeView.alpha = 1
+        topGradient.alpha = 1
+        bottomGradient.alpha = 0
         customPlaybackControls = false
         isScrubbing = false
+        knownDurationSeconds = nil
+        startOffsetSeconds = 0
+        isProxyPlayback = false
+        airPlayStartupWatchdog.reset()
+        isAirPlayDirectAttempt = false
+        resumeSeekApplied = false
+        zeroBasedResumeSeconds = 0
+        phaseBufferingRequested = false
+        lastReportedNativeBuffering = false
+        lastRenderedPlaying = false
+        selectedExternalSubtitleUrl = nil
+        selectedExternalSubtitleOption = nil
+        proxyExternalSubtitleUrl = nil
         pendingScrubValue = nil
         scrubGeneration &+= 1
         bottomBar.isHidden = true
+        volumeView.isHidden = true
+        trackPickerHost?.dismiss(animated: false)
+        trackPickerHost = nil
+        trackPickerModel = nil
         audioGroup = nil
         subtitleGroup = nil
-        trackGroupsLoadedFor = nil
+        selectedExternalSubtitleOption = nil
+        trackGroupLoadState = .loading
+        sidecarGeneration &+= 1
+        sidecarSubtitles.removeAll()
+        nextSidecarOrder = 0
+        activeSidecarSubtitleIndex = nil
+        renderedSubtitleText = nil
+        renderedSubtitleAppearance = nil
+        subtitleLabel.attributedText = nil
+        subtitleLabel.text = nil
+        subtitleLabel.isHidden = true
+        audioButton.accessibilityValue = nil
         tracksButton.accessibilityValue = nil
     }
 
@@ -697,7 +1725,7 @@ final class RigelPlayerViewController: UIViewController {
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         } catch {
-            NSLog("[RigelPlayer] audio session deactivation failed: %@", error.localizedDescription)
+            NSLog("[RigelPlayer] audio session deactivation failed")
         }
     }
 
@@ -712,32 +1740,56 @@ final class RigelPlayerViewController: UIViewController {
 
     private func poll() {
         guard !disposed, let player, let item = player.currentItem else { return }
-        if trackGroupsLoadedFor !== item {
-            loadTrackGroups(for: item)
+        if phaseBufferingRequested, player.timeControlStatus == .playing {
+            player.pause()
         }
+        reportNativeBuffering(player.timeControlStatus == .waitingToPlayAtSpecifiedRate)
+        reportPlayheadToExporter()
         updatePlaybackControls()
+        updateSidecarSubtitle()
+        // Only buffering forces the controls up; a paused player may keep
+        // them hidden, and a pending hide timer still fires while paused.
         if player.timeControlStatus == .playing {
             if controlsVisible, controlsHideTimer == nil {
                 scheduleControlsHide()
             }
-        } else if !controlsVisible {
-            showControls()
-        } else {
-            controlsHideTimer?.invalidate()
-            controlsHideTimer = nil
+        } else if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+            if controlsVisible {
+                controlsHideTimer?.invalidate()
+                controlsHideTimer = nil
+            } else {
+                showControls()
+            }
         }
         switch item.status {
         case .failed:
+            // Settle still-pending track discovery before the one-shot
+            // playback error: a later metadata callback must not repopulate
+            // a doomed item's pickers.
+            if trackGroupLoadState == .loading {
+                audioGroup = nil
+                subtitleGroup = nil
+                selectedExternalSubtitleOption = nil
+                trackGroupLoadState = .failed
+                updateTrackButtons()
+            }
             let nsErr = item.error as NSError?
             let detail = nsErr?.localizedDescription ?? "Playback failed"
-            NSLog("[RigelPlayer] item failed: %@ (domain=%@ code=%ld)", detail, nsErr?.domain ?? "?", nsErr?.code ?? -1)
+            NSLog("[RigelPlayer] item failed (domain=%@ code=%ld)", nsErr?.domain ?? "?", nsErr?.code ?? -1)
             // One-shot: stop polling so a `.failed` is delivered exactly once.
             // PlayerController may be auto-falling back to the proxy; repeated
             // delivery would race the proxy build and force an error screen.
             pollTimer?.invalidate()
             pollTimer = nil
             events.onError(message: detail)
+            return
         case .readyToPlay:
+            let resumeSeconds = isProxyPlayback ? zeroBasedResumeSeconds : startOffsetSeconds
+            if !resumeSeekApplied && resumeSeconds > 0 {
+                resumeSeekApplied = true
+                let target = CMTime(seconds: resumeSeconds, preferredTimescale: 600)
+                player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
             if player.timeControlStatus == .playing, !notifiedPlaying {
                 notifiedPlaying = true
                 NSLog("[RigelPlayer] playing")
@@ -746,46 +1798,42 @@ final class RigelPlayerViewController: UIViewController {
         default:
             break
         }
-    }
-}
+        let currentAirPlayDirectPlayback = isCurrentAirPlayDirectPlayback(for: loadedURL)
+        if !currentAirPlayDirectPlayback {
+            airPlayStartupWatchdog.reset()
+            isAirPlayDirectAttempt = false
+            return
+        }
+        if !isAirPlayDirectAttempt {
+            airPlayStartupWatchdog.reset()
+            isAirPlayDirectAttempt = true
+        }
 
-final class RigelPlayerBridge: NSObject, NativePlayerBridge {
-    private var vc: RigelPlayerViewController?
-
-    func createPlayerViewController(events: PlayerEvents) -> UIViewController {
-        let v = RigelPlayerViewController(events: events)
-        vc = v
-        return v
-    }
-
-    func load(
-        url: String,
-        title: String?,
-        sender: String?,
-        longFormVideoAirPlayEligible: Bool
-    ) {
-        vc?.load(
-            url: url,
-            title: title,
-            sender: sender,
-            longFormVideoAirPlayEligible: longFormVideoAirPlayEligible
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+        let paused = player.timeControlStatus == .paused ||
+            phaseBufferingRequested ||
+            isScrubbing ||
+            UIApplication.shared.applicationState != .active
+        let externalPlaying = item.status == .readyToPlay &&
+            player.timeControlStatus == .playing &&
+            player.isExternalPlaybackActive
+        let timedOut = airPlayStartupWatchdog.update(
+            now: now,
+            eligible: isAirPlayDirectAttempt,
+            paused: paused,
+            externalPlaying: externalPlaying,
+            positionSeconds: player.currentTime().seconds,
+            rate: player.rate
         )
-    }
+        guard timedOut else { return }
 
-    func stop() {
-        vc?.stopPlayback()
-        vc = nil
-    }
-
-    /// Stops the given controller (per-player disposal is always safe; audio
-    /// session release is reference-counted). Returns true only when that
-    /// controller was still the bridge's current one, letting callers discard
-    /// stale errors from dismantled players.
-    @discardableResult
-    func stop(viewController: RigelPlayerViewController) -> Bool {
-        viewController.stopPlayback()
-        guard vc === viewController else { return false }
-        vc = nil
-        return true
+        guard isCurrentAirPlayDirectPlayback(for: loadedURL) else {
+            airPlayStartupWatchdog.reset()
+            isAirPlayDirectAttempt = false
+            return
+        }
+        pollTimer?.invalidate()
+        pollTimer = nil
+        events.onError(message: "AirPlay playback did not start within 15 seconds")
     }
 }

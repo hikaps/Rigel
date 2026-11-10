@@ -7,6 +7,9 @@ on:
     branches: [develop, main]
   workflow_dispatch:
 
+env:
+  FFMPEG_VERSION: "7.1"
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -22,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test AltStore source generator
+        run: python3 scripts/test_generate_altstore_source.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -73,33 +78,58 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew list --versions ffmpeg >/dev/null 2>&1 || brew install ffmpeg
-      - id: xcode-version
-        name: Identify Xcode for FFmpeg cache
-        run: echo "version=$(xcodebuild -version | awk 'NR == 1 { print $2 }')" >> "$GITHUB_OUTPUT"
+      - id: apple-sdk
+        name: Identify Xcode and iPhoneSimulator SDK for FFmpeg cache
+        run: |
+          set -euo pipefail
+          echo "xcode=$(xcodebuild -version | awk 'NR == 1 { print $2 }')" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)" >> "$GITHUB_OUTPUT"
       - id: ffmpeg-cache
         name: Restore FFmpeg simulator libs
         uses: actions/cache@v4
         with:
           path: iosApp/vendor/ffmpeg
-          key: ffmpeg-sim-${{ runner.os }}-${{ runner.arch }}-xcode-${{ steps.xcode-version.outputs.version }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+          key: ffmpeg-sim-${{ runner.os }}-${{ runner.arch }}-xcode-${{ steps.apple-sdk.outputs.xcode }}-sdk-${{ steps.apple-sdk.outputs.sdk }}-ffmpeg-${{ env.FFMPEG_VERSION }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
       - name: Build FFmpeg simulator libs
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: |
           # Pin parallelism (parallel make races on generated headers) and retry once.
-          JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh \
-            || JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh
+          FF_VERSION="$FFMPEG_VERSION" JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh \
+            || FF_VERSION="$FFMPEG_VERSION" JOBS=4 FF_BUILD_DIR="$RUNNER_TEMP/ffbuild-sim" ./scripts/build-ffmpeg.sh
       - name: Generate media fixtures
         run: ./scripts/gen-fixtures.sh
+      - name: Verify XcodeGen 2.46.0 project drift
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew list --versions mint >/dev/null 2>&1 || brew install mint
+          XCODEGEN_VERSION="$(mint run --silent yonaskolb/XcodeGen@2.46.0 xcodegen --version | tail -n 1 | tr -d '\r')"
+          test "$XCODEGEN_VERSION" = "Version: 2.46.0"
+          (cd iosApp && mint run --silent yonaskolb/XcodeGen@2.46.0 xcodegen generate)
+          git diff --exit-code -- iosApp/Rigel.xcodeproj/project.pbxproj
       - name: Run Swift unit tests
         run: |
           # Pin by UDID: name+OS:latest fails on runners with mixed simulator
           # runtimes (e.g. iPhone 16 Pro only on iOS 18.2 while Xcode's latest
           # runtime is 26.x). First available iPhone simulator wins.
-          DEVICE_UDID="$(xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(x['udid'] for v in d['devices'].values() for x in v if x.get('isAvailable') and x['name'].startswith('iPhone')))")"
+          DEVICE_UDID="$(xcrun simctl list devices -j | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(x['udid'] for v in d['devices'].values() for x in v if x.get('isAvailable') and x['name'].startswith('iPhone')))" )"
+          # Certificate-free simulator signing enables the real Keychain regression.
+          cat > "$RUNNER_TEMP/rigel-test.entitlements" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <plist version="1.0"><dict>
+          <key>application-identifier</key><string>RIGELTESTS.com.rigel.player</string>
+          <key>keychain-access-groups</key><array><string>RIGELTESTS.com.rigel.player</string></array>
+          <key>get-task-allow</key><true/>
+          </dict></plist>
+          PLIST
           xcodebuild test \
             -project iosApp/Rigel.xcodeproj \
             -scheme Rigel \
             -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
             -derivedDataPath "$HOME/rigel-deriveddata" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_ENTITLEMENTS="$RUNNER_TEMP/rigel-test.entitlements"

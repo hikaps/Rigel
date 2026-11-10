@@ -10,17 +10,27 @@ final class PlayerModel: ObservableObject {
     @Published var phase: PlayerPhase = .idle
     @Published var sourceUrl: String?
     @Published var filename: String?
+    @Published var title: String?
     @Published var route: PlaybackRoute?
     @Published var proxyUrl: String?
     @Published var error: String?
     @Published var sender: String?
+    @Published var subtitleTracks: [SubtitleTrack] = []
+    @Published var selectedExternalSubtitleUrl: String?
     @Published var castActive = false
+    @Published var remotePlayback = false
+    @Published var destinationName = "This iPhone"
+    @Published var destinationId = "local:iphone"
+    @Published var planDetail: String?
+    @Published var futureDestinationName = "This iPhone"
+    @Published var futureDestinationAcceptsUrls = true
     @Published var longFormVideoAirPlayEligible = false
-    @Published var showPlayer = false
-    private var requestedTitle: String?
-    private var requestedTitleURL: String?
+    @Published var probeDurationMs: Double?
+    @Published var startPositionMs: Int64 = 0
 
+    @Published var showPlayer = false
     private var observeJob: Kotlinx_coroutines_coreJob?
+    private var selectionJob: Kotlinx_coroutines_coreJob?
 
     init() {
         observeJob = SwiftPlayer.shared.observe { [weak self] state in
@@ -28,68 +38,150 @@ final class PlayerModel: ObservableObject {
                 self?.apply(state)
             }
         }
+        selectionJob = SwiftOutputSelection.shared.observe { [weak self] state in
+            Task { @MainActor [weak self] in
+                self?.applyFutureSelection(state)
+            }
+        }
         apply(SwiftPlayer.shared.snapshot())
+        applyFutureSelection(SwiftOutputSelection.shared.snapshot())
     }
 
     deinit {
         observeJob?.cancel(cause: nil)
+        selectionJob?.cancel(cause: nil)
     }
 
     var displayTitle: String? {
+        if let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return title
+        }
         if let filename, !filename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return filename
-        }
-        if let requestedTitle, !requestedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return requestedTitle
         }
         return nil
     }
 
     var playableURL: String? { proxyUrl ?? sourceUrl }
-
     var routeLabel: String { route?.name ?? "" }
-
     var isPlaying: Bool { phase == .playing }
+    var rendersNativePlayer: Bool {
+        !remotePlayback && (phase == .playing || phase == .buffering)
+    }
 
     func apply(_ state: PlayerUiState) {
-        if state.phase == .idle ||
-            (requestedTitleURL != nil && requestedTitleURL != state.sourceUrl) {
-            requestedTitle = nil
-            requestedTitleURL = nil
-        }
+        let wasRemotePlayback = remotePlayback
+        let jellyfinHandoffCompleted = state.destinationKind == .jellyfin
+            && state.remotePlayback && state.phase == .playing
+            && (!wasRemotePlayback || destinationId != state.destinationId)
         phase = state.phase
         sourceUrl = state.sourceUrl
         filename = state.filename
+        title = state.title
         route = state.route
         proxyUrl = state.proxyUrl
         error = state.error
         sender = state.sender
+        subtitleTracks = state.subtitleTracks
+        selectedExternalSubtitleUrl = state.selectedExternalSubtitleUrl
         castActive = state.castActive
+        remotePlayback = state.remotePlayback
+        destinationName = state.destinationName
+        destinationId = state.destinationId
+        planDetail = state.planDetail
+        startPositionMs = state.startPositionMs
         longFormVideoAirPlayEligible = state.longFormVideoAirPlayEligible
-        showPlayer = state.phase != .idle
+        if let probe = state.probe, !probe.isLive {
+            probeDurationMs = probe.durationMs?.doubleValue
+        } else {
+            probeDurationMs = nil
+        }
+        if state.phase == .idle || jellyfinHandoffCompleted {
+            showPlayer = false
+        } else if !state.remotePlayback || !wasRemotePlayback
+                    || (state.phase != .playing && state.phase != .buffering) {
+            // Remote controls may stay dismissed; preparation and local playback need the host.
+            showPlayer = true
+        }
+    }
+
+    func applyFutureSelection(_ state: OutputSelectionState) {
+        futureDestinationName = state.displayName
+        futureDestinationAcceptsUrls = state.acceptsUrl
     }
 
     @discardableResult
     func open(url: String) -> Bool {
-        open(url: url, title: nil)
+        open(url: url, title: nil, subtitleTracks: [])
     }
 
     @discardableResult
     func open(url: String, title: String?) -> Bool {
-        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        requestedTitle = trimmedTitle.flatMap { $0.isEmpty ? nil : $0 }
-        requestedTitleURL = url
-        let accepted = SwiftPlayer.shared.loadRaw(url: url)
-        if !accepted {
-            requestedTitle = nil
-            requestedTitleURL = nil
-        }
-        return accepted
+        open(url: url, title: title, subtitleTracks: [])
+    }
+
+    @discardableResult
+    func open(url: String, title: String?, subtitleTracks: [SubtitleTrack]) -> Bool {
+        SwiftPlayer.shared.loadRaw(url: url, title: title, subtitleTracks: subtitleTracks)
+    }
+
+    @discardableResult
+    func openJellyfin(
+        title: String,
+        subtitleTracks: [SubtitleTrack],
+        baseUrl: String,
+        token: String,
+        userId: String,
+        itemId: String,
+        mediaSourceId: String?
+    ) -> Bool {
+        SwiftPlayer.shared.loadJellyfinItem(
+            title: title,
+            subtitleTracks: subtitleTracks,
+            baseUrl: baseUrl,
+            token: token,
+            userId: userId,
+            itemId: itemId,
+            mediaSourceId: mediaSourceId
+        )
+    }
+
+    func selectDestinationLocal() {
+        SwiftPlayer.shared.selectLocal(positionMs: SwiftPlayer.shared.currentPositionMs())
+    }
+
+    func selectDestinationAirPlay(routeId: String, name: String) {
+        SwiftPlayer.shared.selectAirPlay(
+            routeId: routeId,
+            name: name,
+            positionMs: SwiftPlayer.shared.currentPositionMs()
+        )
+    }
+
+    func selectDestinationReceiver(_ target: CastTarget) {
+        SwiftPlayer.shared.selectReceiver(
+            target: target,
+            positionMs: SwiftPlayer.shared.currentPositionMs()
+        )
+    }
+
+    func seek(positionSeconds: Double, durationSeconds: Double) {
+        guard positionSeconds.isFinite, durationSeconds.isFinite, durationSeconds >= 0 else { return }
+        SwiftPlayer.shared.seek(
+            positionMs: Int64(max(0, positionSeconds * 1000)),
+            durationMs: Int64(durationSeconds * 1000)
+        )
+    }
+
+    func selectExternalSubtitle(_ track: SubtitleTrack?, positionSeconds: Double) {
+        let safeSeconds = positionSeconds.isFinite ? max(0, positionSeconds) : 0
+        let maxMilliseconds = Double(Int64.max - 1)
+        let milliseconds = min(safeSeconds * 1_000, maxMilliseconds)
+        let positionMs = Int64(milliseconds.rounded(.down))
+        SwiftPlayer.shared.selectExternalSubtitle(track: track, positionMs: positionMs)
     }
 
     func stop() {
-        // Native AVPlayer must stop too, or playback (and its poll timer)
-        // keeps running after the player UI is dismissed.
         PlayerBridgeFactory.shared.create()?.stop()
         SwiftPlayer.shared.stop()
     }
@@ -99,36 +191,10 @@ final class PlayerModel: ObservableObject {
     }
 
     func reportError(_ message: String) {
-        // Native teardown is bound to the originating controller in
-        // PlayerView.makeUIViewController: a stale .failed from a dismantled
-        // player must not stop the bridge's current (possibly newer)
-        // controller. Only forward the error; Kotlin rejects stale state.
-        SwiftPlayer.shared.reportError(message: message)
-    }
-}
-
-/// Conforms the Kotlin PlayerEvents protocol (implemented by the native
-/// AVPlayerViewController host) to this model's closures.
-final class PlayerEventsImpl: NSObject, PlayerEvents {
-    private let readyHandler: () -> Void
-    private let errorHandler: (String) -> Void
-    private let backHandler: () -> Void
-
-    init(onReady: @escaping () -> Void, onError: @escaping (String) -> Void, onBack: @escaping () -> Void) {
-        self.readyHandler = onReady
-        self.errorHandler = onError
-        self.backHandler = onBack
-    }
-
-    func onReady() {
-        readyHandler()
-    }
-
-    func onError(message: String) {
-        errorHandler(message)
-    }
-
-    func onBack() {
-        backHandler()
+        // Capture the native playhead before Kotlin starts replacing the item.
+        SwiftPlayer.shared.reportError(
+            message: message,
+            positionMs: SwiftPlayer.shared.currentPositionMs()
+        )
     }
 }

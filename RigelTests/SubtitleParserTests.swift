@@ -1,0 +1,195 @@
+import XCTest
+@testable import Rigel
+
+final class SubtitleParserTests: XCTestCase {
+    func testSRTParsesMultilineCuesAndSortsByStart() {
+        let text = """
+        2
+        00:00:03,500 --> 00:00:05,000
+        <i>Later</i> line
+
+        1
+        00:00:00,000 --> 00:00:01,250
+        First line
+        Second line
+        """
+
+        XCTAssertEqual(
+            SubtitleParser.parseSRT(text),
+            [
+                .init(start: 0, end: 1.25, text: "First line\nSecond line"),
+                .init(start: 3.5, end: 5, text: "Later line"),
+            ]
+        )
+    }
+
+    func testSRTSkipsMalformedAndEmptyCues() {
+        let text = """
+        1
+        not a timestamp
+        ignored
+
+        2
+        00:00:04,000 --> 00:00:03,000
+        Backwards
+
+        3
+        00:00:05,000 --> 00:00:06,000
+
+        4
+        00:00:07,000 --> 00:00:08,000
+        Valid
+        """
+
+        XCTAssertEqual(
+            SubtitleParser.parseSRT(text),
+            [.init(start: 7, end: 8, text: "Valid")]
+        )
+    }
+
+    func testVTTHandlesHeaderNotesCueIdsAndShortTimestamps() {
+        let text = """
+        WEBVTT - captions
+
+        NOTE
+        this is metadata
+
+        cue-2
+        1:02.500 --> 1:04.000 align:start
+        <b>Hello</b> &amp; goodbye
+
+        00:00:00.250 --> 00:00:01.000
+        Early
+        """
+
+        XCTAssertEqual(
+            SubtitleParser.parseVTT(text),
+            [
+                .init(start: 0.25, end: 1, text: "Early"),
+                .init(start: 62.5, end: 64, text: "Hello & goodbye"),
+            ]
+        )
+    }
+
+    func testVTTSkipsMalformedAndEmptyCues() {
+        let text = """
+        WEBVTT
+
+        00:00:01.000 --> invalid
+        ignored
+
+        00:00:02.000 --> 00:00:03.000
+        <c.colorE5E5E5></c>
+        """
+
+        XCTAssertTrue(SubtitleParser.parseVTT(text).isEmpty)
+    }
+    func testDecodeSupportsAsciiUnicodeAndLegacySubtitleBytes() {
+        XCTAssertEqual(
+            SubtitleParser.decode(data: Data("ASCII subtitle".utf8)),
+            "ASCII subtitle"
+        )
+
+        let utf16Text = "Café — 日本語"
+        var utf16 = Data([0xFF, 0xFE])
+        utf16.append(contentsOf: utf16Text.data(using: .utf16LittleEndian) ?? Data())
+        XCTAssertEqual(
+            SubtitleParser.decode(data: utf16)?
+                .replacingOccurrences(of: "\u{feff}", with: ""),
+            utf16Text
+        )
+
+        let windows1252 = Data([
+            0x43, 0x61, 0x66, 0xE9, 0x20, 0x96, 0x20, 0x64, 0xE9, 0x6A, 0xE0,
+        ])
+        XCTAssertEqual(
+            SubtitleParser.decode(data: windows1252, encodingName: "windows-1252"),
+            "Café – déjà"
+        )
+    }
+
+    func testSRTDecodesNumericAndNamedEntities() {
+        let text = """
+        1
+        00:00:00,000 --> 00:00:02,000
+        Caf&#xE9; &mdash; &#233;
+        """
+
+        XCTAssertEqual(
+            SubtitleParser.parseSRT(text),
+            [.init(start: 0, end: 2, text: "Café — é")]
+        )
+    }
+
+    func testSidecarCueDecodingAcceptsValidFilesAndRejectsEmptyOnes() {
+        let srt = Data("""
+        1
+        00:00:01,000 --> 00:00:02,000
+        Later
+
+        2
+        00:00:00,000 --> 00:00:01,000
+        First
+        """.utf8)
+        XCTAssertEqual(
+            RigelPlayerViewController.decodeSidecarCues(
+                data: srt,
+                encodingName: nil,
+                extensionName: "srt",
+                rawURL: "file:///tmp/test.srt"
+            ),
+            [
+                .init(start: 0, end: 1, text: "First"),
+                .init(start: 1, end: 2, text: "Later"),
+            ]
+        )
+
+        XCTAssertNil(
+            RigelPlayerViewController.decodeSidecarCues(
+                data: Data([0xFF, 0xFE, 0x00, 0xD8]),
+                encodingName: nil,
+                extensionName: "srt",
+                rawURL: "file:///tmp/binary.srt"
+            ),
+            "undecodable bytes must be rejected"
+        )
+
+        XCTAssertNil(
+            RigelPlayerViewController.decodeSidecarCues(
+                data: Data("just text, no cues".utf8),
+                encodingName: nil,
+                extensionName: "srt",
+                rawURL: "file:///tmp/empty.srt"
+            ),
+            "files without valid cues must be rejected"
+        )
+    }
+
+    func testCueLookupFindsActiveCue() {
+        let cues = [
+            SubtitleParser.Cue(start: 0, end: 2, text: "a"),
+            SubtitleParser.Cue(start: 5, end: 8, text: "b"),
+            SubtitleParser.Cue(start: 10, end: 12, text: "c"),
+        ]
+        XCTAssertEqual(SubtitleParser.cue(at: 1, in: cues)?.text, "a")
+        XCTAssertEqual(SubtitleParser.cue(at: 6.5, in: cues)?.text, "b")
+        XCTAssertEqual(SubtitleParser.cue(at: 11.999, in: cues)?.text, "c")
+        XCTAssertNil(SubtitleParser.cue(at: -1, in: cues))
+        XCTAssertNil(SubtitleParser.cue(at: 3, in: cues), "gap between cues")
+        XCTAssertNil(SubtitleParser.cue(at: 12, in: cues), "cue end is exclusive")
+        XCTAssertNil(SubtitleParser.cue(at: 100, in: cues))
+    }
+
+    func testCueLookupHandlesEmptyList() {
+        XCTAssertNil(SubtitleParser.cue(at: 0, in: []))
+    }
+
+    func testCueLookupPrefersLatestOverlappingCue() {
+        let cues = [
+            SubtitleParser.Cue(start: 0, end: 10, text: "long"),
+            SubtitleParser.Cue(start: 2, end: 4, text: "short"),
+        ]
+        XCTAssertEqual(SubtitleParser.cue(at: 3, in: cues)?.text, "short")
+        XCTAssertEqual(SubtitleParser.cue(at: 5, in: cues)?.text, "long")
+    }
+}

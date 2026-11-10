@@ -1,0 +1,1012 @@
+import Foundation
+
+extension RigelHlsExporter {
+    private static let subtitleMpegTSModulus: Int64 = 1 << 33
+
+    static func subtitleTimestampMapMpegTS(
+        mode: String,
+        sourceOrigin90k: Int64,
+        requestedOffsetMs: Int64,
+        encoderOrigin90k: Int64,
+        delayMs: Int64 = 0
+    ) -> Int64 {
+        let requestedOffset90k = av_rescale_q(
+            requestedOffsetMs,
+            AVRational(num: 1, den: 1_000),
+            AVRational(num: 1, den: 90_000)
+        )
+        // A cue's output time is MPEGTS + cue time, so a later MPEGTS delays every cue.
+        let delay90k = av_rescale_q(delayMs, AVRational(num: 1, den: 1_000), AVRational(num: 1, den: 90_000))
+        let epoch = sourceOrigin90k.addingReportingOverflow(requestedOffset90k).partialValue
+            .addingReportingOverflow(delay90k).partialValue
+        let outputClock = mode == "remux"
+            ? epoch
+            : epoch.subtractingReportingOverflow(encoderOrigin90k).partialValue
+        let wrapped = outputClock % subtitleMpegTSModulus
+        return wrapped >= 0 ? wrapped : wrapped + subtitleMpegTSModulus
+    }
+
+    static func run(
+        session: Session,
+        sessionId: String,
+        sourceUrl: String,
+        headers: [String: String],
+        mode: String,
+        passthroughAudioCodecs: [String],
+        onReady: @escaping (String?, String?) -> Void,
+        onError: @escaping (String) -> Void
+    ) {
+        let outDir = sessionDir(sessionId: sessionId)
+        try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let legacyPlaylistPath = outDir.appendingPathComponent("index.m3u8").path
+
+        var ifmt: UnsafeMutablePointer<AVFormatContext>? = nil
+        var ofmt: UnsafeMutablePointer<AVFormatContext>? = nil
+        var subtitleInputs: [SubtitleInput] = []
+        var subtitleRenditions: [SubtitleRendition] = []
+        var audioChains: [Int32: AudioChain] = [:]
+        var passthroughAudioIndices: Set<Int32> = []
+        var videoChain: VideoChain? = nil
+        var pendingAudioPackets: [UnsafeMutablePointer<AVPacket>] = []
+        var notified = false
+        var terminalError: String?
+        func reportFailure(_ message: String) {
+            guard !isCancelled(session) else { return }
+            terminalError = terminalError ?? message
+            if notified {
+                DispatchQueue.main.async { onError(message) }
+            } else {
+                notified = true
+                DispatchQueue.main.async { onReady(nil, message) }
+            }
+        }
+
+        defer {
+            let shouldDelete = terminalError != nil && !isCancelled(session)
+            if shouldDelete {
+                lock.lock()
+                session.cleanupPending = true
+                lock.unlock()
+            }
+            let wasCancelled = finishSession(session, sessionId: sessionId)
+            if !notified && !wasCancelled {
+                notified = true
+                DispatchQueue.main.async { onReady(nil, "session ended before playlist was ready") }
+            }
+            for packet in pendingAudioPackets {
+                var packetPointer: UnsafeMutablePointer<AVPacket>? = packet
+                av_packet_free(&packetPointer)
+            }
+            subtitleRenditions.forEach(finishSubtitleRendition)
+            cleanup(
+                ifmt: ifmt,
+                ofmt: ofmt,
+                audio: Array(audioChains.values),
+                video: videoChain,
+                subtitleInputs: subtitleInputs,
+                subtitleRenditions: subtitleRenditions
+            )
+            if shouldDelete && !wasCancelled {
+                deleteSessionDir(sessionId: sessionId, session: session, writerQueue: session.queue)
+            }
+        }
+
+        guard openInput(url: sourceUrl, headers: headers, watchdog: session.inputWatchdog, fmt: &ifmt), let ctx = ifmt else {
+            reportFailure("failed to open source: \(sourceUrl)")
+            return
+        }
+        let inCount = Int(ctx.pointee.nb_streams)
+        var selectedVideoIndex: Int32?
+        var selectedVideoIsDefault = false
+        var selectedAudioIndices: [Int32] = []
+        var defaultAudioIndex: Int32?
+        var foundDefaultAudio = false
+        for (offset, track) in session.subtitleTracks.enumerated() {
+            var subtitleFmt: UnsafeMutablePointer<AVFormatContext>? = nil
+            let watchdog = InputWatchdog(timeoutSeconds: 10)
+            session.retainSidecarWatchdog(watchdog)
+            guard openSidecarInput(url: track.url, headers: [:], watchdog: watchdog, fmt: &subtitleFmt),
+                  let subtitleCtx = subtitleFmt else {
+                closeInput(&subtitleFmt)
+                reportFailure("Could not prepare the selected subtitle")
+                return
+            }
+            let subtitleStreamIndex = (0..<Int(subtitleCtx.pointee.nb_streams)).compactMap { index -> Int32? in
+                guard let stream = subtitleCtx.pointee.streams[index],
+                      let codecpar = stream.pointee.codecpar,
+                      codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE,
+                      !isBitmapSubtitle(codecpar.pointee.codec_id) else { return nil }
+                return Int32(index)
+            }.first
+            guard let subtitleStreamIndex,
+                  let subtitleStream = subtitleCtx.pointee.streams[Int(subtitleStreamIndex)] else {
+                closeInput(&subtitleFmt)
+                reportFailure("Could not prepare the selected subtitle")
+                return
+            }
+            let language = hlsLanguageValue(track.language)
+                ?? hlsLanguage(for: subtitleStream.pointee.metadata)
+            let title = track.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            subtitleInputs.append(
+                SubtitleInput(
+                    sourceID: offset + 1,
+                    context: subtitleCtx,
+                    streamIndex: subtitleStreamIndex,
+                    timeBase: subtitleStream.pointee.time_base,
+                    language: language,
+                    title: title?.isEmpty == false
+                        ? title
+                        : streamMetadataValue(subtitleStream.pointee.metadata, key: "title"),
+                    ioWatchdog: watchdog,
+                    sourceURL: track.url
+                )
+            )
+        }
+        for i in 0..<inCount {
+            guard let stream = ctx.pointee.streams[i], let codecpar = stream.pointee.codecpar else { continue }
+            let inputIndex = Int32(i)
+            let isDefault = (stream.pointee.disposition & AV_DISPOSITION_DEFAULT) != 0
+            switch codecpar.pointee.codec_type {
+            case AVMEDIA_TYPE_VIDEO:
+                let isAttachedPicture = (stream.pointee.disposition & AV_DISPOSITION_ATTACHED_PIC) != 0
+                if !isAttachedPicture &&
+                    (selectedVideoIndex == nil || (isDefault && !selectedVideoIsDefault)) {
+                    selectedVideoIndex = inputIndex
+                    selectedVideoIsDefault = isDefault
+                }
+            case AVMEDIA_TYPE_AUDIO:
+                selectedAudioIndices.append(inputIndex)
+                if defaultAudioIndex == nil || (isDefault && !foundDefaultAudio) {
+                    defaultAudioIndex = inputIndex
+                    foundDefaultAudio = isDefault
+                }
+            case AVMEDIA_TYPE_SUBTITLE:
+                if isBitmapSubtitle(codecpar.pointee.codec_id) {
+                    NSLog("[RigelHlsExporter] skipping bitmap subtitle stream %d", inputIndex)
+                } else {
+                    subtitleInputs.append(
+                        SubtitleInput(
+                            sourceID: 0,
+                            context: ctx,
+                            streamIndex: inputIndex,
+                            timeBase: stream.pointee.time_base,
+                            language: hlsLanguage(for: stream.pointee.metadata),
+                            title: streamMetadataValue(stream.pointee.metadata, key: "title"),
+                            ioWatchdog: nil,
+                            sourceURL: nil
+                        )
+                    )
+                }
+            default:
+                break
+            }
+        }
+
+        let outputAudioIndices: [Int32]
+        if selectedVideoIndex == nil {
+            outputAudioIndices = defaultAudioIndex.map { [$0] } ?? []
+        } else {
+            outputAudioIndices = selectedAudioIndices
+        }
+        if session.waitForCompletion, mode == "remux", let videoIndex = selectedVideoIndex,
+           let plan = makeOnDemandPlan(
+               ctx,
+               session: session,
+               videoIndex: videoIndex,
+               audioIndices: outputAudioIndices,
+               passthroughAudioCodecs: passthroughAudioCodecs
+           ) {
+            lock.lock()
+            session.onDemandResumeMs = session.startOffsetMs
+            session.startOffsetMs = 0
+            lock.unlock()
+            let failure = runOnDemand(
+                session: session,
+                sessionId: sessionId,
+                outDir: outDir,
+                ctx: ctx,
+                plan: plan,
+                defaultAudioIndex: defaultAudioIndex,
+                subtitleInputs: subtitleInputs,
+                publish: {
+                    notified = publishReady(
+                        session: session,
+                        sessionId: sessionId,
+                        path: "\(sessionId)/index.m3u8",
+                        onReady: onReady
+                    )
+                    return notified
+                }
+            )
+            if let failure { reportFailure(failure) }
+            return
+        }
+        if session.startOffsetMs > 0 {
+            let seekOrigin90k = sourceTimestampOrigin90k(
+                ctx,
+                videoIndex: selectedVideoIndex,
+                audioIndices: outputAudioIndices
+            )
+            let seekOriginUs = av_rescale_q(
+                seekOrigin90k,
+                AVRational(num: 1, den: 90_000),
+                AVRational(num: 1, den: AV_TIME_BASE)
+            )
+            let requestedOffsetUs = session.startOffsetMs.multipliedReportingOverflow(by: 1_000)
+            let targetUs = seekOriginUs.addingReportingOverflow(requestedOffsetUs.partialValue)
+            guard !requestedOffsetUs.overflow, !targetUs.overflow else {
+                reportFailure("invalid HLS seek offset")
+                return
+            }
+            session.inputWatchdog.touch()
+            let seekResult = avformat_seek_file(ctx, -1, 0, targetUs.partialValue, Int64.max, 0)
+            if seekResult < 0 {
+                NSLog("[RigelPlayer] failed to seek source to %lld ms", session.startOffsetMs)
+            }
+        }
+
+        let hasMasterPlaylist = selectedVideoIndex != nil
+        let baseMasterPath = outDir.appendingPathComponent("base.m3u8").path
+        let playlistPath = hasMasterPlaylist
+            ? outDir.appendingPathComponent("variant_%v.m3u8").path
+            : legacyPlaylistPath
+        guard avformat_alloc_output_context2(&ofmt, nil, "hls", playlistPath) >= 0, let out = ofmt else {
+            reportFailure("failed to create HLS output context")
+            return
+        }
+
+        av_opt_set(out.pointee.priv_data, "hls_time", "4", 0)
+        // A short first segment pairs with the 2 s GOP so readiness needs
+        // ~6 s of media instead of ~8 s; steady-state segments stay 4 s.
+        av_opt_set(out.pointee.priv_data, "hls_init_time", "2", 0)
+        av_opt_set(out.pointee.priv_data, "hls_list_size", "0", 0)
+        av_opt_set(out.pointee.priv_data, "hls_playlist_type", "event", 0)
+        av_opt_set(out.pointee.priv_data, "hls_flags", "independent_segments", 0)
+        av_opt_set(
+            out.pointee.priv_data,
+            "hls_segment_filename",
+            hasMasterPlaylist
+                ? outDir.appendingPathComponent("seg%v_%05d.ts").path
+                : outDir.appendingPathComponent("seg%05d.ts").path,
+            0
+        )
+
+        var outputInputIndices = outputAudioIndices
+        if let selectedVideoIndex {
+            outputInputIndices.insert(selectedVideoIndex, at: 0)
+        }
+        let timestampOrigin90k = sourceTimestampOrigin90k(
+            ctx,
+            videoIndex: selectedVideoIndex,
+            audioIndices: outputAudioIndices
+        )
+        var mediaTimestampOrigin90k = timestampOrigin90k
+
+        var streamMap: [Int32: Int32] = [:]
+        var mainVideoOutput: UnsafeMutablePointer<AVStream>?
+        for inputIndex in outputInputIndices {
+            guard let inStream = ctx.pointee.streams[Int(inputIndex)],
+                  let codecpar = inStream.pointee.codecpar,
+                  let outStream = avformat_new_stream(out, nil) else { continue }
+            let outIndex = outStream.pointee.index
+            streamMap[inputIndex] = outIndex
+
+            switch codecpar.pointee.codec_type {
+            case AVMEDIA_TYPE_VIDEO:
+                mainVideoOutput = outStream
+                // remux: verbatim stream copy. transcode: always re-encode.
+                if mode == "remux" {
+                    if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
+                        outStream.pointee.codecpar.pointee.codec_tag = 0
+                        outStream.pointee.time_base = inStream.pointee.time_base
+                    }
+                } else if let chain = makeVideoChain(
+                    inputStream: inStream,
+                    outputStream: outStream,
+                    timestampOrigin90k: timestampOrigin90k
+                ) {
+                    videoChain = chain
+                    chain.outputStreams = [outStream]
+                }
+            case AVMEDIA_TYPE_AUDIO:
+                if let language = streamMetadataValue(inStream.pointee.metadata, key: "language") {
+                    language.withCString { value in
+                        av_dict_set(&outStream.pointee.metadata, "language", value, 0)
+                    }
+                }
+                if mode == "remux", let name = codecName(codecpar.pointee.codec_id),
+                   passthroughAudioCodecs.contains(name) {
+                    passthroughAudioIndices.insert(inputIndex)
+                    if avcodec_parameters_copy(outStream.pointee.codecpar, codecpar) >= 0 {
+                        outStream.pointee.codecpar.pointee.codec_tag = 0
+                        outStream.pointee.time_base = inStream.pointee.time_base
+                    }
+                } else if let chain = makeAudioChain(
+                    inputStream: inStream,
+                    outputStream: outStream,
+                    timestampOrigin90k: timestampOrigin90k
+                ) {
+                    audioChains[inputIndex] = chain
+                }
+            default:
+                break
+            }
+        }
+
+        let subtitleMapMpegTS = subtitleTimestampMapMpegTS(
+            mode: mode,
+            sourceOrigin90k: timestampOrigin90k,
+            requestedOffsetMs: session.startOffsetMs,
+            encoderOrigin90k: mediaTimestampOrigin90k,
+            delayMs: session.subtitleDelayMs
+        )
+        var primarySubtitleOutputs: [Int32: SubtitleRendition] = [:]
+        var externalSubtitleOutputs: [Int: SubtitleRendition] = [:]
+        if mainVideoOutput != nil {
+            let made = makeSubtitleRenditions(subtitleInputs, outDir: outDir, timestampMapMpegTS: subtitleMapMpegTS)
+            subtitleRenditions = made.renditions
+            if let error = made.error {
+                reportFailure(error)
+                return
+            }
+            for rendition in subtitleRenditions {
+                if rendition.input.sourceID == 0 {
+                    primarySubtitleOutputs[rendition.input.streamIndex] = rendition
+                } else {
+                    externalSubtitleOutputs[rendition.input.sourceID] = rendition
+                }
+            }
+        }
+
+        if mode != "remux", selectedVideoIndex != nil, videoChain == nil {
+            reportFailure("failed to initialize video transcoder")
+            return
+        }
+        if hasMasterPlaylist {
+            var streamMapEntries: [String] = []
+            var mainEntry = "v:0"
+            if !outputAudioIndices.isEmpty {
+                mainEntry += ",agroup:aud"
+            }
+            streamMapEntries.append(mainEntry)
+            for (audioNumber, inputIndex) in outputAudioIndices.enumerated() {
+                var entry = "a:\(audioNumber),agroup:aud"
+                if inputIndex == defaultAudioIndex {
+                    entry += ",default:yes"
+                }
+                if let language = hlsLanguage(
+                    for: ctx.pointee.streams[Int(inputIndex)]?.pointee.metadata
+                ) {
+                    entry += ",language:\(language)"
+                } else {
+                    entry += ",name:Audio-\(audioNumber + 1)"
+                }
+                streamMapEntries.append(entry)
+            }
+            av_opt_set(
+                out.pointee.priv_data,
+                "var_stream_map",
+                streamMapEntries.joined(separator: " "),
+                0
+            )
+            av_opt_set(
+                out.pointee.priv_data,
+                "master_pl_name",
+                "base.m3u8",
+                0
+            )
+        }
+
+        // Some demuxers leave codecpar.format unset. Prime the decoder until
+        // the first real frame reveals its format and dimensions, buffering
+        // audio packets encountered before the HLS header can be written.
+        if mode != "remux",
+           let chain = videoChain,
+           !chain.initialized,
+           let videoIndex = selectedVideoIndex,
+           let videoOutIndex = streamMap[videoIndex],
+           let videoInStream = ctx.pointee.streams[Int(videoIndex)],
+           let videoOutStream = out.pointee.streams[Int(videoOutIndex)] {
+            /// Retained audio is a bounded tail ring, not fatal and not a
+            /// drop-the-middle hole: when the byte cap is exceeded the oldest
+            /// buffered packets are evicted, so what remains is always the
+            /// audio adjacent to the first decoded video frame. The timeline
+            /// is then rebased onto the ring head so replay stays continuous.
+            let primingAudioByteLimit: Int64 = 8 * 1024 * 1024
+            var primingAudioBytes: Int64 = 0
+            var primingAudioEvicted = false
+            primingLoop: while !chain.initialized && !isCancelled(session) {
+                var primePacket = AVPacket()
+                av_init_packet(&primePacket)
+                session.inputWatchdog.touch()
+                let readRet = av_read_frame(ctx, &primePacket)
+                switch classifyPrimingRead(readRet) {
+                case .ok:
+                    session.inputWatchdog.touch()
+                    break
+                case .again:
+                    // Non-blocking source: transient, not EOF. Yield briefly
+                    // so the retry loop does not spin.
+                    usleep(1_000)
+                    continue
+                case .eof:
+                    av_packet_unref(&primePacket)
+                    if flushPrimingVideo(chain, inputStream: videoInStream, outputStream: videoOutStream) == .fatal {
+                        reportFailure("video decoder produced no usable frame")
+                        return
+                    }
+                    if !chain.initialized {
+                        reportFailure("video decoder produced no usable frame")
+                        return
+                    }
+                    // EOF packet is a sentinel, not media: exit the loop
+                    // before the dispatch below can feed it to the decoder.
+                    break primingLoop
+                case .readError(let message):
+                    av_packet_unref(&primePacket)
+                    reportFailure(message)
+                    return
+                }
+                if primePacket.stream_index == videoIndex {
+                    switch primeVideoPacket(
+                        chain,
+                        packet: &primePacket,
+                        inputStream: videoInStream,
+                        outputStream: videoOutStream
+                    ) {
+                    case .fatal:
+                        av_packet_unref(&primePacket)
+                        reportFailure("failed to initialize video transcoder")
+                        return
+                    case .needMoreInput, .initialized:
+                        break
+                    }
+                } else if outputAudioIndices.contains(primePacket.stream_index),
+                          let buffered = av_packet_alloc(),
+                          av_packet_ref(buffered, &primePacket) >= 0 {
+                    primingAudioBytes += Int64(max(0, buffered.pointee.size))
+                    pendingAudioPackets.append(buffered)
+                    while primingAudioBytes > primingAudioByteLimit,
+                          pendingAudioPackets.count > 1,
+                          let oldest = pendingAudioPackets.first {
+                        primingAudioBytes -= Int64(max(0, oldest.pointee.size))
+                        pendingAudioPackets.removeFirst()
+                        var oldestPointer: UnsafeMutablePointer<AVPacket>? = oldest
+                        av_packet_free(&oldestPointer)
+                        primingAudioEvicted = true
+                    }
+                }
+                av_packet_unref(&primePacket)
+            }
+            if !chain.initialized {
+                reportFailure("video decoder produced no usable frame")
+                return
+            }
+            if primingAudioEvicted {
+                var audioTimeBases: [Int32: AVRational] = [:]
+                for audioIndex in outputAudioIndices {
+                    if let audioStream = ctx.pointee.streams[Int(audioIndex)] {
+                        audioTimeBases[audioIndex] = audioStream.pointee.time_base
+                    }
+                }
+                if let ringHeadPTS = audioRingHeadPTS90k(
+                    pendingAudioPackets,
+                    timeBases: audioTimeBases
+                ) {
+                    // Rebase every chain onto the retained tail so replayed
+                    // audio and the first decoded video share one timeline.
+                    chain.timestampOrigin90k = ringHeadPTS
+                    mediaTimestampOrigin90k = ringHeadPTS
+                    for audioChain in audioChains.values {
+                        audioChain.timestampOrigin90k = ringHeadPTS
+                    }
+                    for rendition in subtitleRenditions {
+                        rendition.timestampMapMpegTS = subtitleTimestampMapMpegTS(
+                            mode: mode,
+                            sourceOrigin90k: timestampOrigin90k,
+                            requestedOffsetMs: session.startOffsetMs,
+                            encoderOrigin90k: ringHeadPTS,
+                            delayMs: session.subtitleDelayMs
+                        )
+                    }
+                }
+            }
+        }
+        let headerRet = avformat_write_header(out, nil)
+        guard headerRet >= 0 else {
+            reportFailure("HLS write header failed: \(avErrorString(headerRet))")
+            return
+        }
+
+        if let chain = videoChain, chain.initialized,
+           let videoOutIndex = streamMap[chain.inputIndex],
+           let videoOutStream = out.pointee.streams[Int(videoOutIndex)] {
+            drainPendingVideoFrames(chain, out: out, outStream: videoOutStream)
+        }
+        if let videoError = videoChain?.error {
+            av_write_trailer(out)
+            reportFailure(videoError)
+            return
+        }
+        for buffered in pendingAudioPackets {
+            let inIdx = buffered.pointee.stream_index
+            if let outIdx = streamMap[inIdx],
+               let inStream = ctx.pointee.streams[Int(inIdx)],
+               let outStream = out.pointee.streams[Int(outIdx)] {
+                if let chain = audioChains[inIdx] {
+                    writeTranscodedAudio(chain: chain, packet: buffered, out: out, outStream: outStream)
+                } else if passthroughAudioIndices.contains(inIdx) {
+                    let writeRet = writeRemuxPacket(buffered, inStream: inStream, outStream: outStream, out: out)
+                    if writeRet < 0 {
+                        terminalError = "audio packet write failed: \(avErrorString(writeRet))"
+                    }
+                }
+            }
+            var bufferedPointer: UnsafeMutablePointer<AVPacket>? = buffered
+            av_packet_free(&bufferedPointer)
+        }
+        pendingAudioPackets.removeAll()
+        if let writeError = terminalError ?? audioChains.values.compactMap({ $0.error }).first {
+            let trailerRet = av_write_trailer(out)
+            let failure = trailerRet < 0
+                ? "HLS write trailer failed: \(avErrorString(trailerRet))"
+                : writeError
+            reportFailure(failure)
+            return
+        }
+        /// Sidecar subtitle files keep absolute timestamps; after a proxy seek
+        /// the primary input's timeline is shifted by the same offset.
+        let sidecarOffsetUs = session.startOffsetMs.multipliedReportingOverflow(by: 1_000).partialValue
+
+        var primaryEnded = false
+        let readRetryLimit = 100
+        var primaryReadRetryCount = 0
+        var externalReadRetryCounts: [Int: Int] = [:]
+        var endedExternalSources = Set<Int>()
+        var lastReadinessCheck = DispatchTime(uptimeNanoseconds: 0)
+        var lastInputUs: Int64 = 0
+        let externalSourceCount = externalSubtitleOutputs.count
+        var remuxVideoBuffer: RemuxVideoPacketBuffer? = {
+            guard mode == "remux", let videoIndex = selectedVideoIndex,
+                  let videoStream = ctx.pointee.streams[Int(videoIndex)] else { return nil }
+            return RemuxVideoPacketBuffer(
+                frameDuration: remuxFrameDuration(inputStream: videoStream),
+                maximumPendingPackets: remuxTimestampBufferLimit(inputStream: videoStream)
+            )
+        }()
+        defer {
+            remuxVideoBuffer?.release()
+        }
+        func writeBufferedRemuxPackets(
+            _ ready: [RemuxReadyPacket],
+            inStream: UnsafeMutablePointer<AVStream>,
+            outStream: UnsafeMutablePointer<AVStream>
+        ) -> String? {
+            for (index, readyPacket) in ready.enumerated() {
+                readyPacket.packet.pointee.pts = readyPacket.timestamps.pts
+                readyPacket.packet.pointee.dts = readyPacket.timestamps.dts
+                let writeRet = writeRemuxPacket(
+                    readyPacket.packet,
+                    inStream: inStream,
+                    outStream: outStream,
+                    out: out
+                )
+                var packetPointer: UnsafeMutablePointer<AVPacket>? = readyPacket.packet
+                av_packet_free(&packetPointer)
+                if writeRet < 0 {
+                    for remaining in ready.dropFirst(index + 1) {
+                        var remainingPointer: UnsafeMutablePointer<AVPacket>? = remaining.packet
+                        av_packet_free(&remainingPointer)
+                    }
+                    return "HLS video packet write failed: \(avErrorString(writeRet))"
+                }
+            }
+            return nil
+        }
+        packetLoop: while true {
+            if isCancelled(session) { break }
+            paceExport(session: session, exportedUs: lastInputUs)
+            var didRead = false
+            if !primaryEnded {
+                var primaryPacket = AVPacket()
+                av_init_packet(&primaryPacket)
+                session.inputWatchdog.touch()
+                let readRet = av_read_frame(ctx, &primaryPacket)
+                switch classifyPrimingRead(readRet) {
+                case .ok:
+                    primaryReadRetryCount = 0
+                    session.inputWatchdog.touch()
+                    didRead = true
+                case .eof:
+                    av_packet_unref(&primaryPacket)
+                    primaryEnded = true
+                case .again:
+                    av_packet_unref(&primaryPacket)
+                    if primaryReadRetryCount < readRetryLimit {
+                        primaryReadRetryCount += 1
+                        usleep(1_000)
+                        continue packetLoop
+                    }
+                    terminalError = "primary read error: \(avErrorString(readRet))"
+                    break packetLoop
+                case .readError(let message):
+                    av_packet_unref(&primaryPacket)
+                    terminalError = message
+                    break packetLoop
+                }
+                if didRead {
+                    let inIdx = primaryPacket.stream_index
+                    lastInputUs = max(
+                        lastInputUs,
+                        inputPacketUs(&primaryPacket, stream: ctx.pointee.streams[Int(inIdx)])
+                    )
+                    let originUs = av_rescale_q(
+                        mediaTimestampOrigin90k,
+                        AVRational(num: 1, den: 90_000),
+                        AVRational(num: 1, den: AV_TIME_BASE)
+                    )
+                    let mediaPositionMs = max(
+                        0,
+                        (lastInputUs - originUs) / 1_000 - session.startOffsetMs
+                    )
+                    for rendition in subtitleRenditions {
+                        advanceSubtitleProgress(rendition, mediaPositionMs: mediaPositionMs)
+                    }
+                    if let outIdx = streamMap[inIdx],
+                       let inStream = ctx.pointee.streams[Int(inIdx)],
+                       let outStream = out.pointee.streams[Int(outIdx)] {
+                        switch inStream.pointee.codecpar.pointee.codec_type {
+                        case AVMEDIA_TYPE_VIDEO:
+                            if let chain = videoChain, chain.inputIndex == inIdx {
+                                writeTranscodedVideo(chain: chain, packet: &primaryPacket, out: out, outStream: outStream)
+                            } else if var buffer = remuxVideoBuffer {
+                                switch buffer.append(&primaryPacket) {
+                                case .failure(let message):
+                                    terminalError = message
+                                case .ready(let ready):
+                                    terminalError = writeBufferedRemuxPackets(
+                                        ready,
+                                        inStream: inStream,
+                                        outStream: outStream
+                                    )
+                                }
+                                remuxVideoBuffer = buffer
+                            } else {
+                                terminalError = "failed to initialize video timestamp buffer"
+                            }
+                        case AVMEDIA_TYPE_AUDIO:
+                            if let chain = audioChains[inIdx] {
+                                writeTranscodedAudio(chain: chain, packet: &primaryPacket, out: out, outStream: outStream)
+                            } else if passthroughAudioIndices.contains(inIdx) {
+                                let writeRet = writeRemuxPacket(&primaryPacket, inStream: inStream, outStream: outStream, out: out)
+                                if writeRet < 0 {
+                                    terminalError = "audio packet write failed: \(avErrorString(writeRet))"
+                                }
+                            }
+                        default:
+                            break
+                        }
+                    } else if let subtitleOutput = primarySubtitleOutputs[inIdx] {
+                        writeSubtitlePacket(
+                            subtitleOutput,
+                            packet: &primaryPacket,
+                            sidecarOffsetUs: sidecarOffsetUs,
+                            sourceTimestampOrigin90k: timestampOrigin90k
+                        )
+                    }
+                    if terminalError != nil {
+                        av_packet_unref(&primaryPacket)
+                        break packetLoop
+                    }
+                    av_packet_unref(&primaryPacket)
+                }
+            }
+
+            for subtitleOutput in externalSubtitleOutputs.values {
+                let sourceID = subtitleOutput.input.sourceID
+                guard !endedExternalSources.contains(sourceID) else { continue }
+                var subtitlePacket = AVPacket()
+                av_init_packet(&subtitlePacket)
+                subtitleOutput.input.ioWatchdog?.touch()
+                let readRet = av_read_frame(subtitleOutput.input.context, &subtitlePacket)
+                switch classifyPrimingRead(readRet) {
+                case .ok:
+                    externalReadRetryCounts[sourceID] = 0
+                    subtitleOutput.input.ioWatchdog?.touch()
+                    didRead = true
+                    writeSubtitlePacket(
+                        subtitleOutput,
+                        packet: &subtitlePacket,
+                        sidecarOffsetUs: sidecarOffsetUs,
+                        sourceTimestampOrigin90k: timestampOrigin90k
+                    )
+                    av_packet_unref(&subtitlePacket)
+                case .eof:
+                    av_packet_unref(&subtitlePacket)
+                    endedExternalSources.insert(sourceID)
+                case .again:
+                    av_packet_unref(&subtitlePacket)
+                    let retries = externalReadRetryCounts[sourceID, default: 0]
+                    if retries < readRetryLimit {
+                        externalReadRetryCounts[sourceID] = retries + 1
+                        usleep(1_000)
+                        continue
+                    }
+                    endedExternalSources.insert(sourceID)
+                    let message = "subtitle read error: \(avErrorString(readRet))"
+                    if subtitleOutput.isSelectedExternal {
+                        terminalError = message
+                        break
+                    }
+                    NSLog("[RigelHlsExporter] dropping unselected subtitle source %d: %@", sourceID, message)
+                case .readError(let message):
+                    av_packet_unref(&subtitlePacket)
+                    endedExternalSources.insert(sourceID)
+                    if subtitleOutput.isSelectedExternal {
+                        terminalError = message
+                        break
+                    }
+                    NSLog("[RigelHlsExporter] dropping unselected subtitle source %d: %@", sourceID, message)
+                }
+            }
+
+            if !didRead &&
+                (primaryEnded && endedExternalSources.count == externalSourceCount) {
+                break
+            }
+            if terminalError != nil {
+                break
+            }
+            if let videoError = videoChain?.error {
+                terminalError = videoError
+                break
+            }
+            if let audioError = audioChains.values.compactMap({ $0.error }).first {
+                terminalError = audioError
+                break
+            }
+            // Warmup waits until the main and subtitle playlists reference
+            // files that already exist; the public master is then immutable
+            // until the final trailer pass.
+            // Finite AirPlay playback waits for the final VOD playlist instead of exposing EVENT media.
+            if !notified && !session.waitForCompletion && (remuxVideoBuffer?.hasDTSAnchor ?? true) {
+                let now = DispatchTime.now()
+                if now.uptimeNanoseconds - lastReadinessCheck.uptimeNanoseconds >= 100_000_000 {
+                    lastReadinessCheck = now
+                    let ready: Bool
+                    if hasMasterPlaylist {
+                        ready = presentationReady(
+                            baseMasterURL: URL(fileURLWithPath: baseMasterPath),
+                            outDir: outDir,
+                            subtitles: subtitleRenditions,
+                            final: false
+                        )
+                    } else {
+                        ready = playlistReady(
+                            playlistPath: playlistPath,
+                            outDir: outDir,
+                            variantCount: 1,
+                            final: false
+                        )
+                    }
+                    if ready {
+                        let published = !hasMasterPlaylist || publishMasterPlaylist(
+                            baseMasterURL: URL(fileURLWithPath: baseMasterPath),
+                            publicMasterURL: URL(fileURLWithPath: legacyPlaylistPath),
+                            subtitles: subtitleRenditions
+                        )
+                        if published {
+                            notified = publishReady(
+                                session: session,
+                                sessionId: sessionId,
+                                path: "\(sessionId)/index.m3u8",
+                                onReady: onReady
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if terminalError == nil && !isCancelled(session),
+           var buffer = remuxVideoBuffer,
+           let videoIndex = selectedVideoIndex,
+           let outIndex = streamMap[videoIndex],
+           let inStream = ctx.pointee.streams[Int(videoIndex)],
+           let outStream = out.pointee.streams[Int(outIndex)] {
+            switch buffer.finish() {
+            case .failure(let message):
+                terminalError = message
+            case .ready(let ready):
+                terminalError = writeBufferedRemuxPackets(
+                    ready,
+                    inStream: inStream,
+                    outStream: outStream
+                )
+            }
+            remuxVideoBuffer = buffer
+        }
+        if terminalError == nil && !isCancelled(session) {
+            for audioIndex in outputAudioIndices {
+                guard let chain = audioChains[audioIndex],
+                      let outIndex = streamMap[chain.inputIndex],
+                      let outStream = out.pointee.streams[Int(outIndex)] else { continue }
+                flushTranscodedAudio(chain: chain, out: out, outStream: outStream)
+            }
+            if let chain = videoChain, chain.initialized,
+               let outIndex = streamMap[chain.inputIndex],
+               let outStream = out.pointee.streams[Int(outIndex)] {
+                flushTranscodedVideo(chain: chain, out: out, outStream: outStream)
+            }
+        }
+        if let videoError = videoChain?.error {
+            terminalError = terminalError ?? videoError
+        }
+        if let audioError = audioChains.values.compactMap({ $0.error }).first {
+            terminalError = terminalError ?? audioError
+        }
+        if terminalError == nil,
+           subtitleRenditions.contains(where: { $0.isSelectedExternal && $0.decodeFailed }) {
+            terminalError = "Could not prepare the selected subtitle"
+        }
+        if let terminalError {
+            let trailerRet = av_write_trailer(out)
+            let failure = trailerRet < 0
+                ? "HLS write trailer failed: \(avErrorString(trailerRet))"
+                : terminalError
+            subtitleRenditions.forEach(finishSubtitleRendition)
+            reportFailure(failure)
+            return
+        }
+        let trailerRet = av_write_trailer(out)
+        if trailerRet < 0 {
+            subtitleRenditions.forEach(finishSubtitleRendition)
+            reportFailure("HLS write trailer failed: \(avErrorString(trailerRet))")
+            return
+        }
+        subtitleRenditions.forEach(finishSubtitleRendition)
+        let finalReady: Bool
+        if hasMasterPlaylist {
+            finalReady = presentationReady(
+                baseMasterURL: URL(fileURLWithPath: baseMasterPath),
+                outDir: outDir,
+                subtitles: subtitleRenditions,
+                final: true
+            )
+        } else {
+            finalReady = playlistReady(
+                playlistPath: playlistPath,
+                outDir: outDir,
+                variantCount: 1,
+                final: true
+            )
+        }
+        if finalReady {
+            let vodFinalized = !session.waitForCompletion || finalizePresentationAsVOD(
+                baseMasterURL: hasMasterPlaylist ? URL(fileURLWithPath: baseMasterPath) : nil,
+                playlistURL: hasMasterPlaylist ? nil : URL(fileURLWithPath: playlistPath),
+                outDir: outDir,
+                subtitles: subtitleRenditions
+            )
+            if session.waitForCompletion && !vodFinalized {
+                reportFailure("HLS VOD playlist could not be finalized")
+            } else {
+                let published = !hasMasterPlaylist || publishMasterPlaylist(
+                    baseMasterURL: URL(fileURLWithPath: baseMasterPath),
+                    publicMasterURL: URL(fileURLWithPath: legacyPlaylistPath),
+                    subtitles: subtitleRenditions
+                )
+                if !published {
+                    reportFailure("failed to publish HLS master playlist")
+                } else if !notified {
+                    notified = publishReady(
+                        session: session,
+                        sessionId: sessionId,
+                        path: "\(sessionId)/index.m3u8",
+                        onReady: onReady
+                    )
+                }
+            }
+        } else if !notified {
+            reportFailure("HLS presentation was not ready")
+        }
+    }
+
+    /// Builds text renditions; a failed selected sidecar returns an error with
+    /// the renditions created so far (the caller releases them).
+    static func makeSubtitleRenditions(
+        _ inputs: [SubtitleInput],
+        outDir: URL,
+        timestampMapMpegTS: Int64
+    ) -> (renditions: [SubtitleRendition], error: String?) {
+        var renditions: [SubtitleRendition] = []
+        for input in inputs {
+            let isSelectedExternal = input.sourceID != 0
+            guard let inputStream = input.context.pointee.streams[Int(input.streamIndex)],
+                  let codecpar = inputStream.pointee.codecpar else {
+                if isSelectedExternal {
+                    return (renditions, "Could not prepare the selected subtitle")
+                }
+                continue
+            }
+            let codec = codecpar.pointee.codec_id
+            let chain: SubtitleChain?
+            if codec == AV_CODEC_ID_WEBVTT {
+                chain = nil
+            } else {
+                guard let decoded = makeSubtitleChain(inputStream: inputStream) else {
+                    if isSelectedExternal {
+                        return (renditions, "Could not prepare the selected subtitle")
+                    }
+                    NSLog(
+                        "[RigelHlsExporter] failed to initialize subtitle decoder for stream %d codec %d",
+                        input.streamIndex,
+                        codec.rawValue
+                    )
+                    continue
+                }
+                chain = decoded
+            }
+            guard let rendition = makeSubtitleRendition(
+                input: input,
+                ordinal: renditions.count,
+                outDir: outDir,
+                chain: chain,
+                timestampMapMpegTS: timestampMapMpegTS,
+                isSelectedExternal: isSelectedExternal
+            ) else {
+                if isSelectedExternal {
+                    return (renditions, "Could not prepare the selected subtitle")
+                }
+                NSLog("[RigelHlsExporter] failed to create subtitle rendition for stream %d", input.streamIndex)
+                continue
+            }
+            renditions.append(rendition)
+        }
+        return (renditions, nil)
+    }
+
+    static let pacingRunAheadLimitUs: Int64 = 20_000_000
+    static let pacingPlayheadFreshnessSeconds: Double = 15
+
+    /// Absolute media time of a packet (AV_TIME_BASE µs); 0 when unknown.
+    static func inputPacketUs(
+        _ packet: UnsafeMutablePointer<AVPacket>,
+        stream: UnsafeMutablePointer<AVStream>?
+    ) -> Int64 {
+        guard let stream, stream.pointee.time_base.num != 0, stream.pointee.time_base.den != 0 else { return 0 }
+        let ts = packet.pointee.pts != Int64.min ? packet.pointee.pts : packet.pointee.dts
+        guard ts != Int64.min else { return 0 }
+        return av_rescale_q(ts, stream.pointee.time_base, AVRational(num: 1, den: AV_TIME_BASE))
+    }
+
+    /// True when the export should idle: it is far ahead of a fresh playhead.
+    /// An unknown or stale playhead (never reported, or cast playback where
+    /// the local position is wrong) keeps the historical free-run behavior.
+    static func shouldPace(exportedUs: Int64, playheadMs: Int64, playheadAgeSeconds: Double?) -> Bool {
+        guard playheadMs >= 0,
+              let age = playheadAgeSeconds,
+              age <= pacingPlayheadFreshnessSeconds else { return false }
+        return exportedUs - playheadMs * 1000 > pacingRunAheadLimitUs
+    }
+
+    /// Blocks the session queue in short sleeps until pacing disengages or
+    /// the session is cancelled; playhead jumps (native seeks) re-engage or
+    /// release pacing through the same check.
+    static func paceExport(session: Session, exportedUs: Int64) {
+        while true {
+            lock.lock()
+            let playheadMs = session.playheadMs
+            let updated = session.playheadUpdatedAt
+            let cancelled = session.cancel
+            lock.unlock()
+            if cancelled { return }
+            let age = updated.map {
+                Double(DispatchTime.now().uptimeNanoseconds - $0.uptimeNanoseconds) / 1_000_000_000
+            }
+            guard shouldPace(exportedUs: exportedUs, playheadMs: playheadMs, playheadAgeSeconds: age) else {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+    }
+}

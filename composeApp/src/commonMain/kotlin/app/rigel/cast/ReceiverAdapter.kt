@@ -1,8 +1,8 @@
 package app.rigel.cast
 
 import app.rigel.bridge.SsdpDevice
+import app.rigel.output.OutputMediaProfile
 import io.ktor.client.HttpClient
-
 /**
  * Per-receiver-family contract. Each adapter owns discovery enrichment,
  * manual-IP probing, cast dispatch, persistence encoding, and capabilities.
@@ -16,13 +16,44 @@ interface ReceiverAdapter {
     /** SSDP search-target values this family contributes to discovery. */
     val ssdpTargets: List<String> get() = emptyList()
 
-    /** True when this adapter handles the given target variant. */
-    fun matches(target: CastTarget): Boolean
-
     fun capabilities(): CastCapabilities
 
-    /** Send a URL to the remote renderer. Returns a human-readable result or error. */
-    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): String
+    /** Media compatibility profile; control capabilities above are independent. */
+    suspend fun mediaProfile(target: CastTarget, client: HttpClient): OutputMediaProfile =
+        app.rigel.output.OutputMediaProfiles.familyDefault(target)
+
+    /** Send prepared media to the remote renderer; [CastResult.message] is user-facing. */
+    suspend fun cast(target: CastTarget, media: PreparedCastMedia, client: HttpClient): CastResult
+    suspend fun seek(
+        target: CastTarget,
+        positionMs: Long,
+        durationMs: Long,
+        client: HttpClient,
+    ): Boolean = false
+
+    /** Read the source-relative playback position, or null when unsupported/unavailable. */
+    suspend fun position(target: CastTarget, client: HttpClient): Long? = null
+
+    /** Pause the active remote item; false means this receiver cannot pause. */
+    suspend fun pause(target: CastTarget, client: HttpClient): Boolean = false
+
+    /** Resume the paused remote item; false means this receiver cannot resume. */
+    suspend fun resume(target: CastTarget, client: HttpClient): Boolean = false
+
+    /** Stop the remote item; false means this receiver cannot stop. */
+    suspend fun stop(target: CastTarget, client: HttpClient): Boolean = false
+
+    /**
+     * Raise the receiver volume one relative step; false means unsupported.
+     * Families without absolute volume (Roku) only step up/down/toggle.
+     */
+    suspend fun volumeUp(target: CastTarget, client: HttpClient): Boolean = false
+
+    /** Lower the receiver volume one relative step; false means unsupported. */
+    suspend fun volumeDown(target: CastTarget, client: HttpClient): Boolean = false
+
+    /** Toggle the receiver mute; false means unsupported. */
+    suspend fun toggleMute(target: CastTarget, client: HttpClient): Boolean = false
 
     /** Enrich an SSDP response into a [CastTarget], or null to skip. */
     suspend fun fromSsdp(device: SsdpDevice, client: HttpClient): CastTarget? = null

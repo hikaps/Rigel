@@ -1,0 +1,349 @@
+import SwiftUI
+import ComposeApp
+
+/// Mapping between the persisted route value (Kotlin stores the enum name)
+/// and the exported enum cases.
+extension RouteOverride {
+    var pickerKey: String {
+        if self == RouteOverride.direct { return "DIRECT" }
+        if self == RouteOverride.alwaysProxy { return "ALWAYS_PROXY" }
+        return "AUTO"
+    }
+
+    static func from(pickerKey: String) -> RouteOverride {
+        if pickerKey == "DIRECT" { return RouteOverride.direct }
+        if pickerKey == "ALWAYS_PROXY" { return RouteOverride.alwaysProxy }
+        return RouteOverride.auto_
+    }
+}
+
+struct SettingsView: View {
+    private enum OpenSubtitlesField {
+        case username, password
+    }
+
+    @State private var routeKey = ""
+    @State private var rendererOn = false
+    @State private var rendererNotice: String?
+    @State private var openSubtitlesUsername = ""
+    @State private var openSubtitlesPassword = ""
+    @State private var openSubtitlesConnected = false
+    @State private var openSubtitlesBusy = false
+    @State private var openSubtitlesNotice: String?
+    @State private var openSubtitlesNoticeIsError = false
+    @FocusState private var openSubtitlesFocusedField: OpenSubtitlesField?
+    @State private var showOpenSubtitlesPassword = false
+    private var settings: SettingsStore { RigelCore.shared.settings }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                playbackSection
+                integrationSection
+                openSubtitlesSection
+                rendererSection
+                aboutSection
+            }
+            .navigationTitle("Settings")
+            .onAppear {
+                routeKey = settings.routeOverride().pickerKey
+                rendererOn = RendererBridgeAccess.shared.isRunning()
+                loadOpenSubtitlesSettings()
+            }
+            .onChange(of: routeKey) { newValue in
+                settings.setRouteOverride(value: RouteOverride.from(pickerKey: newValue))
+            }
+        }
+    }
+
+    private var playbackSection: some View {
+        Section("Playback") {
+            Picker("Playback route", selection: $routeKey) {
+                Text("Auto").tag("AUTO")
+                Text("Direct").tag("DIRECT")
+                Text("Always proxy").tag("ALWAYS_PROXY")
+            }
+            .pickerStyle(.segmented)
+            Text(routeDetail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var integrationSection: some View {
+        Section("Integration") {
+            NavigationLink {
+                IntegrationHelpView()
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("How apps send streams to Rigel")
+                            .font(.body)
+                        Text("Scheme grammar for Nuvio, Kodi, Stremio addons, scripts")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "link")
+                        .foregroundStyle(Color.rigelStar)
+                }
+            }
+        }
+    }
+
+
+    private var openSubtitlesSection: some View {
+        Section {
+            if openSubtitlesConnected {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.rigelStar)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(openSubtitlesUsername.isEmpty ? "Connected" : "Connected as \(openSubtitlesUsername)")
+                            .font(.headline)
+                        Text("Subtitle search is live in the player")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Disconnect", role: .destructive) {
+                        disconnectOpenSubtitles()
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(openSubtitlesBusy)
+                }
+            } else {
+                TextField("Username", text: $openSubtitlesUsername)
+                    .focused($openSubtitlesFocusedField, equals: .username)
+                    .textContentType(.username)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.next)
+                    .onSubmit { openSubtitlesFocusedField = .password }
+
+                HStack {
+                    if showOpenSubtitlesPassword {
+                        TextField("Password", text: $openSubtitlesPassword)
+                            .focused($openSubtitlesFocusedField, equals: .password)
+                    } else {
+                        SecureField("Password", text: $openSubtitlesPassword)
+                            .focused($openSubtitlesFocusedField, equals: .password)
+                    }
+                    secretVisibilityButton($showOpenSubtitlesPassword, title: "password")
+                }
+                .textContentType(.password)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.go)
+                .onSubmit { connectOpenSubtitles() }
+            }
+
+            if let openSubtitlesNotice {
+                Text(openSubtitlesNotice)
+                    .font(.footnote)
+                    .foregroundStyle(openSubtitlesNoticeIsError ? Color.red : Color.rigelStar)
+            }
+
+            if !openSubtitlesConnected {
+                Button {
+                    connectOpenSubtitles()
+                } label: {
+                    HStack {
+                        Spacer()
+                        if openSubtitlesBusy {
+                            ProgressView()
+                        } else {
+                            Text("Connect").font(.headline)
+                        }
+                        Spacer()
+                    }
+                }
+                .disabled(openSubtitlesBusy || !openSubtitlesFieldsFilled)
+                .buttonStyle(.borderedProminent)
+                .tint(Color.rigelStar)
+                .listRowBackground(Color.clear)
+            }
+        } header: {
+            Text("OpenSubtitles")
+        } footer: {
+            Text("Used by “Get More…” in the player subtitle picker. Credentials stay in the iOS Keychain.")
+        }
+    }
+
+    private var openSubtitlesFieldsFilled: Bool {
+        !openSubtitlesUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !openSubtitlesPassword.isEmpty
+    }
+
+    private func secretVisibilityButton(_ visible: Binding<Bool>, title: String) -> some View {
+        Button {
+            visible.wrappedValue.toggle()
+        } label: {
+            Image(systemName: visible.wrappedValue ? "eye.slash" : "eye")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(visible.wrappedValue ? "Hide \(title)" : "Show \(title)")
+    }
+
+
+    private var rendererSection: some View {
+        Section("Renderer") {
+            Toggle(isOn: Binding(
+                get: { rendererOn },
+                set: { toggleRenderer($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("DLNA renderer (receive pushes)")
+                        .font(.body)
+                    Text("Kodi 'Play using…', BubbleUPnP, Jellyfin-web")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .tint(Color.rigelStar)
+            if let rendererNotice {
+                Text(rendererNotice)
+                    .font(.footnote)
+                    .foregroundStyle(rendererOn ? Color.rigelStar : .red)
+            }
+            Text("Receive mode needs the multicast networking entitlement (Apple-gated); it is off by default and degrades gracefully when unavailable.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var aboutSection: some View {
+        Section("About") {
+            Label {
+                Text("Rigel — open-source iOS player. Receive from any app, send to any screen.")
+                    .font(.footnote)
+            } icon: {
+                Image(systemName: "star.fill")
+                    .foregroundStyle(Color.rigelStar)
+            }
+            Text("Licenses: Rigel Apache-2.0 · FFmpeg LGPL-3.0 (source: ffmpeg.org)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var routeDetail: String {
+        switch routeKey {
+        case "DIRECT": return "Hand the URL straight to AVPlayer"
+        case "ALWAYS_PROXY": return "Remux/transcode through the local HLS proxy"
+        default: return "Probe the stream and pick the best path"
+        }
+    }
+
+    private func loadOpenSubtitlesSettings() {
+        let store = OpenSubtitlesKeychainStore.shared
+        openSubtitlesUsername = store.username ?? ""
+        openSubtitlesPassword = ""
+        openSubtitlesConnected = store.isConnected
+        openSubtitlesNotice = nil
+        openSubtitlesNoticeIsError = false
+    }
+
+    private func disconnectOpenSubtitles() {
+        OpenSubtitlesKeychainStore.shared.clear()
+        openSubtitlesPassword = ""
+        openSubtitlesConnected = false
+        openSubtitlesNotice = "OpenSubtitles disconnected"
+        openSubtitlesNoticeIsError = false
+    }
+
+    private func connectOpenSubtitles() {
+        // The keyboard submit path bypasses the Connect button's disabled
+        // state, so re-entry protection lives here rather than on the button.
+        guard !openSubtitlesBusy else { return }
+        let username = openSubtitlesUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = openSubtitlesPassword
+        guard let apiKey = OpenSubtitlesKeychainStore.shared.apiKey, !apiKey.isEmpty else {
+            openSubtitlesNotice = "This build has no OpenSubtitles application key."
+            openSubtitlesNoticeIsError = true
+            return
+        }
+        guard !username.isEmpty, !password.isEmpty else {
+            openSubtitlesNotice = "Enter your username and password."
+            openSubtitlesNoticeIsError = true
+            openSubtitlesConnected = OpenSubtitlesKeychainStore.shared.isConnected
+            return
+        }
+
+        openSubtitlesBusy = true
+        openSubtitlesNotice = nil
+        openSubtitlesFocusedField = nil
+        Task { @MainActor in
+            do {
+                let session = try await OpenSubtitlesClient.shared.login(
+                    apiKey: apiKey,
+                    username: username,
+                    password: password
+                )
+                let store = OpenSubtitlesKeychainStore.shared
+                store.password = password
+                store.username = username
+                store.token = session.token
+                store.baseURL = session.baseURL
+                openSubtitlesPassword = ""
+                openSubtitlesConnected = true
+                openSubtitlesNotice = "Connected"
+                openSubtitlesNoticeIsError = false
+            } catch {
+                let stillConnected = OpenSubtitlesKeychainStore.shared.isConnected
+                openSubtitlesConnected = stillConnected
+                openSubtitlesNotice = stillConnected
+                    ? "Could not reconnect; the saved connection remains active."
+                    : error.localizedDescription
+                openSubtitlesNoticeIsError = true
+            }
+            openSubtitlesBusy = false
+        }
+    }
+
+    private func toggleRenderer(_ wantOn: Bool) {
+        if wantOn {
+            let error = RendererBridgeAccess.shared.start()
+            if error == nil {
+                rendererOn = true
+                rendererNotice = "Rigel now appears as a DLNA renderer on the network"
+            } else {
+                rendererOn = false
+                rendererNotice = error
+            }
+        } else {
+            RendererBridgeAccess.shared.stop()
+            rendererOn = false
+            rendererNotice = nil
+        }
+    }
+}
+
+/// In-app scheme documentation so any app can target Rigel.
+struct IntegrationHelpView: View {
+    var body: some View {
+        Form {
+            Section("Scheme") {
+                Text("Any app can hand a stream to Rigel:")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("rigel://x-callback-url/{play|stream}?url=<enc>\n&filename=<enc>&sub=<enc,repeatable>\n&x-source=<enc>&x-success=<enc>")
+                    .font(.system(.footnote, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            Section("Example (Nuvio-compatible)") {
+                Text("rigel://x-callback-url/play?url=https%3A%2F%2Fx%2Fv.mkv&filename=Movie&sub=https%3A%2F%2Fx%2Fs.vtt&x-source=nuvio")
+                    .font(.system(.footnote, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            Section("Also accepts") {
+                Text("Plain http(s):// URLs, file:// (Files open-in), the share sheet, and a rigel:// URL passed as a launch argument. The sender shows as 'via <x-source>' in the player.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Integration")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}

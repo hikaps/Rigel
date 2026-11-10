@@ -1,5 +1,7 @@
 package app.rigel.intake
 
+import app.rigel.bridge.SubtitleTrack
+
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -14,12 +16,22 @@ import kotlinx.coroutines.launch
  *          &sub=<enc,repeatable>&x-source=<enc>&x-success=<enc>
  * Pure function on the input string — unit-tested.
  */
+data class JellyfinPlaybackContext(
+    val baseUrl: String,
+    val token: String,
+    val userId: String,
+    val itemId: String,
+    val mediaSourceId: String?,
+)
+
 data class IntakeRequest(
     val sourceUrl: String,
     val filename: String?,
-    val subtitleUrls: List<String>,
+    val subtitleTracks: List<SubtitleTrack>,
     val successCallbackUrl: String?,
     val xSource: String? = null,
+    val title: String? = null,
+    val jellyfinContext: JellyfinPlaybackContext? = null,
 )
 
 object UrlIntake {
@@ -47,12 +59,14 @@ object UrlIntake {
         val sourceUrl = params["url"]?.firstOrNull()
             ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
             ?: return null
-        val subs = params["sub"].orEmpty().filter { it.startsWith("http://") || it.startsWith("https://") }
+        val subtitleTracks = params["sub"].orEmpty()
+            .filter { it.startsWith("http://") || it.startsWith("https://") }
+            .map { SubtitleTrack(url = it) }
         val filename = params["filename"]?.firstOrNull()
         val success = params["x-success"]?.firstOrNull()
             ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
         val xSource = params["x-source"]?.firstOrNull()?.takeIf { it.isNotBlank() }
-        return IntakeRequest(sourceUrl, filename, subs, success, xSource)
+        return IntakeRequest(sourceUrl, filename, subtitleTracks, success, xSource)
     }
 
     /** Query-string parsing: '&' separators, '+' = space, %XX percent-decode. */
@@ -107,8 +121,8 @@ object UrlIntake {
         if (callbackUrl.isNullOrBlank()) return
         successScope.launch {
             runCatching { client.get(callbackUrl) }
-                .onSuccess { Logger.i(TAG) { "x-success fired: $callbackUrl (${it.status})" } }
-                .onFailure { Logger.w(TAG, it) { "x-success failed: $callbackUrl" } }
+                .onSuccess { Logger.i(TAG) { "x-success fired (${it.status})" } }
+                .onFailure { Logger.w(TAG) { "x-success failed" } }
         }
     }
 }

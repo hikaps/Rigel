@@ -1,5 +1,7 @@
 package app.rigel.cast.roku
 
+import app.rigel.cast.PreparedCastMedia
+import app.rigel.cast.RokuDevice
 import co.touchlab.kermit.Logger
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -9,12 +11,6 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.userAgent
-
-data class RokuDevice(
-    val usn: String,
-    val location: String, // http://<ip>:8060/
-    val modelName: String?,
-)
 
 /** Roku device operations over ECP. No seek/position — platform limitation, shown in UI. */
 class RokuRenderer(private val client: HttpClient) {
@@ -29,19 +25,24 @@ class RokuRenderer(private val client: HttpClient) {
         return RokuDevice(usn, base, info.modelName)
     }
 
-    suspend fun launchPlayOnRoku(device: RokuDevice, mediaUrl: String): Boolean {
+    suspend fun launchPlayOnRoku(device: RokuDevice, media: PreparedCastMedia): Boolean {
         val channelId = resolvePlayChannelId(device)
+        val endpoint = device.location + "input/$channelId?" + RokuEcp.launchQuery(media)
         val resp = runCatching {
-            client.post(device.location + "input/$channelId") {
+            client.post(endpoint) {
                 userAgent("Rigel/1.0")
                 contentType(ContentType.Text.Plain)
-                setBody(RokuEcp.launchBody(mediaUrl))
+                setBody("")
             }.status.value
         }.getOrNull()
         Logger.i(tag) { "launch $channelId -> $resp" }
         return resp != null && resp in 200..299
     }
-
+    suspend fun launchPlayOnRoku(device: RokuDevice, mediaUrl: String): Boolean =
+        launchPlayOnRoku(
+            device,
+            PreparedCastMedia(mediaUrl, "Stream", "video/mp4", "mp4", app.rigel.cast.CastMediaKind.VIDEO, false, app.rigel.cast.CastMediaOrigin.SOURCE),
+        )
     private suspend fun resolvePlayChannelId(device: RokuDevice): String {
         val xml = runCatching { client.get(device.location + "query/apps").bodyAsText() }.getOrNull()
         if (xml != null) {
@@ -53,13 +54,18 @@ class RokuRenderer(private val client: HttpClient) {
         return RokuEcp.PLAY_ON_ROKU_CHANNEL_ID
     }
 
-    suspend fun keypress(device: RokuDevice, key: String) {
-        runCatching {
-            client.post(device.location + "keypress/$key") { userAgent("Rigel/1.0") }
-        }
+    /** True when the device acknowledged the key (2xx); ECP keys act on the focused channel. */
+    suspend fun keypress(device: RokuDevice, key: String): Boolean {
+        val resp = runCatching {
+            client.post(device.location + "keypress/$key") { userAgent("Rigel/1.0") }.status.value
+        }.getOrNull()
+        return resp != null && resp in 200..299
     }
 
     suspend fun play(device: RokuDevice) = keypress(device, "Play")
     suspend fun pause(device: RokuDevice) = keypress(device, "Pause")
     suspend fun stop(device: RokuDevice) = keypress(device, "Home")
+    suspend fun volumeUp(device: RokuDevice) = keypress(device, "VolumeUp")
+    suspend fun volumeDown(device: RokuDevice) = keypress(device, "VolumeDown")
+    suspend fun toggleMute(device: RokuDevice) = keypress(device, "VolumeMute")
 }

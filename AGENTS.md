@@ -2,113 +2,134 @@
 
 ## Project Overview
 
-Rigel is an iOS 16+ media player. Shared Kotlin Multiplatform code owns intake, playback orchestration, routing, settings, discovery, casting, and Jellyfin requests. Native Swift/SwiftUI supplies presentation plus AVPlayer, FFmpeg probing/HLS conversion, LAN HTTP serving, SSDP, and UPnP receive-mode implementations.
-
-The root README is user-facing only (features, usage, availability, license); there is no contributor guide, release procedure, or documented XcodeGen invocation. Treat the build files, scripts, and CI workflow as the operational source of truth.
-
-## Branch, Worktree & PR Workflow
-
-- Treat `develop` as the integration base and `main` as the release branch. Do not commit feature work directly to either branch.
-- Create one feature/fix branch and linked worktree per change, branched from the current `develop`. Use descriptive names such as `fix-airplay` or `feat/app-icon`.
-- Push each feature branch to GitHub and open its pull request with **base `develop`**. Keep the branch/worktree isolated from other features.
-- Before merge, run the affected local checks and wait for the required GitHub CI checks: JVM/Kover, iOS Kotlin simulator tests, and Swift/Xcode simulator tests when applicable.
-- Merge approved feature PRs **on GitHub using squash merge**. Do not replace the GitHub merge with a local merge/fast-forward; the squash commit on `develop` is the integration history.
-- After a PR lands, update local `develop` from `origin/develop`, then remove the merged remote feature branch and its disposable worktree when no longer needed.
-- Periodically cut a release by opening a PR from `develop` into `main`. Merge that release PR only after release checks pass; `main` should contain released, integration-tested state.
-
+Rigel is an iOS 16+ media player: Kotlin Multiplatform owns shared domain logic; SwiftUI/UIKit and AVPlayer supply native presentation/playback. It supports URLs/files, FFmpeg-to-HLS conversion, Jellyfin, outbound casting and inbound UPnP renderer mode. JVM is a shared-test target, not desktop UI; no Android target or Compose UI is configured.
 
 ## Architecture & Data Flow
 
-- **Ownership:** Kotlin owns playback truth in `PlayerController` / `StateFlow<PlayerUiState>`; SwiftUI mirrors it in `PlayerModel` (`@MainActor`) and forwards actions. Do not create a second playback state machine in Swift.
-- **Playback:** `UrlIntake` / `RigelIntake` → `PlayerController` → native `ProbeBridge` → `FormatRouter` → direct AVPlayer **or** FFmpeg HLS proxy + LAN HTTP server → `PlayerHostView` / `RigelPlayerViewController`.
-- **Inputs:** plain `http(s)`/file URLs, `rigel://x-callback-url/...`, UPnP `SetAVTransportURI`, and Jellyfin library items all enter the normal intake/playback flow.
-- **Remote casting:** `CastDispatcher` delegates to the Kotlin `ReceiverAdapter` registry for DLNA/Kodi/Roku/Chromecast. A proxy URL must be re-hosted at the current LAN base; remote renderers must never receive loopback URLs.
-- **Bridges:** `NativeBridges.kt` defines native contracts; `RigelBridgeFactory` and iOS player/renderer factories are mutable singleton registries. `BridgeRegistry.register()` in `iosApp/iosApp/Bridge/Bridges.swift` must run before intake, probe, discovery, or renderer actions.
-- **Player lifecycle:** `PlayerHostView`'s Coordinator reload guard includes URL, title, sender, and AirPlay eligibility. Native teardown must pause AVPlayer, invalidate the poll timer, remove the child controller, and deactivate the audio session.
-- **AirPlay:** `longFormVideoAirPlayEligible` is intentionally narrow: playing direct video, no proxy, known non-live/non-HLS probe, duration at least 60 seconds. Keep ineligible media on the default route-sharing policy.
+```text
+URLs / share extension / UPnP → RigelIntake / SwiftPlayer.loadRaw
+Jellyfin library item         → SwiftPlayer.loadJellyfinItem
+  → PlayerController → Jellyfin PlaybackInfo (when applicable) → native probe
+  → output profile / FormatRouter → direct OR FFmpeg HLS + native HTTP server
+  → AVPlayer (local/AirPlay) OR receiver adapter / Jellyfin session API
+```
+
+- **Ownership:** `RigelCore` composes shared services. `PlayerController.uiState` (`StateFlow<PlayerUiState>`) owns playback orchestration; `SwiftPlayer` exposes it and `PlayerModel` mirrors it for SwiftUI. Keep routing/lifecycle decisions in Kotlin, not a second Swift playback state machine.
+- **Routing:** `FormatRouter` and `output/` profiles decide compatibility. `RouteOverride.DIRECT` permits fallback; it is not a forced bypass. AirPlay uses native playback, not a receiver adapter. Its AAC-only audio policy may require conversion while copying compatible video. External subtitles do not inherently force direct media through a proxy; selecting one on an active proxy rebuilds it.
+- **Casting:** `CastDispatcher` uses `ReceiverRegistry`/`ReceiverAdapter` for DLNA, Kodi, Roku and Chromecast. Playback access goes through `CastPlaybackPort`; the cast package must not import the player package. Commit sessions only on `CastResult.Sent`, retaining epoch guards against stale completions. Selected output and active cast ownership are distinct.
+- **Remote delivery:** receivers and AirPlay proxy playback require LAN-reachable URLs, never loopback. Credential-bearing Jellyfin media requires a proxy for generic receivers. Jellyfin remote sessions require library item IDs and matching server context, not arbitrary URLs.
+- **Jellyfin:** library playback must use `PlayerModel.openJellyfin` → `SwiftPlayer.loadJellyfinItem`, not raw stream URLs. `PlayerController` negotiates PlaybackInfo for the selected source/output and retains play-session, subtitle and resume-position context. Version-picker cancellation must not start playback.
+- **Credentials/history:** Jellyfin tokens live in the iOS Keychain through `JellyfinTokenStore`; a failed secure write/delete must preserve the existing account and destination. Keep history credential-redacted; `HistoryPlaybackResolver` restores supported library links with the current matching account, never replays embedded credentials.
+- **Bridges:** `BridgeRegistry.register()` must run before intake or native actions. Kotlin contracts live in `NativeBridges.kt`; singleton factories expose registered implementations through `BridgeSlot.current`. Missing registration is an explicit failure seam.
+- **Lifecycle:** preserve load-generation guards and awaited stop-before-replacement ordering. `PlayerHostView` reload identity includes URL, title, sender, AirPlay eligibility, proxy flag and probe duration; ignore stale controller/error callbacks. Teardown pauses AVPlayer, invalidates polling, removes the child controller and releases the reference-counted audio session.
+- **HLS:** `RigelHlsExporter` owns session serial queues. Delete output only after the writer exits; startup sweeping in `BridgeRegistry.register()` handles abandoned directories. Preserve A/V/subtitle clock alignment and absolute-media versus proxy-relative seek offsets. AirPlay remux of indexed H.264 serves keyframe-aligned VOD segments produced on request (`HlsOnDemand.swift`, awaited by `RigelHttpServer`); other AirPlay VOD readiness waits for completed output.
+- **Audio-session policy:** `longFormVideoAirPlayEligible` requires playing direct video, no proxy, a known non-live/non-HLS probe and duration ≥60 seconds. Other media keeps the default route-sharing policy.
 
 ## Key Directories
 
-- `composeApp/src/commonMain/kotlin/app/rigel/` — shared domain logic: intake, player, gateway, settings, devices, cast protocols, Jellyfin.
-- `composeApp/src/iosMain/kotlin/app/rigel/` — iOS actuals and Kotlin-to-Swift facades such as `bridge/SwiftPlayer.kt`.
-- `composeApp/src/jvmMain/` — JVM-only actuals/dependencies needed by the shared test target; not desktop product UI.
-- `composeApp/src/commonTest/kotlin/app/rigel/` — deterministic shared contracts for routing, adapters, discovery, settings, intake, player, and Jellyfin.
-- `iosApp/iosApp/` — SwiftUI app shell (`RigelApp.swift`, `PlayerModel.swift`, views) and native bridges under `Bridge/`.
-- `RigelTests/` — XCTest suite for Swift state mapping, AVAudioSession policy, FFmpeg probe, HTTP server, and SSDP.
-- `scripts/` — reproducible FFmpeg and media-fixture generation.
-- `iosApp/project.yml` — declarative XcodeGen source; `iosApp/Rigel.xcodeproj/` is checked-in generated output.
+| Path | Purpose |
+| --- | --- |
+| `composeApp/src/commonMain/kotlin/app/rigel/` | Shared intake, player, output profiles, routing, settings, discovery, cast protocols and Jellyfin. |
+| `composeApp/src/iosMain/kotlin/app/rigel/` | iOS actuals and Swift-facing facades, including `bridge/SwiftPlayer.kt`. |
+| `composeApp/src/jvmMain/` | Actuals/dependencies for the shared test target. |
+| `composeApp/src/commonTest/kotlin/app/rigel/` | Shared domain and protocol tests. |
+| `iosApp/iosApp/` | App/models; `Views/` for presentation, `Services/` for non-view logic, `Bridge/` for native implementations, `Bridge/Hls/` for FFmpeg pipelines. |
+| `iosApp/ShareExtension/` | Share-to-intake extension. |
+| `RigelTests/`, `RigelUITests/` | Hosted XCTest tests, generated fixtures, and XCUI Jellyfin workflow tests. |
+| `scripts/`, `.github/workflows/` | Native prerequisites, manifest generation/tests, CI and releases. |
 
 ## Development Commands
 
-Use the Gradle wrapper. CI uses JDK 21.
+Run from repository root unless shown otherwise. Use JDK 21; native work needs macOS/Xcode, Homebrew `openjdk@21`, `ffmpeg` and Mint.
 
 ```bash
-# JVM shared tests and Kover gate
-./gradlew :composeApp:jvmTest :composeApp:koverVerify --console=plain
-
-# Generate/uploadable JVM coverage report
-./gradlew :composeApp:koverVerify :composeApp:koverXmlReport --console=plain
-
-# Kotlin/Native shared tests on an iOS simulator
+export JAVA_HOME="$(brew --prefix openjdk@21)"
+# JVM tests, coverage gate/report; shared Kotlin tests on iOS simulator
+./gradlew :composeApp:jvmTest :composeApp:koverVerify :composeApp:koverXmlReport --console=plain
 ./gradlew :composeApp:iosSimulatorArm64Test --console=plain
+python3 scripts/test_generate_altstore_source.py
 
-# Build ignored arm64 simulator FFmpeg libraries
-./scripts/build-ffmpeg.sh
-
-# Build ignored arm64 device FFmpeg libraries
-SDK=iphoneos ./scripts/build-ffmpeg.sh
-
-# Generate ignored XCTest media fixtures
+# Populate ignored native prerequisites before project generation
+JOBS=4 ./scripts/build-ffmpeg.sh
 ./scripts/gen-fixtures.sh
-```
+(cd iosApp && mint run --silent yonaskolb/XcodeGen@2.46.0 xcodegen generate)
+# Device libraries, when needed
+SDK=iphoneos JOBS=4 ./scripts/build-ffmpeg.sh
 
-For the Swift suite, install JDK 21 and the `ffmpeg` CLI, run both generation scripts, then use an available iPhone simulator:
-
-```bash
+xcrun simctl list devices available
+DEVICE_UDID="<available-iPhone-UDID>"
+# Certificate-free simulator signing: real Keychain tests need entitlements
+ENTITLEMENTS="${TMPDIR:-/tmp}/rigel-test.entitlements"
+cat > "$ENTITLEMENTS" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>application-identifier</key><string>RIGELTESTS.com.rigel.player</string>
+<key>keychain-access-groups</key><array><string>RIGELTESTS.com.rigel.player</string></array>
+<key>get-task-allow</key><true/>
+</dict></plist>
+PLIST
 xcodebuild test \
-  -project iosApp/Rigel.xcodeproj \
-  -scheme Rigel \
-  -destination "platform=iOS Simulator,name=<available iPhone>" \
+  -project iosApp/Rigel.xcodeproj -scheme Rigel \
+  -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
   -derivedDataPath build/DerivedData \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+  CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual CODE_SIGN_ENTITLEMENTS="$ENTITLEMENTS"
 ```
 
-Run the `Rigel` scheme from Xcode for the app surface. No dedicated formatter or lint task is documented; do not invent one.
+The `Rigel` scheme runs both `RigelTests` and `RigelUITests`; append `-only-testing:RigelUITests/JellyfinWorkflowUITests` for the Jellyfin UI path. Use `xcodebuild build` with the same options for a simulator build; run the scheme in Xcode for the app. No dedicated lint/formatter task is configured.
+
+### Branch and PR Workflow
+
+- Branch from current `develop` into a descriptive feature/fix branch and linked worktree per change. Do not commit feature work directly to `develop` or release branch `main`.
+- Push and open feature PRs with base **`develop`**. Run affected local checks and wait for required GitHub CI before merging.
+- Merge approved feature PRs **on GitHub with squash merge**, not a local merge/fast-forward. Update local `develop` afterward, then remove the merged remote branch/disposable worktree when no longer needed.
+- Commit messages and PR titles use Conventional Commits: `type: imperative lowercase summary`, with `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci` or `perf` (e.g. `fix: load downloaded subtitles from local files`). Squash merges take the PR title and append `(#N)`, so the title must follow this form.
+- Release through a `develop` → `main` PR, merged **on GitHub with a merge commit**, never squash, after release checks pass.
 
 ## Code Conventions & Common Patterns
 
-- Kotlin: PascalCase types, camelCase members, uppercase enum values; prefer immutable data classes and `StateFlow` state transitions.
-- Swift: SwiftUI local presentation state uses `@State`; `PlayerModel` is `@MainActor`. Hop KMP completion handlers to `Task { @MainActor in ... }` before touching UI state.
-- Async: `PlayerController` and `SwiftPlayer` use main-dispatched coroutine scopes. Native bridges convert callbacks to cancellable suspend calls. Preserve cancellation, dispatcher, and lifecycle behavior.
-- Errors: preserve observable nullable/Boolean/error-string contracts and exact adapter protocol payloads. Missing native bridge registration is an explicit failure seam, not a condition to silently ignore.
-- Test seams: inject `HttpClient` where available (for example `CastDispatcher.cast(..., client)`), use `SettingsStore(MapSettings)`, `MockEngine`, and bridge fakes. Do not add real socket, timer, or network dependencies to unit tests.
-- Persisted manual-device rows are `kind|usn|location|name`; preserve that shape and exact-row removal semantics.
-- Jellyfin remote sessions accept library item IDs, not arbitrary URLs.
+- Kotlin: official style, PascalCase types, camelCase members, uppercase enum values, immutable data classes and `StateFlow` transitions. Swift: `@State` for local presentation; `@MainActor ObservableObject`/`@Published` for longer-lived screen state.
+- Compare Kotlin enums directly in Swift (`phase == .playing`), not `.name` strings. Keep Kotlin scalar conversions and milliseconds↔seconds conversions at bridge boundaries.
+- `PlayerController` and `SwiftPlayer` use main-dispatched coroutine scopes. Preserve cancellation and stale-result guards; propagate cancellation when the native contract supports it.
+- Swift Jellyfin callers use `Services/JellyfinAsync.swift`: one `Task` handle per operation kind, post-`await` cancellation checks, and account/request identity guards. The gate resumes once; cancellation drops late callbacks but does not cancel the underlying Kotlin work. Reuse it instead of raw completion handlers in views.
+- `JellyfinViewModel` owns browsing and version selection. Keep Continue Watching/Next Up busy/error/retry state independent; reset feeds, folders and pending choices on account changes. Paging advances by server `receivedCount`, not filtered item count; retain known totals when later pages omit them.
+- Preserve nullable/Boolean/error-string contracts and exact protocol payloads. Classify cast outcomes by sealed `CastResult`, never message text; propagate Kotlin `CancellationException` instead of converting cancellation into failure.
+- Reuse injection seams: `HttpClient`, `SettingsStore(MapSettings, JellyfinTokenStore)`, capability resolver, playback port and bridge factories; Swift Jellyfin uses `JellyfinServing`, `JellyfinSettingsFacade` and an injected search delay. Receiver-family changes span targets, registry, capabilities, discovery/persistence and UI.
+- Manual-device rows are `kind|usn|location|name`; preserve exact-row removal. Keep Kotlin route-override persistence aligned with the Swift mapping in `Views/SettingsView.swift`.
 
 ## Important Files
 
-- `composeApp/src/commonMain/kotlin/app/rigel/player/PlayerController.kt` — playback phases, proxy lifecycle, AirPlay eligibility, intake attachment.
-- `composeApp/src/commonMain/kotlin/app/rigel/gateway/FormatRouter.kt` — direct/remux/transcode policy.
-- `composeApp/src/commonMain/kotlin/app/rigel/bridge/NativeBridges.kt` and `Bridges.kt` — platform boundary contracts and suspend wrappers.
-- `composeApp/src/commonMain/kotlin/app/rigel/cast/CastDispatcher.kt` — LAN-safe remote URL logic and cast dispatch.
-- `iosApp/iosApp/RigelApp.swift` — startup ordering, bridge registration, URL handling.
-- `iosApp/iosApp/PlayerModel.swift`, `PlayerHostView.swift` — Kotlin-state mirroring and native-player hosting.
-- `iosApp/iosApp/Bridge/RigelPlayerViewController.swift` — AVPlayer, external playback, PiP, audio session, polling, teardown.
-- `iosApp/iosApp/Bridge/{Probe,HlsExporter,HttpServer,Ssdp,UpnpRendererService}.swift` — FFmpeg/network-native responsibilities.
-- `composeApp/build.gradle.kts`, `gradle/libs.versions.toml`, `iosApp/project.yml`, `.github/workflows/ci.yml` — build/dependency/CI authority.
+Shared paths below are relative to `composeApp/src/commonMain/kotlin/app/rigel/`:
+
+- `RigelCore.kt`; `player/PlayerController.kt` — composition root and playback lifecycle.
+- `gateway/FormatRouter.kt`; `output/{PlaybackOutput,OutputMediaProfile,ReceiverCapabilityRepository}.kt` — routing, destination identity and capabilities.
+- `bridge/{NativeBridges,BridgeSlot,Bridges}.kt` — contracts, registration and suspend wrappers.
+- `cast/{CastDispatcher,ReceiverAdapter,ReceiverRegistry,CastSession}.kt` — receiver/session boundaries.
+- `devices/DevicesRepository.kt`; `source/jellyfin/JellyfinClient.kt` — discovery and Jellyfin API/session operations.
+- `settings/SettingsStore.kt`; `intake/UrlIntake.kt`; `output/RemoteUrlPolicy.kt` — persistence/credential redaction and local versus remote URL policy.
+
+Native paths below are relative to `iosApp/iosApp/`:
+
+- `RigelApp.swift`, `PlayerModel.swift`, `Views/PlayerHostView.swift`, `Bridge/RigelPlayerViewController.swift` — startup, shared-state projection and AVPlayer hosting.
+- `JellyfinViewModel.swift`, `Services/{JellyfinAsync,JellyfinSupport}.swift`, `Views/{SourcesView,HistoryView}.swift` — account-scoped browsing, async interop, version selection and safe history replay.
+- `Bridge/{Bridges,BridgeAdapters,Probe,HttpServer,Ssdp,UpnpRendererService,Chromecast}.swift`, `Bridge/Hls/` — native registration, media and networking.
+
+Build authority: `composeApp/build.gradle.kts`, `gradle/libs.versions.toml`, `iosApp/project.yml`, `.github/workflows/*.yml`. Keep README user-facing; prefer scripts/workflows for operational details.
 
 ## Runtime/Tooling Preferences
 
-- **Gradle/Kotlin:** Gradle wrapper 9.7.1; Kotlin Multiplatform targets JVM, `iosArm64`, and `iosSimulatorArm64`. Use JDK 21.
-- **iOS:** Xcode project targets iOS 16. The app embeds `RigelShare`; `RigelTests` is hosted by `Rigel.app`.
-- **XcodeGen:** change `iosApp/project.yml` first, then regenerate the tracked Xcode project with the team's XcodeGen setup. The generator version and command are not pinned/documented. Avoid hand-editing `project.pbxproj`.
-- **FFmpeg:** `iosApp/vendor/` is ignored. The app prebuild stages `ffmpeg-device` for `iphoneos` and `ffmpeg` otherwise into `vendor/ffmpeg/current`; it then embeds the static `ComposeApp` framework through Gradle.
-- **Generated data:** `.gradle/`, `build/`, `DerivedData/`, `iosApp/vendor/`, and `RigelTests/Fixtures/` are disposable. Regenerate vendor libraries and fixtures rather than committing them.
+- Use the **Gradle wrapper 9.7.1**, **Kotlin 2.3.0** and **JDK 21**. Targets: JVM, `iosArm64`, `iosSimulatorArm64`. There is no JavaScript package-manager workflow.
+- Xcode embeds static `ComposeApp` via `:composeApp:embedAndSignAppleFrameworkForXcode`. Its prebuild sets `JAVA_HOME` with `brew --prefix openjdk@21`; install that Homebrew JDK for native builds.
+- Edit `iosApp/project.yml`, then regenerate with **XcodeGen 2.46.0**; do not hand-edit `project.pbxproj`. First populate `iosApp/vendor/` and `RigelTests/Fixtures/`: generating without fixtures silently drops their tracked resource references.
+- FFmpeg is pinned to **7.1**, arm64 only; `build-ffmpeg.sh` verifies the archive SHA-256 and rejects versions without a trusted hash. Overrides: `SDK`, `FF_VERSION`, `PREFIX`, `FF_BUILD_DIR`, `JOBS`; use `JOBS=4` to avoid generated-header races. Xcode stages `vendor/ffmpeg-device` for `iphoneos`, otherwise `vendor/ffmpeg`, into `vendor/ffmpeg/current`.
+- `.gradle/`, `.kotlin/`, `build/`, DerivedData, `iosApp/vendor/` and `RigelTests/Fixtures/` are disposable/ignored; regenerate rather than commit binaries/fixtures. CI deliberately avoids caching `~/.konan`.
+- Workflow overrides control release versions: stable uses `STABLE_VERSION`; beta uses `<BETA_VERSION_PREFIX>.<github.run_number>`, with the run number also as `buildVersion`. Keep beta semantic versions monotonic: SideStore ignores build-only changes; a reset requires reinstalling. `scripts/generate-altstore-source.py` uses Python 3's standard library and reads version metadata from the IPA.
 
 ## Testing & QA
 
-- Kotlin tests use `kotlin.test` in `commonTest`; HTTP tests use Ktor `MockEngine`, protocol tests use inline XML/JSON fixtures, and async tests use `runTest`, `StandardTestDispatcher`, `Dispatchers.setMain/resetMain`, and scheduler draining.
-- Bridge factories and `RigelIntake` are global mutable test state. Register fakes deliberately and reset them in setup/teardown; avoid test-order coupling.
-- Swift tests use XCTest (`@MainActor` where UI model state is exercised). `ProbeTest` requires generated FFmpeg media resources; the Xcode resource phase also requires the HLS fixture files.
-- CI gates three paths: JVM tests plus Kover XML report, Kotlin iOS simulator tests, and unsigned Swift/Xcode simulator tests. Kover enforces **60% overall line coverage**.
-- Before a behavior or API change, run the affected target(s). For playback/bridge/config changes, run both Kotlin test targets and the Swift suite; for FFmpeg/fixture/project changes, regenerate prerequisites and exercise `xcodebuild test`.
+- Run affected gates before and after behavior/API changes. Playback/bridge/config changes require both Kotlin test targets and Swift tests. FFmpeg/fixture/project changes also require regenerated prerequisites and native simulator verification.
+- Shared tests use `kotlin.test`, Ktor `MockEngine`, inline XML/JSON, `MapSettings` and bridge fakes. Prefer `runTest`, `StandardTestDispatcher`, scheduler draining and virtual time; keep shared unit tests off real networks/timers.
+- Bridge factories, `CastDispatcher` installation and `RigelIntake` are mutable global test state. Reset them, Main dispatcher and mutated fake fields in setup/teardown; avoid inheriting test-isolation omissions.
+- Swift uses XCTest and `@testable import Rigel`; UI/model cases use `@MainActor`. `RigelTests` is hosted by `Rigel.app`. `ProbeTest` exercises real FFmpeg/HLS lifecycle: use unique session IDs and stop sessions/clean temporary files. `JellyfinAsyncTests` covers the cancellation gate. Restore static URL-protocol handlers after mocked HTTP tests.
+- `RigelUITests/JellyfinWorkflowUITests.swift` starts a local fixture server and seeds account preferences with `-jellyfin_server`, `-jellyfin_token`, `-jellyfin_userid`, `-jellyfin_username`. It exercises picker cancellation/selected-source HLS and subtitle delivery plus pagination; screenshots are attached to XCTest results.
+- CI gates Python manifest tests, JVM/Kover, Kotlin iOS simulator tests, XcodeGen project drift and Swift/XCUI simulator tests. Use the certificate-free signing recipe above for real Keychain coverage, not `CODE_SIGNING_ALLOWED=NO`. Kover requires **60% overall line coverage**; reports go to `composeApp/build/reports/kover/`. Native surface changes also need actual playback/UI smoke verification.

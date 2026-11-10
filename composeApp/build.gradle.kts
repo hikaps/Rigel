@@ -6,7 +6,12 @@ plugins {
 }
 
 kotlin {
-    jvm()
+    jvm {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_21)
+        }
+    }
+    jvmToolchain(21)
 
     listOf(
         iosArm64(),

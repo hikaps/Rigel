@@ -8,18 +8,27 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 - Play `http(s)` links, local files, and HLS playlists — entered on the home screen, opened from the share sheet or Files, or handed over by other apps.
 - Direct AVPlayer playback when the format fits. Otherwise FFmpeg probes the media and Rigel remuxes or transcodes it to HLS on the fly, served from a local HTTP server — conversion happens on your device.
-- External subtitle URLs, Picture in Picture, and background audio.
+- Buffering indicators follow the current media and reset when playback is replaced.
+- External subtitle URLs, Picture in Picture, and background audio. Sidecar captions default to 40 points above the bottom safe-area edge; the subtitle customization sheet can change their position.
+- OpenSubtitles search and downloads from the player subtitle picker; configure the account under Settings, with credentials kept in the iOS Keychain. Downloads are saved locally; invalid download links are reported separately from missing links.
 
 ## Screens & casting
 
 - Cast to DLNA/UPnP renderers, Kodi, Roku, and Chromecast/Google Cast. Devices are discovered automatically via SSDP, Google Cast mDNS, or added manually by IP address.
-- AirPlay out to Apple TV and AirPlay-2 TVs, picked from the player screen.
+- Jellyfin clients appear in Devices after connecting to the server under Sources. Like Jellyfin’s cast picker, Rigel lists sessions the server allows your account to control, excluding Rigel itself; LAN presence alone is not enough. These destinations play Jellyfin library items, not arbitrary URLs.
+- Jellyfin playback status closes automatically once the server accepts the handoff. Reopen remote controls from Home → Now playing; Close leaves the stream running, while Stop ends playback.
+- AirPlay out to Apple TV and AirPlay-2 TVs, picked from the player screen. Non-AAC audio is converted to AAC for compatibility, copying compatible video without re-encoding it.
+- AirPlay subtitles use native media tracks or WebVTT renditions in Rigel-generated HLS. Selecting an external subtitle packages it into HLS for the TV while local playback can stay direct. Non-live AirPlay exports finish before playback starts, so preparation can take longer. The receiver controls subtitle styling and placement.
 - Remote renderers always receive a LAN-reachable stream URL, never a loopback address.
 - Outbound receiver families share the Kotlin `ReceiverAdapter` registry; inbound UPnP renderer mode remains a separate native bridge.
 
 ## Sources
 
-- **Jellyfin** — connect to your server, browse and search the library, play on this device, or push a library item to a logged-in client session.
+- **Jellyfin** — connect to your server to see separate Continue Watching and Next Up feeds, or search and filter the library, browse search-result folders, and play here or push to a logged-in client session. A version picker appears only when an item has multiple media sources. Playback negotiates the chosen source through Jellyfin PlaybackInfo, honoring the server's direct-play/transcoding support and carrying its play session and subtitle tracks through to native playback. The access token is stored in the iOS Keychain; failed credential removal preserves the account and selected destination and reports a secure-storage error.
+- Each home feed loads, reports errors, and retries independently. Switching Jellyfin accounts resets feed and folder state and discards in-flight responses and version lookups from the previous account.
+- Search results and folders opened from search retain paging, including pages with no usable entries while more records remain and known totals when later pages omit them.
+- Jellyfin history links are restored with the current account. Unsupported credential-only stream links are blocked instead of replaying an embedded token through generic playback.
+- Cancelling a Jellyfin version choice returns to browsing without starting playback.
 
 ## Integrations
 
@@ -37,6 +46,8 @@ Rigel plays HTTP(S) and file URLs directly whenever iOS supports the format, and
 
 Rigel is not on the App Store or TestFlight. The stable release is published from [`main`](https://github.com/hikaps/Rigel/releases) and the rolling beta is published from [`develop`](https://github.com/hikaps/Rigel/releases/tag/beta) as a separate **Rigel Beta** app, so both channels can be installed side by side.
 
+Rolling beta versions use `<major>.<minor>.<GitHub run number>`, with the same run number as the build identifier, so AltStore and SideStore recognize each update.
+
 To receive stable and rolling beta updates through AltStore Classic or SideStore, add the source manifest:
 
 `https://raw.githubusercontent.com/hikaps/Rigel/develop/altstore/source.json`
@@ -45,4 +56,4 @@ The published IPAs are ad-hoc signed; AltStore or SideStore re-signs them with y
 
 ## License
 
-Code is licensed under the [GPL-3.0](LICENSE). The bundled FFmpeg libraries are LGPL-3.0 — see [NOTICE](NOTICE).
+Code is licensed under the [Apache-2.0](LICENSE). The bundled FFmpeg libraries are LGPL-3.0 — see [NOTICE](NOTICE).

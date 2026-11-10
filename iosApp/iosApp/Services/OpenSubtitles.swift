@@ -1,0 +1,664 @@
+import Foundation
+import Security
+import ComposeApp
+
+protocol OpenSubtitlesCredentialStore: AnyObject {
+    /// Application key shipped with the app; users only sign in with their account.
+    var apiKey: String? { get }
+    var password: String? { get set }
+    var username: String? { get set }
+    var token: String? { get set }
+    var baseURL: String? { get set }
+    var isConnected: Bool { get }
+    func clear()
+}
+
+final class OpenSubtitlesKeychainStore: OpenSubtitlesCredentialStore {
+    static let shared = OpenSubtitlesKeychainStore()
+
+    private let service = "com.rigel.player.opensubtitles"
+
+    var apiKey: String? {
+        (Bundle.main.object(forInfoDictionaryKey: "OpenSubtitlesAPIKey") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var password: String? {
+        get { value(for: "password") }
+        set { setValue(newValue, for: "password") }
+    }
+
+    var username: String? {
+        get { value(for: "username") }
+        set { setValue(newValue, for: "username") }
+    }
+
+    var token: String? {
+        get { value(for: "token") }
+        set { setValue(newValue, for: "token") }
+    }
+
+    var baseURL: String? {
+        get { value(for: "base-url") }
+        set { setValue(newValue, for: "base-url") }
+    }
+
+    var isConnected: Bool {
+        guard let apiKey, !apiKey.isEmpty,
+              let token, !token.isEmpty,
+              let baseURL, !baseURL.isEmpty else {
+            return false
+        }
+        return true
+    }
+
+    func clear() {
+        for key in ["username", "password", "token", "base-url"] {
+            setValue(nil, for: key)
+        }
+    }
+
+    private func value(for account: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func setValue(_ value: String?, for account: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        guard let value, let data = value.data(using: .utf8), !value.isEmpty else {
+            SecItemDelete(query as CFDictionary)
+            return
+        }
+        let attributes: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            SecItemAdd(item as CFDictionary, nil)
+        }
+    }
+}
+
+struct OpenSubtitlesSession {
+    let token: String
+    let baseURL: String
+}
+
+struct OpenSubtitlesSearchResult: Identifiable, Hashable {
+    let id: Int
+    let title: String
+    let language: String
+    let fileName: String?
+    let downloadCount: Int?
+    let hearingImpaired: Bool
+    let machineTranslated: Bool
+    let aiTranslated: Bool
+
+    var displayTitle: String {
+        let trimmed = fileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? title : "\(title) — \(trimmed)"
+    }
+
+    var detail: String {
+        var values = [language.uppercased()]
+        if let downloadCount {
+            values.append("\(downloadCount) downloads")
+        }
+        if hearingImpaired {
+            values.append("HI")
+        }
+        if machineTranslated {
+            values.append("machine translated")
+        } else if aiTranslated {
+            values.append("AI translated")
+        }
+        return values.joined(separator: " · ")
+    }
+}
+
+enum OpenSubtitlesError: LocalizedError {
+    case missingCredentials
+    case invalidResponse
+    case httpStatus(Int, String?)
+    case missingDownloadLink
+    case invalidDownloadLink
+    case unsupportedFile
+    case fileTooLarge
+    var errorDescription: String? {
+        switch self {
+        case .missingCredentials:
+            return "Configure OpenSubtitles in Settings before searching."
+        case .invalidResponse:
+            return "OpenSubtitles returned an invalid response."
+        case let .httpStatus(status, detail):
+            if let detail, !detail.isEmpty {
+                return "OpenSubtitles error (HTTP \(status)): \(detail)"
+            }
+            return "OpenSubtitles error (HTTP \(status))."
+        case .missingDownloadLink:
+            return "OpenSubtitles did not provide a subtitle download link."
+        case .invalidDownloadLink:
+            return "OpenSubtitles returned an invalid subtitle download link."
+        case .unsupportedFile:
+            return "The downloaded subtitle file is not a supported text format."
+        case .fileTooLarge:
+            return "The downloaded subtitle file is too large."
+        }
+    }
+}
+
+final class OpenSubtitlesClient {
+    static let shared = OpenSubtitlesClient(store: OpenSubtitlesKeychainStore.shared)
+
+    private static let apiRoot = URL(string: "https://api.opensubtitles.com/api/v1")!
+    private static let userAgent = "Rigel iOS player/1.0"
+    static let maximumSubtitleBytes = 10 * 1024 * 1024
+
+    private static let apiAuthorities: Set<String> = [
+        "api.opensubtitles.com",
+        "vip-api.opensubtitles.com",
+    ]
+    private static let downloadAuthorities: Set<String> = [
+        "dl.opensubtitles.com",
+    ]
+    // The API's documented signed download links use www.opensubtitles.com;
+    // keep Api-Key delivery restricted to downloadAuthorities above.
+    private static let subtitleLinkAuthorities: Set<String> = [
+        "dl.opensubtitles.com",
+        "www.opensubtitles.com",
+    ]
+
+    private let store: OpenSubtitlesCredentialStore
+    private let session: URLSession
+
+    init(store: OpenSubtitlesCredentialStore, session: URLSession = .shared) {
+        self.store = store
+        self.session = session
+    }
+
+    func login(apiKey: String, username: String, password: String) async throws -> OpenSubtitlesSession {
+        let body: [String: String] = [
+            "username": username,
+            "password": password,
+        ]
+        let request = try makeRequest(
+            url: Self.apiRoot.appendingPathComponent("login"),
+            method: "POST",
+            apiKey: apiKey,
+            body: try JSONEncoder().encode(body)
+        )
+        let redirectDelegate = RedirectDelegate(policy: .api(apiKey: apiKey, token: nil))
+        let (data, response) = try await session.data(for: request, delegate: redirectDelegate)
+        try Self.validate(response: response, data: data)
+        let decoded = try JSONDecoder().decode(LoginResponse.self, from: data)
+        guard !decoded.token.isEmpty,
+              Self.validatedAPIBaseURL(decoded.baseURL) != nil else {
+            throw OpenSubtitlesError.invalidResponse
+        }
+        return OpenSubtitlesSession(token: decoded.token, baseURL: decoded.baseURL)
+    }
+
+    func search(query: String, language: String? = nil) async throws -> [OpenSubtitlesSearchResult] {
+        guard store.apiKey?.isEmpty == false,
+              store.token?.isEmpty == false,
+              store.baseURL?.isEmpty == false else {
+            throw OpenSubtitlesError.missingCredentials
+        }
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else { return [] }
+        let (data, response) = try await authorizedData { apiKey, token, baseURL in
+            guard let url = Self.endpoint(baseURL, path: "subtitles") else {
+                throw OpenSubtitlesError.missingCredentials
+            }
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.queryItems = [
+                URLQueryItem(name: "query", value: trimmedQuery),
+                URLQueryItem(name: "languages", value: language),
+            ].compactMap { item in
+                item.value == nil ? nil : item
+            }
+            guard let requestURL = components?.url else { throw OpenSubtitlesError.invalidResponse }
+            return try self.makeRequest(url: requestURL, apiKey: apiKey, token: token)
+        }
+        try Self.validate(response: response, data: data)
+        let decoded = try JSONDecoder().decode(SearchResponse.self, from: data)
+        return decoded.data.flatMap { entry in
+            entry.attributes.files.compactMap { file in
+                guard let fileID = file.fileID else { return nil }
+                let title = entry.attributes.featureDetails?.title
+                    ?? file.fileName
+                    ?? "Subtitle"
+                return OpenSubtitlesSearchResult(
+                    id: fileID,
+                    title: title,
+                    language: entry.attributes.language ?? "und",
+                    fileName: file.fileName,
+                    downloadCount: entry.attributes.downloadCount,
+                    hearingImpaired: entry.attributes.hearingImpaired ?? false,
+                    machineTranslated: entry.attributes.machineTranslated ?? false,
+                    aiTranslated: entry.attributes.aiTranslated ?? false
+                )
+            }
+        }
+    }
+
+    /// Downloads the subtitle bytes and returns a local file URL. The remote
+    /// link must never reach the HLS exporter: its FFmpeg network stack has
+    /// no request timeout, so a stalled CDN connection would block session
+    /// startup (and the player) indefinitely.
+    func download(
+        _ result: OpenSubtitlesSearchResult,
+        destinationDirectory: URL? = nil
+    ) async throws -> URL {
+        guard let apiKey = store.apiKey,
+              store.token?.isEmpty == false,
+              store.baseURL?.isEmpty == false,
+              !apiKey.isEmpty else {
+            throw OpenSubtitlesError.missingCredentials
+        }
+        let body = try JSONEncoder().encode(DownloadRequest(fileID: result.id, format: "srt"))
+        let (data, response) = try await authorizedData { apiKey, token, baseURL in
+            guard let url = Self.endpoint(baseURL, path: "download") else {
+                throw OpenSubtitlesError.missingCredentials
+            }
+            return try self.makeRequest(url: url, method: "POST", apiKey: apiKey, token: token, body: body)
+        }
+        try Self.validate(response: response, data: data)
+        let decoded = try JSONDecoder().decode(DownloadResponse.self, from: data)
+        guard let rawLink = decoded.link, !rawLink.isEmpty else {
+            throw OpenSubtitlesError.missingDownloadLink
+        }
+        guard let link = Self.validatedSubtitleURL(rawLink) else {
+            throw OpenSubtitlesError.invalidDownloadLink
+        }
+        return try await Self.fetchSubtitleFile(
+            from: link,
+            for: result,
+            apiKey: apiKey,
+            session: session,
+            directory: destinationDirectory
+        )
+    }
+
+    /// Sends an authenticated request; an expired token (401) is renewed once
+    /// with the saved account credentials, then the request is retried.
+    private func authorizedData(
+        _ make: (_ apiKey: String, _ token: String, _ baseURL: String) throws -> URLRequest
+    ) async throws -> (Data, URLResponse) {
+        func attempt() async throws -> (Data, URLResponse) {
+            guard let apiKey = store.apiKey, let token = store.token, let baseURL = store.baseURL,
+                  !apiKey.isEmpty, !token.isEmpty else {
+                throw OpenSubtitlesError.missingCredentials
+            }
+            let request = try make(apiKey, token, baseURL)
+            return try await session.data(for: request, delegate: RedirectDelegate(policy: .api(apiKey: apiKey, token: token)))
+        }
+        let first = try await attempt()
+        guard (first.1 as? HTTPURLResponse)?.statusCode == 401,
+              let apiKey = store.apiKey, let username = store.username, let password = store.password,
+              !username.isEmpty, !password.isEmpty else {
+            return first
+        }
+        let renewed = try await login(apiKey: apiKey, username: username, password: password)
+        store.token = renewed.token
+        store.baseURL = renewed.baseURL
+        return try await attempt()
+    }
+
+    static func fetchSubtitleFile(
+        from link: URL,
+        for result: OpenSubtitlesSearchResult,
+        apiKey: String,
+        session: URLSession,
+        directory: URL?
+    ) async throws -> URL {
+        guard let link = validatedSubtitleURL(link) else {
+            throw OpenSubtitlesError.invalidDownloadLink
+        }
+        var request = URLRequest(url: link)
+        request.timeoutInterval = 30
+        // The official download CDN rejects requests without the account's
+        // Api-Key. Signed links hosted elsewhere must stay credential-free.
+        let sendsAPIKey = isTrustedDownloadURL(link)
+        if sendsAPIKey {
+            request.setValue(apiKey, forHTTPHeaderField: "Api-Key")
+        }
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        let redirectDelegate = RedirectDelegate(policy: .download(apiKey: apiKey))
+        let (bytes, response) = try await session.bytes(for: request, delegate: redirectDelegate)
+        var didFinishReading = false
+        defer {
+            if !didFinishReading {
+                bytes.task.cancel()
+            }
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw OpenSubtitlesError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw OpenSubtitlesError.httpStatus(
+                http.statusCode,
+                HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
+            )
+        }
+        if http.expectedContentLength > Int64(maximumSubtitleBytes) {
+            throw OpenSubtitlesError.fileTooLarge
+        }
+
+        var data = Data()
+        if http.expectedContentLength > 0 {
+            data.reserveCapacity(min(Int(http.expectedContentLength), maximumSubtitleBytes))
+        }
+        for try await byte in bytes {
+            guard data.count < maximumSubtitleBytes else {
+                throw OpenSubtitlesError.fileTooLarge
+            }
+            data.append(byte)
+        }
+        didFinishReading = true
+        // Reject archives/gzip, require decodable text with at least one cue,
+        // then save normalized UTF-8: FFmpeg's SRT demuxer only reads
+        // byte-oriented text, unlike the overlay parser.
+        let isZip = data.starts(with: [0x50, 0x4B])
+        let isGzip = data.starts(with: [0x1F, 0x8B])
+        guard !isZip, !isGzip,
+              var text = SubtitleParser.decode(data: data),
+              !SubtitleParser.parseSRT(text).isEmpty else {
+            throw OpenSubtitlesError.unsupportedFile
+        }
+        if text.hasPrefix("\u{feff}") {
+            text.removeFirst()
+        }
+
+        let targetDirectory = directory ?? defaultSubtitleDirectory()
+        try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+        let fileURL = targetDirectory.appendingPathComponent(localFileName(for: result))
+        try Data(text.utf8).write(to: fileURL, options: .atomic)
+        return fileURL
+    }
+
+    static func defaultSubtitleDirectory() -> URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return documents.appendingPathComponent("Subtitles", isDirectory: true)
+    }
+
+    /// Unique per result id, stable across re-downloads (overwrites in place).
+    static func localFileName(for result: OpenSubtitlesSearchResult) -> String {
+        let baseName: String
+        let requestedFile = (result.fileName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !requestedFile.isEmpty {
+            baseName = requestedFile
+        } else {
+            baseName = result.title
+        }
+        let stem = sanitizedFileName(baseName)
+        return "\(stem)-\(result.id).srt"
+    }
+
+    static func sanitizedFileName(_ raw: String) -> String {
+        var stem = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if stem.hasSuffix(".srt") || stem.hasSuffix(".vtt") {
+            stem = String(stem.dropLast(4))
+        }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_."))
+        let replaced = String(String.UnicodeScalarView(stem.unicodeScalars.map {
+            allowed.contains($0) ? $0 : "_"
+        }))
+        let trimmed = replaced.trimmingCharacters(in: CharacterSet(charactersIn: " -_"))
+        let capped = String(trimmed.prefix(80))
+        return capped.isEmpty ? "subtitle" : capped
+    }
+
+    private func makeRequest(
+        url: URL,
+        method: String = "GET",
+        apiKey: String,
+        token: String? = nil,
+        body: Data? = nil
+    ) throws -> URLRequest {
+        guard Self.isTrustedAPIURL(url) else {
+            throw OpenSubtitlesError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.setValue(apiKey, forHTTPHeaderField: "Api-Key")
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        if let token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    private static func endpoint(_ baseURL: String, path: String) -> URL? {
+        let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        let lowercased = raw.lowercased()
+        let withScheme = lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://")
+            ? raw
+            : "https://\(raw)"
+        guard let base = validatedAPIBaseURL(withScheme) else { return nil }
+        let root = base.path == "/api/v1" || base.path == "/api/v1/"
+            ? base
+            : base.appendingPathComponent("api/v1")
+        return root.appendingPathComponent(path)
+    }
+
+    private static func validatedAPIBaseURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowercased = trimmed.lowercased()
+        let withScheme = lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://")
+            ? trimmed
+            : "https://\(trimmed)"
+        guard let url = URL(string: withScheme), isTrustedAPIURL(url) else { return nil }
+        guard url.path.isEmpty || url.path == "/" || url.path == "/api/v1" || url.path == "/api/v1/" else {
+            return nil
+        }
+        guard url.query == nil, url.fragment == nil else { return nil }
+        return url
+    }
+
+    private static func validatedSubtitleURL(_ raw: String) -> URL? {
+        guard let url = URL(string: raw) else { return nil }
+        return validatedSubtitleURL(url)
+    }
+
+    private static func validatedSubtitleURL(_ url: URL) -> URL? {
+        guard isSecureURL(url), let host = normalizedHost(url), !isOpenSubtitlesLookalike(host) else {
+            return nil
+        }
+        return url
+    }
+
+    private static func isTrustedAPIURL(_ url: URL) -> Bool {
+        guard isSecureURL(url), let host = normalizedHost(url) else { return false }
+        return apiAuthorities.contains(host)
+    }
+
+    private static func isTrustedDownloadURL(_ url: URL) -> Bool {
+        guard isSecureURL(url), let host = normalizedHost(url) else { return false }
+        return downloadAuthorities.contains(host)
+    }
+
+    private static func isSecureURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.host != nil,
+              components.user == nil,
+              components.password == nil,
+              components.port == nil || components.port == 443,
+              components.fragment == nil else {
+            return false
+        }
+        return true
+    }
+
+    private static func normalizedHost(_ url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?.host?.lowercased()
+    }
+
+    private static func isOpenSubtitlesLookalike(_ host: String) -> Bool {
+        guard host.contains("opensubtitles") else { return false }
+        return !apiAuthorities.contains(host) && !subtitleLinkAuthorities.contains(host)
+    }
+
+    enum RedirectPolicy {
+        case api(apiKey: String, token: String?)
+        case download(apiKey: String)
+    }
+
+    /// Applies the redirect trust boundary and rebuilds credentials for the
+    /// destination. Keeping this policy pure makes the URLSession delegate
+    /// and deterministic tests share exactly the same security decision.
+    static func redirectedRequest(for request: URLRequest, policy: RedirectPolicy) -> URLRequest? {
+        guard let url = request.url else {
+            return nil
+        }
+
+        switch policy {
+        case let .api(apiKey, token):
+            guard isTrustedAPIURL(url) else {
+                return nil
+            }
+            var redirected = request
+            redirected.setValue(apiKey, forHTTPHeaderField: "Api-Key")
+            if let token {
+                redirected.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            } else {
+                redirected.setValue(nil, forHTTPHeaderField: "Authorization")
+            }
+            return redirected
+
+        case let .download(apiKey):
+            guard validatedSubtitleURL(url) != nil else {
+                return nil
+            }
+            var redirected = request
+            redirected.setValue(nil, forHTTPHeaderField: "Api-Key")
+            redirected.setValue(nil, forHTTPHeaderField: "Authorization")
+            if isTrustedDownloadURL(url) {
+                redirected.setValue(apiKey, forHTTPHeaderField: "Api-Key")
+            }
+            return redirected
+        }
+    }
+
+    private final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
+        private let policy: RedirectPolicy
+
+        init(policy: RedirectPolicy) {
+            self.policy = policy
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            completionHandler(OpenSubtitlesClient.redirectedRequest(for: request, policy: policy))
+        }
+    }
+
+    private static func validate(response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse else {
+            throw OpenSubtitlesError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let detail = try? JSONDecoder().decode(APIErrorResponse.self, from: data).message
+            throw OpenSubtitlesError.httpStatus(http.statusCode, detail)
+        }
+    }
+
+    private struct LoginResponse: Decodable {
+        let token: String
+        let baseURL: String
+
+        enum CodingKeys: String, CodingKey {
+            case token
+            case baseURL = "base_url"
+        }
+    }
+
+    private struct SearchResponse: Decodable {
+        let data: [SearchEntry]
+    }
+
+    private struct SearchEntry: Decodable {
+        let attributes: SearchAttributes
+    }
+
+    private struct SearchAttributes: Decodable {
+        let language: String?
+        let files: [SubtitleFile]
+        let featureDetails: FeatureDetails?
+        let downloadCount: Int?
+        let hearingImpaired: Bool?
+        let machineTranslated: Bool?
+        let aiTranslated: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case language
+            case files
+            case featureDetails = "feature_details"
+            case downloadCount = "download_count"
+            case hearingImpaired = "hearing_impaired"
+            case machineTranslated = "machine_translated"
+            case aiTranslated = "ai_translated"
+        }
+    }
+
+    private struct FeatureDetails: Decodable {
+        let title: String?
+    }
+
+    private struct SubtitleFile: Decodable {
+        let fileID: Int?
+        let fileName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case fileID = "file_id"
+            case fileName = "file_name"
+        }
+    }
+
+    private struct DownloadRequest: Encodable {
+        let fileID: Int
+        let format: String
+
+        enum CodingKeys: String, CodingKey {
+            case fileID = "file_id"
+            case format = "sub_format"
+        }
+    }
+
+    private struct DownloadResponse: Decodable {
+        let link: String?
+    }
+
+    private struct APIErrorResponse: Decodable {
+        let message: String?
+    }
+}

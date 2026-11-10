@@ -2,35 +2,37 @@ package app.rigel.cast.jellyfin
 
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
+import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.PreparedCastMedia
 import app.rigel.cast.ReceiverAdapter
 import app.rigel.source.jellyfin.JellyfinSession
 import io.ktor.client.HttpClient
 
 /**
- * Jellyfin sessions are not discovered or manually added;
- * the production UI bypasses CastDispatcher entirely.
- * This adapter exists so the registry covers every CastTarget variant.
+ * Jellyfin sessions are discovered by DevicesRepository through the signed-in server,
+ * not SSDP or manual-IP probing. Library playback uses Jellyfin session commands;
+ * this adapter rejects generic URL casting.
  */
 object JellyfinSessionAdapter : ReceiverAdapter {
     override val kind = "jellyfin"
 
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.JellyfinSessionTarget
-
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
         supportsPosition = false,
+        supportsPauseResume = false,
+        supportsStop = false,
+        supportsVolume = false,
         note = "Jellyfin session remote control plays library items; no seek/position",
     )
 
     override suspend fun cast(
         target: CastTarget,
-        url: String,
-        title: String,
+        media: PreparedCastMedia,
         client: HttpClient,
-    ): String = "Jellyfin clients accept library items only — cast from the Sources tab"
+    ): CastResult = CastResult.Rejected("Jellyfin clients accept library items only — cast from the Sources tab")
 
-    // fromSsdp/fromRow/probeManual stay null: Jellyfin is source-specific, not a discoverable renderer.
+    // fromSsdp/fromRow/probeManual stay null: sessions come from the Jellyfin server.
 
     override fun rowFor(target: CastTarget): String {
         val s = (target as CastTarget.JellyfinSessionTarget).session

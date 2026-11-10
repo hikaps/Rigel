@@ -2,30 +2,36 @@ package app.rigel.cast.kodi
 
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
+import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.KodiDevice
+import app.rigel.cast.PreparedCastMedia
 import app.rigel.cast.ReceiverAdapter
+import app.rigel.output.OutputMediaProfiles
 import io.ktor.client.HttpClient
 
 object KodiAdapter : ReceiverAdapter {
     override val kind = "kodi"
 
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.Kodi
-
     override fun capabilities() = CastCapabilities(
         supportsSeek = true,
         supportsPosition = true,
+        supportsPauseResume = true,
+        supportsStop = true,
+        supportsVolume = true,
         note = null,
     )
+    override suspend fun mediaProfile(target: CastTarget, client: HttpClient) =
+        OutputMediaProfiles.optimisticHttp((target as CastTarget.Kodi).name)
 
     override suspend fun cast(
         target: CastTarget,
-        url: String,
-        title: String,
+        media: PreparedCastMedia,
         client: HttpClient,
-    ): String {
+    ): CastResult {
         val device = (target as CastTarget.Kodi).device
-        val ok = KodiRenderer(client).launch(device.endpoint, url)
-        return if (ok) "Sent to ${target.name}" else "Kodi rejected the URL"
+        val ok = KodiRenderer(client).launch(device.endpoint, media.url)
+        return if (ok) CastResult.Sent("Sent to ${target.name}") else CastResult.Rejected("Kodi rejected the URL")
     }
 
     override suspend fun fromSsdp(device: SsdpDevice, client: HttpClient): CastTarget? {
@@ -38,6 +44,51 @@ object KodiAdapter : ReceiverAdapter {
             CastTarget.Kodi(KodiDevice("kodi-${device.usn}", endpoint, "Kodi"))
         } else null
     }
+
+    override suspend fun seek(
+        target: CastTarget,
+        positionMs: Long,
+        durationMs: Long,
+        client: HttpClient,
+    ): Boolean {
+        if (durationMs <= 0) return false
+        val device = (target as CastTarget.Kodi).device
+        val percent = (positionMs.toDouble() * 100.0 / durationMs).coerceIn(0.0, 100.0)
+        return runCatching { KodiRenderer(client).seek(device.endpoint, percent) }
+            .getOrNull()
+            ?.let { !it.contains("\"error\"") }
+            ?: false
+    }
+
+    override suspend fun position(target: CastTarget, client: HttpClient): Long? = runCatching {
+        KodiRenderer(client).position((target as CastTarget.Kodi).device.endpoint)?.first
+    }.getOrNull()
+
+    override suspend fun pause(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).pause((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
+
+    override suspend fun resume(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).resume((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
+
+    override suspend fun stop(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        val resp = KodiRenderer(client).stop((target as CastTarget.Kodi).device.endpoint)
+        resp != null && !resp.contains("\"error\"")
+    }.getOrDefault(false)
+
+    override suspend fun volumeUp(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).volumeUp((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
+
+    override suspend fun volumeDown(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).volumeDown((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
+
+    override suspend fun toggleMute(target: CastTarget, client: HttpClient): Boolean = runCatching {
+        KodiRenderer(client).toggleMute((target as CastTarget.Kodi).device.endpoint)
+    }.getOrDefault(false)
+
 
     override suspend fun fromRow(parts: List<String>, client: HttpClient): CastTarget? =
         CastTarget.Kodi(KodiDevice(parts[1], parts[2], parts[3]))

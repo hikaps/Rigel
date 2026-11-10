@@ -2,30 +2,46 @@ package app.rigel.cast.chrome
 
 import app.rigel.bridge.SsdpDevice
 import app.rigel.cast.CastCapabilities
+import app.rigel.cast.CastMediaKind
+import app.rigel.cast.CastMediaOrigin
+import app.rigel.cast.CastResult
 import app.rigel.cast.CastTarget
+import app.rigel.cast.ChromeDevice
+import app.rigel.cast.PreparedCastMedia
 import app.rigel.cast.ReceiverAdapter
+import app.rigel.output.OutputMediaProfiles
 import io.ktor.client.HttpClient
 
 object ChromeAdapter : ReceiverAdapter {
     override val kind = "chrome"
 
-    override fun matches(target: CastTarget): Boolean = target is CastTarget.Chrome
-
     override fun capabilities() = CastCapabilities(
         supportsSeek = false,
         supportsPosition = false,
+        supportsPauseResume = false,
+        supportsStop = false,
+        supportsVolume = false,
         note = "Chromecast playback continues on the device; control it there",
     )
+    override suspend fun mediaProfile(target: CastTarget, client: HttpClient) =
+        OutputMediaProfiles.conservativeReceiver((target as CastTarget.Chrome).name, "Chromecast compatibility profile")
 
     override suspend fun cast(
         target: CastTarget,
-        url: String,
-        title: String,
+        media: PreparedCastMedia,
         client: HttpClient,
-    ): String {
-        val bridge = ChromecastBridgeFactory.bridge ?: return "Chromecast bridge not registered"
-        return ChromeRenderer(bridge).launch((target as CastTarget.Chrome).device, url, title)
+    ): CastResult {
+        val bridge = ChromecastBridgeFactory.current
+            ?: return CastResult.Rejected("Chromecast bridge not registered")
+        return ChromeRenderer(bridge).launch((target as CastTarget.Chrome).device, media)
     }
+
+    suspend fun cast(target: CastTarget, url: String, title: String, client: HttpClient): CastResult =
+        cast(
+            target,
+            PreparedCastMedia(url, title, "video/mp4", "mp4", CastMediaKind.VIDEO, false, CastMediaOrigin.SOURCE),
+            client,
+        )
 
     override suspend fun fromSsdp(device: SsdpDevice, client: HttpClient): CastTarget? = null
 
@@ -42,7 +58,7 @@ object ChromeAdapter : ReceiverAdapter {
     }
 
     override suspend fun probeManual(ip: String, client: HttpClient): CastTarget? {
-        val bridge = ChromecastBridgeFactory.bridge ?: return null
+        val bridge = ChromecastBridgeFactory.current ?: return null
         val port = 8009
         if (!ChromeRenderer(bridge).probe(ip, port)) return null
         return CastTarget.Chrome(ChromeDevice("manual-chrome-$ip", ip, port, "Chromecast"))

@@ -14,7 +14,7 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     brand
 
-                    if player.phase == .playing {
+                    if player.phase == .playing || player.phase == .buffering {
                         nowPlayingCard
                     }
 
@@ -93,7 +93,7 @@ struct HomeView: View {
                             .font(.headline)
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Text("Playing on this device" + (player.sender.map { " · via \($0)" } ?? ""))
+                        Text("Playing on \(player.destinationName)" + (player.sender.map { " · via \($0)" } ?? ""))
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -149,13 +149,14 @@ struct HomeView: View {
             Button {
                 openStream()
             } label: {
-                Label("Play on this device", systemImage: "play.fill")
+                Label("Play on \(player.futureDestinationName)", systemImage: "play.fill")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.rigelStar)
+            .disabled(!player.futureDestinationAcceptsUrls)
         }
         .padding(18)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -192,7 +193,7 @@ struct HomeView: View {
             }
 
             Label(
-                "AirPlay, DLNA, Roku, Kodi, and Chromecast screens are reachable from Devices.",
+                "Play a stream, then send it to an AirPlay, DLNA, Roku, Kodi, or Chromecast screen from the player.",
                 systemImage: "info.circle"
             )
             .font(.footnote)

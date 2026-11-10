@@ -25,10 +25,11 @@ enum Ssdp {
         let location: String
         let server: String?
         let searchTarget: String
+        let responderAddress: String?
     }
 
     /// Parse an SSDP response's header block (CRLF-terminated). Pure — testable.
-    static func parseReply(_ data: Data) -> Reply? {
+    static func parseReply(_ data: Data, responderAddress: String? = nil) -> Reply? {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
         var lines = text.components(separatedBy: "\r\n")
         guard let first = lines.first, first.hasPrefix("HTTP/1.1 200") else { return nil }
@@ -45,7 +46,8 @@ enum Ssdp {
             usn: usn,
             location: location,
             server: headers["server"],
-            searchTarget: headers["st"] ?? ""
+            searchTarget: headers["st"] ?? "",
+            responderAddress: responderAddress
         )
     }
 
@@ -100,11 +102,28 @@ enum Ssdp {
                 guard remaining > 0 else { break }
                 let ms = Int(remaining / 1_000_000)
                 let pollRet = poll(&pfd, 1, Int32(ms))
-                if pollRet <= 0 { break }
+                guard pollRet > 0 else { break }
                 var buffer = [UInt8](repeating: 0, count: 65536)
-                let n = recv(fd, &buffer, buffer.count, 0)
+                var responder = sockaddr_storage()
+                var responderLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+                let n = withUnsafeMutablePointer(to: &responder) { responderPtr in
+                    responderPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { responderSockaddr in
+                        recvfrom(fd, &buffer, buffer.count, 0, responderSockaddr, &responderLength)
+                    }
+                }
                 guard n > 0 else { continue }
-                guard let reply = parseReply(Data(buffer.prefix(n))) else { continue }
+                let responderAddress: String? = withUnsafePointer(to: &responder) { responderPtr in
+                    responderPtr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { ipv4Ptr in
+                        guard ipv4Ptr.pointee.sin_family == sa_family_t(AF_INET) else { return nil }
+                        var address = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                        var value = ipv4Ptr.pointee.sin_addr
+                        guard inet_ntop(AF_INET, &value, &address, socklen_t(INET_ADDRSTRLEN)) != nil else {
+                            return nil
+                        }
+                        return String(cString: address)
+                    }
+                }
+                guard let reply = parseReply(Data(buffer.prefix(n)), responderAddress: responderAddress) else { continue }
                 let key = "\(reply.usn)|\(reply.searchTarget)"
                 if seen.contains(key) { continue }
                 seen.insert(key)
@@ -112,7 +131,8 @@ enum Ssdp {
                     usn: reply.usn,
                     location: reply.location,
                     server: reply.server,
-                    searchTarget: reply.searchTarget
+                    searchTarget: reply.searchTarget,
+                    responderAddress: reply.responderAddress
                 ))
             }
         }

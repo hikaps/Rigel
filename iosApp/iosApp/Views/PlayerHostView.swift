@@ -1,0 +1,533 @@
+import SwiftUI
+import UIKit
+import ComposeApp
+
+enum NativeBufferingEvent: Equatable {
+    case generationStarted(UUID)
+    case changed(generation: UUID, buffering: Bool)
+}
+
+struct NativeBufferingState: Equatable {
+    private(set) var generation: UUID? = nil
+    private(set) var isBuffering = false
+
+    mutating func begin(generation: UUID) {
+        self.generation = generation
+        isBuffering = false
+    }
+
+    mutating func apply(_ event: NativeBufferingEvent) {
+        switch event {
+        case .generationStarted(let generation):
+            begin(generation: generation)
+        case .changed(let generation, let buffering):
+            guard self.generation == generation else { return }
+            isBuffering = buffering
+        }
+    }
+}
+
+/// Rotates the app while the player cover is up. The window-scene geometry
+
+/// Full-screen player host. Renders the native AVPlayerViewController when
+/// playing; shows probing/proxy/error states while Kotlin prepares the stream.
+struct PlayerHostView: View {
+    @EnvironmentObject private var player: PlayerModel
+    @State private var showDevicesPicker = false
+    @State private var nativeBufferingState = NativeBufferingState()
+
+    private struct LoadSignature: Equatable {
+        let url: String
+        let title: String?
+        let sender: String?
+        let probeDurationMs: Double?
+        let startPositionMs: Int64
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            content
+        }
+        .statusBarHidden()
+        .onAppear {
+            PlayerOrientation.forceLandscape()
+        }
+        .onDisappear {
+            PlayerOrientation.restore()
+            nativeBufferingState = NativeBufferingState()
+            // Closing remote controls must not tear down the receiver session or its proxy.
+            let remotePlaying = player.remotePlayback && (player.phase == .playing || player.phase == .buffering)
+            if player.phase != .idle && !remotePlaying {
+                player.stop()
+            }
+        }
+        .onChange(of: player.phase) { phase in
+            if phase != .playing && phase != .buffering {
+                nativeBufferingState = NativeBufferingState()
+            }
+        }
+        .sheet(isPresented: $showDevicesPicker) {
+            DevicesView(
+                onSelected: { target in
+                    player.selectDestinationReceiver(target)
+                    showDevicesPicker = false
+                },
+                onLocalSelected: {
+                    player.selectDestinationLocal()
+                    showDevicesPicker = false
+                }
+            )
+        }
+    }
+    @ViewBuilder
+    private var content: some View {
+        let phase = player.phase
+        if phase == .idle {
+            stateContent {
+                Image(systemName: "play.rectangle.fill")
+                    .font(.system(size: 42, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(Color.rigelStar)
+                    .accessibilityHidden(true)
+
+                VStack(spacing: 6) {
+                    Text("Nothing playing")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text("Open a stream from the Rigel home screen.")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                }
+
+                Button {
+                    player.showPlayer = false
+                } label: {
+                    Label("Back to Rigel", systemImage: "chevron.left")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.rigelStar)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+        } else if phase == .probing || phase == .preparingProxy {
+            let preparingProxy = phase == .preparingProxy
+            stateContent {
+                Image(systemName: preparingProxy ? "gearshape.2.fill" : "magnifyingglass")
+                    .font(.system(size: 34, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(Color.rigelStar)
+                    .accessibilityHidden(true)
+
+                ProgressView()
+                    .tint(.white)
+                    .controlSize(.large)
+                    .accessibilityLabel(preparingProxy ? "Preparing playback" : "Checking stream")
+
+                VStack(spacing: 6) {
+                    Text(preparingProxy ? "Preparing playback" : "Checking stream")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(preparingProxy
+                         ? "Converting this stream for smooth playback."
+                         : "Finding the best way to play this link.")
+                        .font(.subheadline)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+
+                if !player.routeLabel.isEmpty {
+                    Label(player.routeLabel, systemImage: "arrow.triangle.branch")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.rigelStar)
+                }
+
+                Button("Cancel", role: .cancel) {
+                    player.stop()
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.8))
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+        } else if phase == .connectingOutput {
+            stateContent {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(Color.rigelStar)
+                ProgressView()
+                    .tint(.white)
+                    .controlSize(.large)
+                    .accessibilityLabel("Connecting to destination")
+                Text("Connecting to \(player.destinationName)")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                if let detail = player.planDetail {
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                }
+                Button("Cancel", role: .cancel) { player.stop() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+            }
+        } else if phase == .playing || phase == .buffering {
+            let buffering = phase == .buffering || nativeBufferingState.isBuffering
+            ZStack {
+                if player.remotePlayback {
+                    stateContent {
+                        Image(systemName: "tv.fill")
+                            .font(.system(size: 42, weight: .medium))
+                            .foregroundStyle(Color.rigelStar)
+                        Text("Playing on \(player.destinationName)")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.white)
+                        if let detail = player.planDetail {
+                            Text(detail)
+                                .font(.subheadline)
+                                .foregroundStyle(.white.opacity(0.7))
+                                .multilineTextAlignment(.center)
+                        }
+                        Button("Playback destinations") { showDevicesPicker = true }
+                            .buttonStyle(.bordered)
+                        if remoteStopSupported {
+                            Button("Stop", role: .destructive) { player.stop() }
+                                .buttonStyle(.plain)
+                                .padding(.vertical, 10)
+                                .contentShape(Rectangle())
+                        }
+                        Button("Close", role: .cancel) { player.showPlayer = false }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.white.opacity(0.8))
+                            .padding(.vertical, 10)
+                            .contentShape(Rectangle())
+                    }
+                } else if let url = player.playableURL {
+                    PlayerView(
+                        url: url,
+                        title: player.displayTitle,
+                        sender: player.sender,
+                        subtitleTracks: player.subtitleTracks,
+                        selectedExternalSubtitleUrl: player.selectedExternalSubtitleUrl,
+                        onExternalSubtitleSelected: { track, positionSeconds in
+                            player.selectExternalSubtitle(track, positionSeconds: positionSeconds)
+                        },
+                        longFormVideoAirPlayEligible: player.longFormVideoAirPlayEligible,
+                        isProxy: player.proxyUrl != nil,
+                        probeDurationMs: player.probeDurationMs,
+                        startPositionMs: player.startPositionMs,
+                        isPhaseBuffering: player.phase == .buffering,
+                        isCastActive: player.castActive,
+                        onNativeBufferingChange: { nativeBufferingState.apply($0) },
+                        onReady: {},
+                        onError: { player.reportError($0) },
+                        onBack: { player.stop() },
+                        onDevices: { showDevicesPicker = true },
+                        onSeek: {
+                            player.seek(
+                                positionSeconds: $0,
+                                durationSeconds: (player.probeDurationMs ?? 0) / 1000
+                            )
+                        }
+                    )
+                    .ignoresSafeArea()
+                } else {
+                    stateContent {
+                        ProgressView()
+                            .tint(.white)
+                            .controlSize(.large)
+                        Text("Loading player")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                    }
+                }
+                if buffering && !player.remotePlayback {
+                    ProgressView()
+                        .tint(.white)
+                        .controlSize(.large)
+                        .padding(18)
+                        .background(Circle().fill(Color.black.opacity(0.55)))
+                        .accessibilityLabel("Buffering")
+                        .allowsHitTesting(false)
+                }
+            }
+        } else { // ERROR
+            stateContent {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 36, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+
+                VStack(spacing: 8) {
+                    Text("Playback error")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(player.error ?? "Unknown error")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.75))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(6)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(spacing: 12) {
+                    Button {
+                        player.retryWithProxy()
+                    } label: {
+                        Label("Try with proxy", systemImage: "arrow.triangle.2.circlepath")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.rigelStar)
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+
+                    Button("Close", role: .cancel) {
+                        player.stop()
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+                }
+                .frame(maxWidth: 280)
+            }
+        }
+    }
+
+    private var remoteStopSupported: Bool {
+        guard player.remotePlayback, let target = CastDispatcher.shared.activeTarget() else { return true }
+        return CastDispatcher.shared.capabilities(target: target).supportsStop
+    }
+
+    private func stateContent<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(spacing: 20, content: content)
+            .padding(.horizontal, 24)
+            .frame(maxWidth: 420)
+    }
+}
+
+/// Hosts RigelPlayerViewController (AVPlayerViewController + transparent overlay controls).
+/// Load is called when the media URL or playback configuration changes.
+/// Subtitle downloads and selection changes update the native sidecar immediately
+/// and Kotlin state. Local direct-compatible media keeps its original source;
+/// AirPlay packages the selected sidecar, and existing HLS proxies are rebuilt.
+struct PlayerView: UIViewControllerRepresentable {
+    let url: String
+    let title: String?
+    let sender: String?
+    let subtitleTracks: [SubtitleTrack]
+    let selectedExternalSubtitleUrl: String?
+    let onExternalSubtitleSelected: (SubtitleTrack?, Double) -> Void
+    let longFormVideoAirPlayEligible: Bool
+    let isProxy: Bool
+    let probeDurationMs: Double?
+    let startPositionMs: Int64
+    /// True during Kotlin's BUFFERING phase: freeze the stale item.
+    let isPhaseBuffering: Bool
+    /// True while a cast session owns playback; proxy seeks then rebuild.
+    let isCastActive: Bool
+    let onNativeBufferingChange: (NativeBufferingEvent) -> Void
+    let onReady: () -> Void
+    let onError: (String) -> Void
+    let onBack: () -> Void
+    let onDevices: () -> Void
+    let onSeek: (Double) -> Void
+
+    final class Coordinator {
+        var loaded: (
+            url: String,
+            title: String?,
+            sender: String?,
+            subtitleTracks: [SubtitleTrack],
+            selectedExternalSubtitleUrl: String?,
+            longFormVideoAirPlayEligible: Bool,
+            isProxy: Bool,
+            probeDurationMs: Double?
+        )?
+        /// Strongly retains the error origin so the closure's weak capture
+        /// outlives makeUIViewController; otherwise the box deallocates and
+        /// every error forwards unconditionally.
+        var errorOrigin: PlayerErrorOrigin?
+        private(set) var nativeBufferingGeneration: UUID?
+
+        func beginNativeBufferingGeneration() -> UUID {
+            let generation = UUID()
+            nativeBufferingGeneration = generation
+            return generation
+        }
+
+        func deliverNativeBufferingEvent(_ event: NativeBufferingEvent, to onChange: @escaping (NativeBufferingEvent) -> Void) {
+            let generation: UUID
+            switch event {
+            case .generationStarted(let value), .changed(let value, _):
+                generation = value
+            }
+            // A single FIFO queue keeps generation-start ahead of changes and
+            // moves host @State writes outside representable creation/update.
+            DispatchQueue.main.async { [weak self] in
+                guard self?.nativeBufferingGeneration == generation else { return }
+                onChange(event)
+            }
+        }
+
+        func invalidateNativeBufferingGeneration() {
+            nativeBufferingGeneration = nil
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: Coordinator) {
+        coordinator.invalidateNativeBufferingGeneration()
+        // SwiftUI removes this representable for initial proxy preparation or
+        // error. Dispose only this concrete controller;
+        // the bridge may already retain a newer replacement.
+        if let player = uiViewController as? RigelPlayerViewController,
+           let bridge = PlayerBridgeFactory.shared.create() as? RigelPlayerBridge {
+            bridge.stop(viewController: player)
+        } else {
+            (uiViewController as? RigelPlayerViewController)?.stopPlayback()
+        }
+    }
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        guard let bridge = PlayerBridgeFactory.shared.create() else {
+            let vc = UIViewController()
+            let label = UILabel()
+            label.text = "Player bridge not registered"
+            label.textColor = .white
+            label.textAlignment = .center
+            vc.view.addSubview(label)
+            label.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                label.centerXAnchor.constraint(equalTo: vc.view.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: vc.view.centerYAnchor),
+            ])
+            return vc
+        }
+        // Bind the error path to the concrete controller created below. The
+        // coordinator retains the origin box strongly; the closure forwards
+        // the error only when that controller is still current. Do not stop it
+        // here: a proxy seek can make the old item fail while the controller
+        // must remain mounted for the replacement proxy URL.
+        let origin = PlayerErrorOrigin()
+        let events = PlayerEventsImpl(
+            onReady: onReady,
+            onError: { [weak origin] message in
+                guard let origin, let controller = origin.controller else {
+                    onError(message)
+                    return
+                }
+                guard let currentBridge = PlayerBridgeFactory.shared.create() as? RigelPlayerBridge else {
+                    onError(message)
+                    return
+                }
+                guard currentBridge.isCurrent(viewController: controller) else {
+                    return
+                }
+                // Kotlin can publish a replacement proxy URL before SwiftUI
+                // installs it. Ignore a delayed failure from the old item;
+                // controller identity alone is not a sufficient generation.
+                if let loadedURL = controller.loadedURL {
+                    let state = SwiftPlayer.shared.snapshot()
+                    let expectedURL = state.proxyUrl ?? state.sourceUrl
+                    guard expectedURL == loadedURL else {
+                        return
+                    }
+                }
+                onError(message)
+            },
+            onBack: onBack
+        )
+        let created = bridge.createPlayerViewController(events: events)
+        if let player = created as? RigelPlayerViewController {
+            let generation = context.coordinator.beginNativeBufferingGeneration()
+            context.coordinator.deliverNativeBufferingEvent(.generationStarted(generation), to: onNativeBufferingChange)
+            player.onExternalSubtitleSelected = onExternalSubtitleSelected
+            player.onDevicesRequested = onDevices
+            player.onSeekRequested = onSeek
+            player.onNativeBufferingChange = { [weak coordinator = context.coordinator] buffering in
+                coordinator?.deliverNativeBufferingEvent(
+                    .changed(generation: generation, buffering: buffering),
+                    to: onNativeBufferingChange
+                )
+            }
+            player.isCastPlayback = isCastActive
+            player.setPhaseBuffering(isPhaseBuffering)
+        }
+        origin.controller = created as? RigelPlayerViewController
+        context.coordinator.errorOrigin = origin
+        return created
+    }
+
+    final class PlayerErrorOrigin {
+        weak var controller: RigelPlayerViewController?
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        let bridge = PlayerBridgeFactory.shared.create()
+        let loaded = context.coordinator.loaded
+        let needsLoad = loaded?.url != url ||
+            loaded?.title != title ||
+            loaded?.sender != sender ||
+            loaded?.longFormVideoAirPlayEligible != longFormVideoAirPlayEligible ||
+            loaded?.isProxy != isProxy ||
+            loaded?.probeDurationMs != probeDurationMs
+
+        if let player = uiViewController as? RigelPlayerViewController {
+            player.onExternalSubtitleSelected = onExternalSubtitleSelected
+            player.isCastPlayback = isCastActive
+            // Clear the freeze before a changed URL reloads and plays.
+            player.setPhaseBuffering(isPhaseBuffering)
+
+            let generation: UUID
+            if needsLoad {
+                generation = context.coordinator.beginNativeBufferingGeneration()
+                context.coordinator.deliverNativeBufferingEvent(.generationStarted(generation), to: onNativeBufferingChange)
+            } else if let current = context.coordinator.nativeBufferingGeneration {
+                generation = current
+            } else {
+                generation = context.coordinator.beginNativeBufferingGeneration()
+                context.coordinator.deliverNativeBufferingEvent(.generationStarted(generation), to: onNativeBufferingChange)
+            }
+            player.onNativeBufferingChange = { [weak coordinator = context.coordinator] buffering in
+                coordinator?.deliverNativeBufferingEvent(
+                    .changed(generation: generation, buffering: buffering),
+                    to: onNativeBufferingChange
+                )
+            }
+        }
+
+        guard needsLoad else { return }
+        guard let bridge = bridge else { return }
+        bridge.load(
+            url: url,
+            title: title,
+            sender: sender,
+            longFormVideoAirPlayEligible: longFormVideoAirPlayEligible,
+            subtitleTracks: subtitleTracks,
+            selectedExternalSubtitleUrl: selectedExternalSubtitleUrl,
+            durationMs: probeDurationMs.map { KotlinLong(longLong: Int64($0)) },
+            isProxy: isProxy,
+            startOffsetMs: startPositionMs
+        )
+        context.coordinator.loaded = (
+            url,
+            title,
+            sender,
+            subtitleTracks,
+            selectedExternalSubtitleUrl,
+            longFormVideoAirPlayEligible,
+            isProxy,
+            probeDurationMs
+        )
+    }
+}

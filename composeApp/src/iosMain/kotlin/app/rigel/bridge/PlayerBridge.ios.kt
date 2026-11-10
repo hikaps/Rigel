@@ -15,18 +15,29 @@ interface PlayerEvents {
 
 interface NativePlayerBridge {
     fun createPlayerViewController(events: PlayerEvents): UIViewController
-    fun load(url: String, title: String?, sender: String?, longFormVideoAirPlayEligible: Boolean)
+    fun load(
+        url: String,
+        title: String?,
+        sender: String?,
+        longFormVideoAirPlayEligible: Boolean,
+        subtitleTracks: List<SubtitleTrack>,
+        selectedExternalSubtitleUrl: String?,
+        durationMs: Long?,
+        isProxy: Boolean,
+        startOffsetMs: Long,
+    )
     fun stop()
+    fun currentPositionMs(): Long?
 }
 
 object PlayerBridgeFactory {
-    private var impl: NativePlayerBridge? = null
+    private val slot = BridgeSlot<NativePlayerBridge>()
 
     fun register(bridge: NativePlayerBridge) {
-        impl = bridge
+        slot.register(bridge)
     }
 
-    fun create(): NativePlayerBridge? = impl
+    fun create(): NativePlayerBridge? = slot.current
 
-    val isRegistered: Boolean get() = impl != null
+    val isRegistered: Boolean get() = slot.isRegistered
 }

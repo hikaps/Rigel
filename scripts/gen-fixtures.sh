@@ -14,6 +14,68 @@ ffmpeg -hide_banner -loglevel error -y \
   -f lavfi -i "testsrc=duration=2:size=320x240:rate=10" \
   -f lavfi -i "sine=frequency=440:duration=2" \
   -c:v libx264 -pix_fmt yuv420p -c:a dca -strict -2 -shortest "$OUT/fixture_dts.mkv"
+# 2s MKV (H264+AAC+AAC) — exercises alternate-audio proxy renditions
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc=duration=2:size=320x240:rate=10" \
+  -f lavfi -i "sine=frequency=440:duration=2" \
+  -f lavfi -i "sine=frequency=880:duration=2" \
+  -map 0:v -map 1:a -map 2:a \
+  -metadata:s:a:0 language=eng -metadata:s:a:1 language=fre \
+  -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$OUT/fixture_multi.mkv"
+
+cat > "$OUT/fixture_sub_en.srt" <<'EOF'
+1
+00:00:00,000 --> 00:00:01,000
+English subtitle
+
+2
+00:00:01,000 --> 00:00:02,000
+English second line
+EOF
+cat > "$OUT/fixture_sub_fr.srt" <<'EOF'
+1
+00:00:00,000 --> 00:00:01,000
+Sous-titre français
+
+2
+00:00:01,000 --> 00:00:02,000
+Deuxième ligne
+EOF
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc=duration=2:size=320x240:rate=10" \
+  -f lavfi -i "sine=frequency=440:duration=2" \
+  -f srt -i "$OUT/fixture_sub_en.srt" \
+  -f srt -i "$OUT/fixture_sub_fr.srt" \
+  -map 0:v -map 1:a -map 2:0 -map 3:0 \
+  -metadata:s:s:0 language=eng -metadata:s:s:0 title=English \
+  -metadata:s:s:1 language=fra -metadata:s:s:1 title=French \
+  -c:v libx264 -pix_fmt yuv420p -c:a aac -c:s srt -shortest \
+  "$OUT/fixture_subtitles.mkv"
+# Same subtitle fixture with a genuine 10-second media timestamp epoch.
+# Keep the streams copied so embedded subtitle, remux, and transcode paths all
+# consume one deterministic source clock.
+ffmpeg -hide_banner -loglevel error -y \
+  -i "$OUT/fixture_subtitles.mkv" \
+  -output_ts_offset 10 -c copy "$OUT/fixture_subtitles_nonzero.mkv"
+cat > "$OUT/fixture_sidecar.vtt" <<'EOF'
+WEBVTT
+
+00:00.000 --> 00:01.000
+Sidecar subtitle
+EOF
+# 40s MKV (H264 2s GOP + E-AC3 + late SRT cue) — on-demand AirPlay VOD segments
+cat > "$OUT/fixture_gop.srt" <<'EOF'
+1
+00:00:33,000 --> 00:00:34,000
+Late cue
+EOF
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "testsrc=duration=40:size=320x240:rate=10" \
+  -f lavfi -i "sine=frequency=440:duration=40:sample_rate=48000" \
+  -f srt -i "$OUT/fixture_gop.srt" \
+  -map 0:v -map 1:a -map 2:0 -metadata:s:s:0 language=eng \
+  -c:v libx264 -pix_fmt yuv420p -g 20 -keyint_min 20 -sc_threshold 0 -bf 2 \
+  -c:a eac3 -c:s srt -t 40 "$OUT/fixture_gop.mkv"
 # 2s HLS (H264+AAC, 2 segments) — bundled as RigelTests resources
 # (fixture_hls/ is referenced by project.pbxproj; without these files the
 # Swift test target's resource phase fails on fresh checkouts)
@@ -21,7 +83,14 @@ mkdir -p "$OUT/fixture_hls"
 ffmpeg -hide_banner -loglevel error -y \
   -f lavfi -i "testsrc=duration=2:size=320x240:rate=10" \
   -f lavfi -i "sine=frequency=440:duration=2" \
-  -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest \
-  -f hls -hls_time 1 -hls_list_size 0 -hls_segment_filename "$OUT/fixture_hls/seg%03d.ts" \
+  -c:v libx264 -pix_fmt yuv420p -g 10 -keyint_min 10 -sc_threshold 0 \
+  -c:a aac -shortest -force_key_frames "expr:gte(t,n_forced*1)" \
+  -f hls -hls_time 1 -hls_list_size 0 -hls_flags independent_segments \
+  -hls_segment_filename "$OUT/fixture_hls/seg%03d.ts" \
   "$OUT/fixture_hls/index.m3u8"
+SEGMENT_COUNT="$(find "$OUT/fixture_hls" -maxdepth 1 -name 'seg*.ts' -type f | wc -l | tr -d '[:space:]')"
+if [ "$SEGMENT_COUNT" -ne 2 ]; then
+  echo "Expected exactly two deterministic HLS segments, found $SEGMENT_COUNT" >&2
+  exit 1
+fi
 echo "Fixtures regenerated in $OUT"

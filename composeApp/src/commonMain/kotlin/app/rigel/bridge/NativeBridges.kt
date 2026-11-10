@@ -11,7 +11,14 @@ data class SsdpDevice(
     val location: String,
     val server: String?,
     val searchTarget: String,
+    val responderAddress: String? = null,
 )
+data class SubtitleTrack(
+    val url: String,
+    val language: String? = null,
+    val title: String? = null,
+)
+
 
 data class ProbeResult(
     val container: String,
@@ -23,14 +30,29 @@ data class ProbeResult(
     val pixFmt: String? = null,
     val width: Int = 0,
     val height: Int = 0,
+    val videoProfile: String? = null,
+    val videoLevel: Int? = null,
+    val frameRate: Double? = null,
+    val bitRate: Long? = null,
+    val maxAudioChannels: Int = 0,
 )
 
 interface DiscoveryBridge {
     fun ssdpSearch(searchTargets: List<String>, timeoutMs: Int, onResult: (List<SsdpDevice>) -> Unit)
 }
 
+/** Handle returned by [ProbeBridge.probe] for canceling an in-flight probe. */
+interface ProbeOperation {
+    fun cancel()
+}
+
 interface ProbeBridge {
-    fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, errorMsg: String?) -> Unit)
+    /** Starts a probe and returns a handle that interrupts its native I/O. */
+    fun probe(
+        url: String,
+        headers: Map<String, String>,
+        onResult: (ProbeResult?, errorMsg: String?) -> Unit,
+    ): ProbeOperation
 }
 
 interface TranscodeBridge {
@@ -39,6 +61,10 @@ interface TranscodeBridge {
         sourceUrl: String,
         headers: Map<String, String>,
         mode: String,
+        passthroughAudioCodecs: List<String>,
+        startOffsetMs: Long,
+        subtitleTracks: List<SubtitleTrack>,
+        waitForCompletion: Boolean = false,
         onReady: (relativePlaylistPath: String?, errorMsg: String?) -> Unit,
         onError: (errorMsg: String) -> Unit,
     )
@@ -57,10 +83,10 @@ interface HttpServerBridge {
 
 /** Registry mirroring NuvioPlayerBridgeFactory; Swift calls [register] at startup. */
 object RigelBridgeFactory {
-    private var discoveryImpl: DiscoveryBridge? = null
-    private var probeImpl: ProbeBridge? = null
-    private var transcodeImpl: TranscodeBridge? = null
-    private var httpServerImpl: HttpServerBridge? = null
+    private val discoverySlot = BridgeSlot<DiscoveryBridge>()
+    private val probeSlot = BridgeSlot<ProbeBridge>()
+    private val transcodeSlot = BridgeSlot<TranscodeBridge>()
+    private val httpServerSlot = BridgeSlot<HttpServerBridge>()
 
     fun register(
         discovery: DiscoveryBridge?,
@@ -68,19 +94,20 @@ object RigelBridgeFactory {
         transcode: TranscodeBridge?,
         httpServer: HttpServerBridge?,
     ) {
-        discoveryImpl = discovery
-        probeImpl = probe
-        transcodeImpl = transcode
-        httpServerImpl = httpServer
+        discoverySlot.register(discovery)
+        probeSlot.register(probe)
+        transcodeSlot.register(transcode)
+        httpServerSlot.register(httpServer)
     }
 
-    val discovery: DiscoveryBridge? get() = discoveryImpl
-    val probe: ProbeBridge? get() = probeImpl
-    val transcode: TranscodeBridge? get() = transcodeImpl
-    val httpServer: HttpServerBridge? get() = httpServerImpl
+    val discovery: DiscoveryBridge? get() = discoverySlot.current
+    val probe: ProbeBridge? get() = probeSlot.current
+    val transcode: TranscodeBridge? get() = transcodeSlot.current
+    val httpServer: HttpServerBridge? get() = httpServerSlot.current
 
     val isRegistered: Boolean
-        get() = discoveryImpl != null && probeImpl != null && transcodeImpl != null && httpServerImpl != null
+        get() = discoverySlot.isRegistered && probeSlot.isRegistered &&
+            transcodeSlot.isRegistered && httpServerSlot.isRegistered
 }
 
 /** Common-facing access to the DLNA renderer receive mode (iosMain actual). */

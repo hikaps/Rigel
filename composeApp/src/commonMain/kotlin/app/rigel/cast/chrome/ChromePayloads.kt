@@ -21,8 +21,14 @@ object ChromePayloads {
     fun pong(requestId: Int): String =
         """{"type":"PONG","requestId":$requestId}"""
 
-    fun load(url: String, title: String, contentType: String, requestId: Int): String =
-        """{"type":"LOAD","requestId":$requestId,"autoplay":true,"currentTime":0,"media":{"contentId":"${jsonEscape(url)}","streamType":"BUFFERED","contentType":"${jsonEscape(contentType)}","metadata":{"type":0,"title":"${jsonEscape(title)}"}}}"""
+    fun load(
+        url: String,
+        title: String,
+        contentType: String,
+        requestId: Int,
+        streamType: String = "BUFFERED",
+    ): String =
+        """{"type":"LOAD","requestId":$requestId,"autoplay":true,"currentTime":0,"media":{"contentId":"${jsonEscape(url)}","streamType":"$streamType","contentType":"${jsonEscape(contentType)}","metadata":{"type":0,"title":"${jsonEscape(title)}"}}}"""
 
     fun contentTypeFor(url: String): String {
         val extension = url.substringBefore('?').substringBefore('#').substringAfterLast('.').lowercase()

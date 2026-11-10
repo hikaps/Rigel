@@ -1,4 +1,9 @@
 import XCTest
+import Network
+import ComposeApp
+import AVFoundation
+import AVKit
+
 @testable import Rigel
 
 final class ProbeTest: XCTestCase {
@@ -64,6 +69,79 @@ final class ProbeTest: XCTestCase {
         )
     }
 
+    func testRemuxTimestampsInferInitialMissingDTSFromLaterDecodeAnchor() {
+        var state = RigelHlsExporter.RemuxTimestampState(frameDuration: 100, maximumPendingPackets: 8)
+        XCTAssertTrue(state.append(pts: 0, dts: Int64.min, duration: 100).isEmpty)
+        XCTAssertTrue(state.append(pts: 400, dts: Int64.min, duration: 100).isEmpty)
+
+        let ready = state.append(pts: 200, dts: 0, duration: 100)
+        XCTAssertEqual(ready.map(\.pts), [0, 400, 200])
+        XCTAssertEqual(ready.map(\.dts), [-200, -100, 0])
+
+        XCTAssertEqual(state.append(pts: 100, dts: 100, duration: 100).map(\.dts), [100])
+        XCTAssertEqual(state.append(pts: 300, dts: 200, duration: 100).map(\.dts), [200])
+    }
+
+    func testRemuxTimestampsInferIntermittentMissingDTSWithoutChangingPTS() {
+        var state = RigelHlsExporter.RemuxTimestampState(frameDuration: 100, maximumPendingPackets: 8)
+        XCTAssertEqual(state.append(pts: 0, dts: 0, duration: 100).map(\.dts), [0])
+        XCTAssertTrue(state.append(pts: 300, dts: Int64.min, duration: 100).isEmpty)
+
+        let ready = state.append(pts: 200, dts: 200, duration: 100)
+        XCTAssertEqual(ready.map(\.pts), [300, 200])
+        XCTAssertEqual(ready.map(\.dts), [100, 200])
+    }
+
+    func testRemuxTimestampsPreserveValidEpochAndDoNotSynthesizeUnanchoredDTS() {
+        var state = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 8)
+        XCTAssertEqual(state.append(pts: 1_000, dts: 960, duration: 40).map(\.dts), [960])
+        XCTAssertTrue(state.append(pts: 1_200, dts: Int64.min, duration: 40).isEmpty)
+        let trailing = state.finish()
+        XCTAssertEqual(trailing.map(\.pts), [1_200])
+        XCTAssertEqual(trailing.map(\.dts), [1_000])
+
+        var unanchored = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 8)
+        XCTAssertTrue(unanchored.append(pts: 1_000, dts: Int64.min, duration: 40).isEmpty)
+        let unresolved = unanchored.finish()
+        XCTAssertTrue(unresolved.isEmpty)
+        XCTAssertEqual(unanchored.error, "video stream has no usable DTS anchor")
+    }
+
+    func testRemuxTrailingAndBoundedInferenceUsePrecedingPacketDuration() {
+        var trailing = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 8)
+        XCTAssertEqual(trailing.append(pts: 0, dts: 0, duration: 40).map(\.dts), [0])
+        XCTAssertTrue(trailing.append(pts: 40, dts: Int64.min, duration: 80).isEmpty)
+        XCTAssertTrue(trailing.append(pts: 120, dts: Int64.min, duration: 20).isEmpty)
+
+        let trailingPackets = trailing.finish()
+        XCTAssertEqual(trailingPackets.map(\.pts), [40, 120])
+        XCTAssertEqual(trailingPackets.map(\.dts), [40, 120])
+
+        var bounded = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 1)
+        XCTAssertEqual(bounded.append(pts: 0, dts: 0, duration: 40).map(\.dts), [0])
+        XCTAssertTrue(bounded.append(pts: 40, dts: Int64.min, duration: 80).isEmpty)
+        XCTAssertEqual(bounded.append(pts: 120, dts: Int64.min, duration: 20).map(\.dts), [40])
+        XCTAssertEqual(bounded.finish().map(\.dts), [120])
+    }
+
+    func testRemuxUsesPositivePacketDurationBeforeAverageFrameStep() {
+        var trailing = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 8)
+        XCTAssertEqual(trailing.append(pts: 0, dts: 0, duration: 20).map(\.dts), [0])
+        XCTAssertTrue(trailing.append(pts: 20, dts: Int64.min, duration: 20).isEmpty)
+
+        let trailingPackets = trailing.finish()
+        XCTAssertEqual(trailingPackets.map(\.pts), [20])
+        XCTAssertEqual(trailingPackets.map(\.dts), [20])
+
+        var bounded = RigelHlsExporter.RemuxTimestampState(frameDuration: 40, maximumPendingPackets: 1)
+        XCTAssertEqual(bounded.append(pts: 0, dts: 0, duration: 20).map(\.dts), [0])
+        XCTAssertTrue(bounded.append(pts: 20, dts: Int64.min, duration: 20).isEmpty)
+        XCTAssertEqual(bounded.append(pts: 40, dts: Int64.min, duration: 10).map(\.dts), [20])
+        XCTAssertEqual(bounded.finish().map(\.dts), [40])
+    }
+
+
+
     func testHardwareFramesContextUsesBufferData() {
         let size = MemoryLayout<AVHWFramesContext>.size
         guard let frames = av_buffer_alloc(size) else {
@@ -103,6 +181,8 @@ final class ProbeTest: XCTestCase {
             sourceUrl: fixture.absoluteString,
             headers: [:],
             mode: "transcode",
+            startOffsetMs: 0,
+            subtitleTracks: [],
             onReady: { path, message in
                 readyPath = path
                 error = message
@@ -114,10 +194,1244 @@ final class ProbeTest: XCTestCase {
             }
         )
         wait(for: [finished], timeout: 10)
-        RigelHlsExporter.stopSession(sessionId: sessionId)
 
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        let completed = expectation(description: "local proxy reaches ENDLIST")
+        DispatchQueue.global().async {
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                let media = (try? FileManager.default.contentsOfDirectory(
+                    at: outputDir,
+                    includingPropertiesForKeys: nil
+                ))?
+                    .filter { $0.pathExtension == "m3u8" }
+                    .compactMap { try? String(contentsOf: $0, encoding: .utf8) }
+                    .filter { $0.contains("#EXTINF") } ?? []
+                if !media.isEmpty, media.allSatisfy({ $0.contains("#EXT-X-ENDLIST") }) {
+                    completed.fulfill()
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        wait(for: [completed], timeout: 10)
+
+        let mediaPlaylists = try FileManager.default.contentsOfDirectory(
+            at: outputDir,
+            includingPropertiesForKeys: nil
+        )
+            .filter { $0.pathExtension == "m3u8" }
+            .compactMap { try? String(contentsOf: $0, encoding: .utf8) }
+            .filter { $0.contains("#EXTINF") }
+        XCTAssertFalse(mediaPlaylists.isEmpty)
+        XCTAssertTrue(mediaPlaylists.allSatisfy { $0.contains("#EXT-X-PLAYLIST-TYPE:EVENT") })
+        XCTAssertTrue(mediaPlaylists.allSatisfy { !$0.contains("#EXT-X-PLAYLIST-TYPE:VOD") })
+
+        RigelHlsExporter.stopSession(sessionId: sessionId)
         XCTAssertNotNil(readyPath, error ?? "transcode session did not produce a playlist")
         XCTAssertNil(error)
+    }
+    func testFailedPrimarySessionReportsErrorAndRemovesDirectory() {
+        let sessionId = "test-failed-primary-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        try? FileManager.default.removeItem(at: outputDir)
+        let finished = expectation(description: "failed primary session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: "file:///does-not-exist-\(UUID().uuidString).mp4",
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 5)
+
+        let deadline = Date().addingTimeInterval(2)
+        while FileManager.default.fileExists(atPath: outputDir.path), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertNil(readyPath)
+        XCTAssertNotNil(error)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outputDir.path))
+    }
+    func testHlsSessionIdsRejectPathTraversal() {
+        XCTAssertTrue(RigelHlsExporter.isValidSessionId("session-abc_123"))
+        XCTAssertFalse(RigelHlsExporter.isValidSessionId("../escape"))
+        XCTAssertFalse(RigelHlsExporter.isValidSessionId("nested/path"))
+        XCTAssertFalse(RigelHlsExporter.isValidSessionId("session%2Fescape"))
+    }
+
+    func testTwoSegmentHlsFixtureIsConsumable() throws {
+        let bundle = Bundle(for: Self.self)
+        let playlist = try XCTUnwrap(
+            bundle.url(forResource: "index", withExtension: "m3u8", subdirectory: "fixture_hls")
+                ?? bundle.url(forResource: "index", withExtension: "m3u8")
+        )
+        let playlistText = try String(contentsOf: playlist, encoding: .utf8)
+        let segmentNames = playlistText.components(separatedBy: .newlines).filter {
+            $0.hasPrefix("seg") && $0.hasSuffix(".ts")
+        }
+        XCTAssertEqual(segmentNames.count, 2, playlistText)
+        for segmentName in segmentNames {
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: playlist.deletingLastPathComponent().appendingPathComponent(segmentName).path),
+                segmentName
+            )
+        }
+
+        let packets = try readVideoPackets(from: playlist)
+        let timestamps = packets.map(\.pts).filter { $0 != Int64.min }
+        XCTAssertGreaterThan(timestamps.max() ?? 0, timestamps.min() ?? 0)
+    }
+    func testDuplicateHlsSessionIdIsRejected() throws {
+        let sessionId = "test-duplicate-\(UUID().uuidString)"
+        let queue = DispatchQueue(label: "rigel-test-existing-session")
+        let existing = RigelHlsExporter.Session(
+            queue: queue,
+            inputWatchdog: InputWatchdog(timeoutSeconds: 10),
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: false
+        )
+        RigelHlsExporter.lock.lock()
+        RigelHlsExporter.sessions[sessionId] = existing
+        RigelHlsExporter.lock.unlock()
+        defer {
+            RigelHlsExporter.lock.lock()
+            RigelHlsExporter.sessions.removeValue(forKey: sessionId)
+            RigelHlsExporter.lock.unlock()
+        }
+
+        let rejected = expectation(description: "duplicate HLS session is rejected")
+        var readyPath: String?
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId.uppercased(),
+            sourceUrl: "file:///does-not-run",
+            headers: [:],
+            mode: "transcode",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                rejected.fulfill()
+            },
+            onError: { message in
+                error = message
+                rejected.fulfill()
+            }
+        )
+        wait(for: [rejected], timeout: 2)
+
+        XCTAssertNil(readyPath)
+        XCTAssertEqual(error, "HLS session is already active")
+    }
+    func testStoppingSessionReservesIdUntilCleanup() {
+        let sessionId = "test-cleanup-reservation-\(UUID().uuidString)"
+        let queue = DispatchQueue(label: "rigel-test-cleanup-reservation")
+        queue.suspend()
+        let existing = RigelHlsExporter.Session(
+            queue: queue,
+            inputWatchdog: InputWatchdog(timeoutSeconds: 10),
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: false
+        )
+        RigelHlsExporter.lock.lock()
+        RigelHlsExporter.sessions[sessionId] = existing
+        RigelHlsExporter.lock.unlock()
+
+        RigelHlsExporter.stopSession(sessionId: sessionId)
+        let rejected = expectation(description: "cleanup-pending HLS session is reserved")
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId.uppercased(),
+            sourceUrl: "file:///does-not-run",
+            headers: [:],
+            mode: "transcode",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            onReady: { path, message in
+                XCTAssertNil(path)
+                error = message
+                rejected.fulfill()
+            },
+            onError: { message in
+                error = message
+                rejected.fulfill()
+            }
+        )
+        wait(for: [rejected], timeout: 2)
+        XCTAssertEqual(error, "HLS session is already active")
+
+        queue.resume()
+        queue.sync {}
+    }
+    func testAirPlayProxyPublishesFiniteVODPlaylist() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_dts", withExtension: "mkv"))
+        let sessionId = "test-airplay-vod-\(UUID().uuidString)"
+        let finished = expectation(description: "AirPlay VOD session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            passthroughAudioCodecs: ["aac"],
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: true,
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+
+        wait(for: [finished], timeout: 10)
+        defer { RigelHlsExporter.stopSession(sessionId: sessionId) }
+
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "AirPlay VOD session did not produce a playlist")
+        XCTAssertNil(error)
+
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        let playlists = try FileManager.default.contentsOfDirectory(at: outputDir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "m3u8" }
+        let mediaPlaylists = try playlists.map { try String(contentsOf: $0, encoding: .utf8) }
+            .filter { $0.contains("#EXTINF") }
+
+        XCTAssertFalse(mediaPlaylists.isEmpty)
+        for playlist in mediaPlaylists {
+            XCTAssertTrue(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"), playlist)
+            XCTAssertTrue(playlist.contains("#EXT-X-ENDLIST"), playlist)
+            XCTAssertFalse(playlist.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), playlist)
+        }
+        let masterURL = outputDir.appendingPathComponent("index.m3u8")
+        let master = try String(contentsOf: masterURL, encoding: .utf8)
+        let masterReferences = master.components(separatedBy: .newlines).flatMap { rawLine -> [String] in
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            var references: [String] = []
+            if !line.isEmpty, !line.hasPrefix("#"), line.hasSuffix(".m3u8") {
+                references.append(line)
+            }
+            if let uriStart = line.range(of: "URI=\""),
+               let uriEnd = line[uriStart.upperBound...].firstIndex(of: "\"") {
+                references.append(String(line[uriStart.upperBound..<uriEnd]))
+            }
+            return references
+        }
+        var variantNames: [String] = []
+        for name in masterReferences where !variantNames.contains(name) {
+            variantNames.append(name)
+        }
+        XCTAssertFalse(variantNames.isEmpty, master)
+
+        var videoCodec: String?
+        var audioCodecs: [String] = []
+        var videoPackets: [(pts: Int64, dts: Int64, size: Int32)] = []
+        for variantName in variantNames {
+            let variantURL = outputDir.appendingPathComponent(variantName)
+            let variant = try String(contentsOf: variantURL, encoding: .utf8)
+            guard let rawSegment = variant
+                .components(separatedBy: .newlines)
+                .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+                .first(where: { !$0.isEmpty && !$0.hasPrefix("#") }) else {
+                continue
+            }
+            let segmentName = rawSegment
+                .split(separator: "?", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init) ?? rawSegment
+            let mediaURL = outputDir.appendingPathComponent(segmentName)
+            let (probe, probeError) = RigelProbe.probe(url: mediaURL.absoluteString, headers: [:])
+            XCTAssertNil(probeError, "media probe error for \(segmentName): \(probeError ?? "")")
+            guard let probe else { continue }
+            if probe.videoCodec != nil {
+                videoCodec = probe.videoCodec
+                videoPackets = try readVideoPackets(from: mediaURL)
+            }
+            audioCodecs.append(contentsOf: probe.audioCodecs)
+        }
+        XCTAssertEqual(videoCodec, "h264")
+        XCTAssertTrue(audioCodecs.contains("aac"), "audio codecs: \(audioCodecs)")
+        XCTAssertGreaterThan(videoPackets.count, 0, "the muxed VOD retained video packets")
+        XCTAssertTrue(videoPackets.allSatisfy { $0.size > 0 }, "video packets retained encoded data")
+        XCTAssertTrue(videoPackets.allSatisfy { $0.dts != Int64.min }, "muxed video packets retained decode timestamps")
+        XCTAssertTrue(
+            zip(videoPackets, videoPackets.dropFirst()).allSatisfy { $0.0.dts <= $0.1.dts },
+            "muxed video packets must be in nondecreasing decode order"
+        )
+        XCTAssertTrue(
+            zip(videoPackets, videoPackets.dropFirst()).contains { $0.0.pts > $0.1.pts },
+            "muxed video must retain presentation reordering rather than flattening B frames"
+        )
+    }
+
+    func testSubtitleDelayShiftsTimestampMapAndWraps() {
+        func map(_ delayMs: Int64, origin: Int64 = 90_000) -> Int64 {
+            RigelHlsExporter.subtitleTimestampMapMpegTS(
+                mode: "remux",
+                sourceOrigin90k: origin,
+                requestedOffsetMs: 0,
+                encoderOrigin90k: 0,
+                delayMs: delayMs
+            )
+        }
+        XCTAssertEqual(map(1_500) - map(0), 135_000)
+        XCTAssertEqual(map(-500) - map(0), -45_000)
+        XCTAssertEqual(map(-2_000, origin: 0), (1 << 33) - 180_000, "negative results wrap into the 33-bit clock")
+    }
+
+    func testOnDemandSegmentBoundaries() {
+        let keyframes: [Int64] = stride(from: 0, through: 38, by: 2).map { Int64($0) }
+        XCTAssertEqual(
+            RigelHlsExporter.onDemandSegmentBoundaries(keyframes: keyframes, start: 0, end: 40, minimum: 4, maximum: 30),
+            [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40]
+        )
+        // A start between keyframes begins at the previous keyframe.
+        XCTAssertEqual(
+            RigelHlsExporter.onDemandSegmentBoundaries(keyframes: keyframes, start: 7, end: 40, minimum: 4, maximum: 30)?.first,
+            6
+        )
+        // A tail shorter than the minimum folds into the previous segment.
+        XCTAssertEqual(
+            RigelHlsExporter.onDemandSegmentBoundaries(keyframes: [0, 4, 8], start: 0, end: 9, minimum: 4, maximum: 30),
+            [0, 4, 9]
+        )
+        XCTAssertNil(RigelHlsExporter.onDemandSegmentBoundaries(keyframes: [0, 40], start: 0, end: 80, minimum: 4, maximum: 30))
+        XCTAssertNil(RigelHlsExporter.onDemandSegmentBoundaries(keyframes: [], start: 0, end: 40, minimum: 4, maximum: 30))
+    }
+
+    func testAirPlayOnDemandWithResumeOffsetStillCoversWholeTitle() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_gop", withExtension: "mkv"))
+        let sessionId = "test-on-demand-resume-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "on-demand session becomes ready")
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            passthroughAudioCodecs: ["aac"],
+            startOffsetMs: 20_000,
+            subtitleTracks: [],
+            waitForCompletion: true,
+            onReady: { _, message in
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 10)
+        XCTAssertNil(error)
+        let playlist = try String(contentsOf: outputDir.appendingPathComponent("variant_0.m3u8"), encoding: .utf8)
+        XCTAssertEqual(playlist.components(separatedBy: "#EXTINF:").count - 1, 9, playlist)
+        XCTAssertEqual(RigelHlsExporter.onDemandResumeMs(sessionId: sessionId), 20_000)
+    }
+
+    func testAirPlayOnDemandServesNonSequentialSegments() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_gop", withExtension: "mkv"))
+        let sessionId = "test-on-demand-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "on-demand session becomes ready")
+        var readyPath: String?
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            passthroughAudioCodecs: ["aac"],
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: true,
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 10)
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "on-demand session did not become ready")
+        XCTAssertNil(error)
+        for name in ["variant_0.m3u8", "variant_1.m3u8"] {
+            let playlist = try String(contentsOf: outputDir.appendingPathComponent(name), encoding: .utf8)
+            XCTAssertTrue(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"), playlist)
+            XCTAssertTrue(playlist.contains("#EXT-X-ENDLIST"), playlist)
+            // 2 s GOPs group into 4 s segments; the short tail folds into segment 8.
+            XCTAssertEqual(playlist.components(separatedBy: "#EXTINF:").count - 1, 9, playlist)
+            XCTAssertEqual(playlist.components(separatedBy: "#EXTINF:4.000").count - 1, 8, playlist)
+        }
+
+        let server = RigelHttpServer(documentRoot: RigelHttpServer.proxyRootURL())
+        defer { server.stop() }
+        let started = expectation(description: "on-demand test server starts")
+        var port: Int32?
+        server.start { value, _ in
+            port = value
+            started.fulfill()
+        }
+        wait(for: [started], timeout: 5)
+        let base = "http://127.0.0.1:\(try XCTUnwrap(port))/\(sessionId)/"
+        func get(_ name: String) throws -> (status: Int, body: Data) {
+            let done = expectation(description: "GET \(name)")
+            var status = 0
+            var body = Data()
+            URLSession.shared.dataTask(with: try XCTUnwrap(URL(string: base + name))) { data, response, _ in
+                status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                body = data ?? Data()
+                done.fulfill()
+            }.resume()
+            wait(for: [done], timeout: 30)
+            return (status, body)
+        }
+
+        XCTAssertEqual(try get("seg0_00008.ts").status, 200)
+        let packets = try readVideoPackets(from: outputDir.appendingPathComponent("seg0_00008.ts"))
+        let firstPTS = try XCTUnwrap(packets.map(\.pts).min())
+        XCTAssertEqual(Double(firstPTS), Double((32 + 1) * 90_000), accuracy: 9_000)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: outputDir.appendingPathComponent("seg0_00006.ts").path),
+            "segment 8 must come from a seek, not a sequential run"
+        )
+
+        XCTAssertEqual(try get("seg1_00008.ts").status, 200)
+        let (audioProbe, audioError) = RigelProbe.probe(
+            url: outputDir.appendingPathComponent("seg1_00008.ts").absoluteString,
+            headers: [:]
+        )
+        XCTAssertNil(audioError)
+        XCTAssertEqual(audioProbe?.audioCodecs, ["aac"])
+
+        let subtitle = try get("subtitle_0_00008.vtt")
+        XCTAssertEqual(subtitle.status, 200)
+        let vtt = String(decoding: subtitle.body, as: UTF8.self)
+        XCTAssertTrue(vtt.contains("Late cue"), vtt)
+        // The cue maps to its source time on the shifted TS clock: (33 + 1) s.
+        let mpegts = try XCTUnwrap(vtt.range(of: #"MPEGTS:(\d+)"#, options: .regularExpression)
+            .flatMap { Double(vtt[$0].dropFirst("MPEGTS:".count)) })
+        let cueStart = try XCTUnwrap(vtt.range(of: #"\d\d:\d\d:\d\d\.\d\d\d -->"#, options: .regularExpression)
+            .map { vtt[$0].prefix(12).split(separator: ":").reduce(0.0) { $0 * 60 + (Double($1) ?? 0) } })
+        XCTAssertEqual(mpegts + cueStart * 90_000, Double(34 * 90_000), accuracy: 900, vtt)
+
+        XCTAssertEqual(try get("seg0_00099.ts").status, 404)
+
+        RigelHlsExporter.stopSession(sessionId: sessionId)
+        let removed = expectation(description: "on-demand session directory removed")
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+            if !FileManager.default.fileExists(atPath: outputDir.path) {
+                timer.invalidate()
+                removed.fulfill()
+            }
+        }
+        wait(for: [removed], timeout: 10)
+    }
+
+    func testStopSessionDeletesSessionDirectory() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let sessionId = "test-cleanup-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        let finished = expectation(description: "session delivers playlist")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 10)
+        XCTAssertNotNil(readyPath, error ?? "remux session did not produce a playlist")
+
+        // The writer may still be running; stopping must remove the directory
+        // only after run() has finished, and no later than the poll timeout.
+        RigelHlsExporter.stopSession(sessionId: sessionId)
+        let removed = expectation(description: "session directory removed")
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+            if !FileManager.default.fileExists(atPath: outputDir.path) {
+                timer.invalidate()
+                removed.fulfill()
+            }
+        }
+        wait(for: [removed], timeout: 10)
+    }
+
+    func testMultiAudioRemuxPublishesAlternateAudioMaster() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_multi", withExtension: "mkv"))
+        let sessionId = "test-multi-audio-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "multi-audio session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 15)
+
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "multi-audio session did not produce a playlist")
+        XCTAssertNil(error)
+        let master = try String(contentsOf: outputDir.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        XCTAssertTrue(master.contains("#EXT-X-MEDIA:TYPE=AUDIO"))
+        XCTAssertTrue(master.contains("LANGUAGE=\"eng\""))
+        XCTAssertTrue(master.contains("LANGUAGE=\"fre\""))
+        XCTAssertTrue(master.contains("DEFAULT=YES"))
+        XCTAssertFalse(master.contains("SUBTITLES=\"subs\""), master)
+        for variant in 0...2 {
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: outputDir.appendingPathComponent("variant_\(variant).m3u8").path
+                )
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: outputDir.appendingPathComponent("seg\(variant)_00000.ts").path
+                )
+            )
+        }
+    }
+
+
+    func testSubtitleRemuxPublishesSeparateLanguageRenditions() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_subtitles", withExtension: "mkv"))
+        let sessionId = "test-subtitles-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "subtitle session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+
+        XCTAssertEqual(
+            readyPath,
+            "\(sessionId)/index.m3u8",
+            error ?? "subtitle session did not produce a playlist"
+        )
+        XCTAssertNil(error)
+        let master = try String(contentsOf: outputDir.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        XCTAssertEqual(master.components(separatedBy: "TYPE=SUBTITLES").count - 1, 2, master)
+        XCTAssertTrue(master.contains("SUBTITLES=\"subs\""), master)
+        XCTAssertTrue(master.contains("LANGUAGE=\"eng\""), master)
+        XCTAssertTrue(master.contains("LANGUAGE=\"fra\""), master)
+        XCTAssertTrue(master.contains("DEFAULT=YES,AUTOSELECT=YES"), master)
+        XCTAssertTrue(master.contains("DEFAULT=NO,AUTOSELECT=NO"), master)
+        XCTAssertFalse(master.contains("DEFAULT:"), master)
+        XCTAssertFalse(master.contains("AUTOSELECT:"), master)
+        let vttFiles = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+            .filter { $0.hasSuffix(".vtt") }
+        let vttText = try vttFiles
+            .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
+        XCTAssertTrue(vttText.contains("English subtitle"))
+        XCTAssertTrue(vttText.contains("Sous-titre français"))
+        XCTAssertFalse(vttText.contains("0,0,Default"), vttText)
+        let vttPlaylists = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+            .filter { $0.hasSuffix("_vtt.m3u8") }
+        XCTAssertEqual(vttPlaylists.count, 2)
+    }
+
+    func testASSSubtitleEventsDiscardFFmpegMetadata() {
+        XCTAssertEqual(
+            RigelHlsExporter.plainSubtitleText(
+                "2,0,Default,,0,0,0,,Hello, world\\NSecond line",
+                isASS: true
+            ),
+            "Hello, world\nSecond line"
+        )
+        XCTAssertEqual(
+            RigelHlsExporter.plainSubtitleText(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\i1}Styled{\\i0}",
+                isASS: true
+            ),
+            "Styled"
+        )
+    }
+
+    func testHLSPlaylistDurationUsesInvariantDecimalSeparator() {
+        let localized = String(format: "%.3f", locale: Locale(identifier: "fr_FR"), 4.25)
+        XCTAssertEqual(localized, "4,250")
+        XCTAssertEqual(RigelHlsExporter.hlsPlaylistDuration(4.25), "4.250")
+    }
+    @MainActor
+    func testSidecarWebVttPublishesSubtitleRendition() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let sidecar = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_sidecar", withExtension: "vtt"))
+        let sessionId = "test-sidecar-subtitle-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "sidecar subtitle session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [
+                SubtitleTrack(
+                    url: sidecar.absoluteString,
+                    language: "eng",
+                    title: "Sidecar"
+                )
+            ],
+            waitForCompletion: true,
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "sidecar subtitle session failed")
+        XCTAssertNil(error)
+        let master = try String(contentsOf: outputDir.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        XCTAssertTrue(master.contains("TYPE=SUBTITLES"))
+        XCTAssertTrue(master.contains("LANGUAGE=\"eng\""))
+        let server = RigelHttpServer(documentRoot: RigelHttpServer.proxyRootURL())
+        defer { server.stop() }
+        let started = expectation(description: "subtitle test server starts")
+        var port: Int32?
+        server.start { value, _ in
+            port = value
+            started.fulfill()
+        }
+        wait(for: [started], timeout: 5)
+        let proxyURL = "http://127.0.0.1:\(try XCTUnwrap(port))/\(sessionId)/index.m3u8"
+        let selected = expectation(description: "external playback selects the exported rendition")
+        weak var loadedController: RigelPlayerViewController?
+        let controller = RigelPlayerViewController(events: PlayerEventsImpl(onReady: {}, onError: { _ in }, onBack: {})) { asset, completion in
+            Task { @MainActor in
+                do {
+                    let loadedGroup = try await asset.loadMediaSelectionGroup(for: .legible)
+                    let group = try XCTUnwrap(loadedGroup)
+                    completion(.success((audio: nil, subtitles: group)))
+                    DispatchQueue.main.async {
+                        do {
+                            let controller = try XCTUnwrap(loadedController)
+                            let native = try XCTUnwrap(controller.children.first as? AVPlayerViewController)
+                            let player = try XCTUnwrap(native.player)
+                            let item = try XCTUnwrap(player.currentItem)
+                            let option = try XCTUnwrap(group.options.first)
+                            player.appliesMediaSelectionCriteriaAutomatically = false
+                            item.select(nil, in: group)
+                            controller.reconcileSubtitlePresentation(externalPlaybackActive: true)
+                            XCTAssertEqual(item.currentMediaSelection.selectedMediaOption(in: group), option)
+                        } catch {
+                            XCTFail("native subtitle selection failed: \(error)")
+                        }
+                        selected.fulfill()
+                    }
+                } catch {
+                    XCTFail("native subtitle discovery failed: \(error)")
+                    selected.fulfill()
+                }
+            }
+        }
+        loadedController = controller
+        defer { controller.stopPlayback() }
+        controller.load(url: proxyURL, title: nil, sender: nil, longFormVideoAirPlayEligible: false, subtitleTracks: [], selectedExternalSubtitleUrl: sidecar.absoluteString, isProxy: true)
+        wait(for: [selected], timeout: 10)
+    }
+    func testSidecarPlaylistPreservesLateCueTimeline() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let sidecar = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rigel-late-subtitle-\(UUID().uuidString).vtt")
+        try """
+        WEBVTT
+
+        00:00:10.000 --> 00:00:12.000 position:20% align:start
+        First late cue
+
+        00:00:30.000 --> 00:00:32.000
+        Second late cue
+        """.write(to: sidecar, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: sidecar) }
+
+        let sessionId = "test-late-sidecar-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "late sidecar session becomes ready")
+        var readyPath: String?
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [SubtitleTrack(url: sidecar.absoluteString, language: "eng", title: "Late")],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "late sidecar session failed")
+        XCTAssertNil(error)
+
+        let finalized = expectation(description: "late sidecar playlist finalizes")
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
+            guard let playlist = try? String(
+                contentsOf: outputDir.appendingPathComponent("subtitle_0_vtt.m3u8"),
+                encoding: .utf8
+            ) else { return }
+            guard playlist.contains("#EXT-X-ENDLIST") else { return }
+            timer.invalidate()
+            finalized.fulfill()
+        }
+        wait(for: [finalized], timeout: 20)
+
+        let playlist = try String(
+            contentsOf: outputDir.appendingPathComponent("subtitle_0_vtt.m3u8"),
+            encoding: .utf8
+        )
+        let durations = playlist.components(separatedBy: .newlines).compactMap { line -> Double? in
+            guard line.hasPrefix("#EXTINF:") else { return nil }
+            return Double(line.dropFirst(8).split(separator: ",").first ?? "")
+        }
+        XCTAssertEqual(durations.count, 8)
+        XCTAssertEqual(Int(durations.reduce(0, +).rounded()), 32)
+        XCTAssertLessThanOrEqual(durations.max() ?? .infinity, 4)
+        XCTAssertTrue(playlist.contains("#EXT-X-TARGETDURATION:4"))
+        let vttText = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+            .filter { $0.hasSuffix(".vtt") }
+            .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
+        XCTAssertTrue(vttText.contains("X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0"), vttText)
+        XCTAssertTrue(vttText.contains("00:00:10.000 --> 00:00:12.000"), vttText)
+        XCTAssertTrue(vttText.contains("position:20% align:start"), vttText)
+        XCTAssertTrue(vttText.contains("00:00:30.000 --> 00:00:32.000"), vttText)
+    }
+    func testSelectedSidecarPrecedesEmbeddedRenditions() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_subtitles", withExtension: "mkv"))
+        let sidecar = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_sidecar", withExtension: "vtt"))
+        let sessionId = "test-selected-sidecar-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "selected sidecar session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [
+                SubtitleTrack(
+                    url: sidecar.absoluteString,
+                    language: "eng",
+                    title: "Selected sidecar"
+                )
+            ],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "selected sidecar session failed")
+        XCTAssertNil(error)
+        let master = try String(contentsOf: outputDir.appendingPathComponent("index.m3u8"), encoding: .utf8)
+        XCTAssertEqual(master.components(separatedBy: "TYPE=SUBTITLES").count - 1, 3, master)
+        XCTAssertTrue(master.contains("NAME=\"RigelSelected__Selected_sidecar\""), master)
+        let selectedNameOffset = try XCTUnwrap(master.range(of: "NAME=\"RigelSelected__Selected_sidecar\"")?.lowerBound)
+        let englishNameOffset = master.range(of: "LANGUAGE=\"eng\"")?.lowerBound
+        XCTAssertLessThan(selectedNameOffset, englishNameOffset ?? master.endIndex)
+        let vttFiles = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+            .filter { $0.hasSuffix(".vtt") }
+        let vttText = try vttFiles
+            .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
+        XCTAssertTrue(vttText.contains("Sidecar subtitle"), vttText)
+        let files = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+        let videoSegments = files.filter {
+            $0.hasPrefix("seg0_") && $0.hasSuffix(".ts")
+        }
+        XCTAssertFalse(videoSegments.isEmpty, "video must be emitted once")
+        let subtitlePlaylists = files.filter {
+            $0.hasPrefix("subtitle_") && $0.hasSuffix("_vtt.m3u8")
+        }
+        XCTAssertEqual(subtitlePlaylists.count, 3)
+        for playlistName in subtitlePlaylists {
+            let playlist = try String(
+                contentsOf: outputDir.appendingPathComponent(playlistName),
+                encoding: .utf8
+            )
+            let mediaFiles = playlist.components(separatedBy: .newlines).filter {
+                !$0.isEmpty && !$0.hasPrefix("#")
+            }
+            XCTAssertFalse(mediaFiles.isEmpty, playlistName)
+            for mediaFile in mediaFiles {
+                XCTAssertTrue(
+                    FileManager.default.fileExists(
+                        atPath: outputDir.appendingPathComponent(mediaFile).path
+                    ),
+                    "\(playlistName) references missing \(mediaFile)"
+                )
+            }
+        }
+    }
+
+    func testInvalidSelectedSidecarFailsSession() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let missingSidecar = URL(fileURLWithPath: "/tmp/rigel-missing-selected-\(UUID().uuidString).srt")
+        let sessionId = "test-invalid-selected-sidecar-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "invalid selected sidecar session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [SubtitleTrack(url: missingSidecar.absoluteString, language: nil, title: nil)],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+
+        XCTAssertNil(readyPath)
+        XCTAssertEqual(error, "Could not prepare the selected subtitle")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outputDir.appendingPathComponent("index.m3u8").path))
+    }
+
+    func testSidecarSubtitleTimestampsShiftWithSeekOffset() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let sidecar = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_sidecar", withExtension: "vtt"))
+        let sessionId = "test-sidecar-offset-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "offset sidecar session finishes")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 500,
+            subtitleTracks: [
+                SubtitleTrack(
+                    url: sidecar.absoluteString,
+                    language: "eng",
+                    title: "Sidecar"
+                )
+            ],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+
+        XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "offset sidecar session failed")
+        XCTAssertNil(error)
+        // The cue spans 0–1s in the sidecar file; a 500 ms seek must shift
+        // its end to 0.5s instead of leaving it at 1s (absolute time).
+        let vttFiles = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+            .filter { $0.hasSuffix(".vtt") }
+        let vttText = try vttFiles
+            .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
+        XCTAssertTrue(vttText.contains("Sidecar subtitle"), vttText)
+        // Unshifted absolute end (1s) must not survive a 500 ms seek; the
+        // muxer re-anchors relative to the keyframe it seeks to, so only the
+        // absence of the original timestamp is asserted.
+        XCTAssertFalse(vttText.contains("00:00:01.000"), vttText)
+    }
+    func testSourceWebVTTSettingsScanAcceptsMoreThan256Entries() throws {
+        let sidecar = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rigel-vtt-many-settings-\(UUID().uuidString).vtt")
+        var lines = ["WEBVTT", ""]
+        for index in 0..<300 {
+            lines.append("00:00:00.000 --> 00:00:01.000 position:\(index)% align:start")
+            lines.append("Cue \(index)")
+            lines.append("")
+        }
+        try lines.joined(separator: "\n").write(to: sidecar, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: sidecar) }
+
+        guard case .values(let values) = RigelHlsExporter.sourceWebVTTSettings(sidecar.absoluteString) else {
+            return XCTFail("a bounded scan must accept a normal multi-cue file")
+        }
+        XCTAssertEqual(values[0]?.count, 300)
+        XCTAssertEqual(values[0]?.last, "position:299% align:start")
+    }
+
+    func testSourceWebVTTSettingsScanHandlesCRLFVariantsAndChunkBoundary() throws {
+        let lineCount = 22_000
+        for (name, separator) in [("cr", "\r"), ("lf", "\n"), ("crlf", "\r\n")] {
+            let sidecar = FileManager.default.temporaryDirectory
+                .appendingPathComponent("rigel-vtt-\(name)-\(UUID().uuidString).vtt")
+            defer { try? FileManager.default.removeItem(at: sidecar) }
+            let cues = (0..<lineCount).map { index in
+                "00:00:00.000 --> 00:00:01.000 position:\(index)% align:start\(separator)Caption\(index)"
+            }
+            let text = "WEBVTT\(separator)\(separator)" + cues.joined(separator: separator + separator)
+            XCTAssertGreaterThan(text.utf8.count, 1_048_576)
+            try text.write(to: sidecar, atomically: true, encoding: .utf8)
+
+            guard case .values(let values) = RigelHlsExporter.sourceWebVTTSettings(sidecar.absoluteString) else {
+                return XCTFail("\(name) line endings must not turn short cues into an oversized line")
+            }
+            XCTAssertEqual(values[0]?.count, lineCount, name)
+            XCTAssertEqual(values[0]?.last, "position:21999% align:start", name)
+        }
+
+        let boundarySidecar = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rigel-vtt-crlf-boundary-\(UUID().uuidString).vtt")
+        defer { try? FileManager.default.removeItem(at: boundarySidecar) }
+        let header = Data("WEBVTT\r\n".utf8)
+        let chunkSize = 64 * 1024
+        var boundaryData = header
+        boundaryData.append(Data(repeating: 0x78, count: chunkSize - header.count - 1))
+        boundaryData.append(0x0D)
+        boundaryData.append(0x0A)
+        boundaryData.append(Data("00:00:00.000 --> 00:00:01.000 position:80% align:start\r\nCaption\r\n".utf8))
+        try boundaryData.write(to: boundarySidecar)
+
+        guard case .values(let boundaryValues) = RigelHlsExporter.sourceWebVTTSettings(boundarySidecar.absoluteString) else {
+            return XCTFail("CRLF split across scan chunks must remain a line boundary")
+        }
+        XCTAssertEqual(boundaryValues[0], ["position:80% align:start"])
+    }
+
+
+    func testOversizedSelectedWebVTTFailsBeforePublishing() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let sidecar = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rigel-vtt-oversized-\(UUID().uuidString).vtt")
+        let oversizedCueText = String(repeating: "x", count: 1_048_577)
+        try "WEBVTT\n\n00:00:00.000 --> 00:00:01.000 align:start\n\(oversizedCueText)\n".write(
+            to: sidecar,
+            atomically: true,
+            encoding: .utf8
+        )
+        defer { try? FileManager.default.removeItem(at: sidecar) }
+
+        guard case .exceededBudget = RigelHlsExporter.sourceWebVTTSettings(sidecar.absoluteString) else {
+            return XCTFail("oversized input must be rejected by the bounded scan")
+        }
+
+        let sessionId = "test-oversized-selected-vtt-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "oversized selected subtitle fails")
+        var readyPath: String?
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [SubtitleTrack(url: sidecar.absoluteString, language: "eng", title: "Oversized")],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 20)
+        XCTAssertNil(readyPath)
+        XCTAssertEqual(error, "Could not prepare the selected subtitle")
+    }
+
+    func testNonzeroSourceEpochKeepsEmbeddedSubtitlesAlignedInRemuxAndTranscode() throws {
+        let fixture = try XCTUnwrap(
+            Bundle(for: Self.self).url(forResource: "fixture_subtitles_nonzero", withExtension: "mkv")
+        )
+
+        func seconds(_ value: Substring) -> Double? {
+            let parts = value.split(separator: ":")
+            guard parts.count == 3,
+                  let hours = Double(parts[0]),
+                  let minutes = Double(parts[1]),
+                  let seconds = Double(parts[2]) else { return nil }
+            return hours * 3_600 + minutes * 60 + seconds
+        }
+
+        func firstVideoSeconds(from url: URL) throws -> Double {
+            var format: UnsafeMutablePointer<AVFormatContext>? = nil
+            let openRet = url.absoluteString.withCString { address in
+                avformat_open_input(&format, address, nil, nil)
+            }
+            guard openRet >= 0, let context = format else {
+                throw NSError(domain: "ProbeTest", code: Int(openRet), userInfo: nil)
+            }
+            defer { avformat_close_input(&format) }
+            guard avformat_find_stream_info(context, nil) >= 0,
+                  let videoIndex = (0..<Int(context.pointee.nb_streams)).first(where: { index in
+                      context.pointee.streams[index]?.pointee.codecpar?.pointee.codec_type == AVMEDIA_TYPE_VIDEO
+                  }),
+                  let stream = context.pointee.streams[videoIndex] else {
+                throw NSError(domain: "ProbeTest", code: -21, userInfo: nil)
+            }
+            var packet = AVPacket()
+            av_init_packet(&packet)
+            while av_read_frame(context, &packet) >= 0 {
+                if packet.stream_index == Int32(videoIndex), packet.pts != Int64.min {
+                    let seconds = Double(av_rescale_q(
+                        packet.pts,
+                        stream.pointee.time_base,
+                        AVRational(num: 1, den: 1_000_000)
+                    )) / 1_000_000
+                    av_packet_unref(&packet)
+                    return seconds
+                }
+                av_packet_unref(&packet)
+            }
+            throw NSError(domain: "ProbeTest", code: -22, userInfo: nil)
+        }
+
+        let sourceFirstVideoPTS = try firstVideoSeconds(from: fixture)
+        let tolerance = 0.15 // one 10fps frame plus the fixture's AAC preroll.
+
+        func export(
+            mode: String,
+            startOffsetMs: Int64
+        ) throws -> (mapMpegTS: Int64, cueIntervals: [(Double, Double)], videoPTS: [Int64], vtt: String) {
+            let sessionId = "test-nonzero-epoch-\(mode)-\(startOffsetMs)-\(UUID().uuidString)"
+            let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+            defer {
+                RigelHlsExporter.stopSession(sessionId: sessionId)
+                try? FileManager.default.removeItem(at: outputDir)
+            }
+            let finished = expectation(description: "nonzero \(mode) subtitle export finishes")
+            var readyPath: String?
+            var error: String?
+            RigelHlsExporter.startSession(
+                sessionId: sessionId,
+                sourceUrl: fixture.absoluteString,
+                headers: [:],
+                mode: mode,
+                startOffsetMs: startOffsetMs,
+                subtitleTracks: [],
+                waitForCompletion: true,
+                onReady: { path, message in
+                    readyPath = path
+                    error = message
+                    finished.fulfill()
+                },
+                onError: { message in
+                    error = message
+                    finished.fulfill()
+                }
+            )
+            wait(for: [finished], timeout: 30)
+            XCTAssertEqual(readyPath, "\(sessionId)/index.m3u8", error ?? "nonzero epoch export failed")
+            XCTAssertNil(error)
+
+            let files = try FileManager.default.contentsOfDirectory(atPath: outputDir.path)
+            let vtt = try files
+                .filter { $0.hasSuffix(".vtt") }
+                .map { try String(contentsOf: outputDir.appendingPathComponent($0), encoding: .utf8) }
+                .joined(separator: "\n")
+            guard let mapLine = vtt.components(separatedBy: .newlines).first(where: { $0.contains("X-TIMESTAMP-MAP=") }),
+                  let mapRange = mapLine.range(of: "MPEGTS:"),
+                  let mapMpegTS = Int64(mapLine[mapRange.upperBound...].split(separator: ",").first ?? "") else {
+                throw NSError(domain: "ProbeTest", code: -20, userInfo: [NSLocalizedDescriptionKey: vtt])
+            }
+            let cueIntervals = vtt.components(separatedBy: .newlines).compactMap { line -> (Double, Double)? in
+                guard line.contains(" --> ") else { return nil }
+                let fields = line.components(separatedBy: " --> ")
+                guard fields.count == 2,
+                      let start = seconds(fields[0].split(separator: " ", maxSplits: 1).first ?? ""),
+                      let end = seconds(fields[1].split(separator: " ", maxSplits: 1).first ?? "") else {
+                    return nil
+                }
+                return (start, end)
+            }
+            XCTAssertFalse(cueIntervals.isEmpty, vtt)
+            let segmentName = try XCTUnwrap(
+                files.filter { $0.hasPrefix("seg0_") && $0.hasSuffix(".ts") }.sorted().first
+            )
+            let packets = try readVideoPackets(from: outputDir.appendingPathComponent(segmentName))
+            let videoPTS = packets.map(\.pts).filter { $0 != Int64.min }
+            XCTAssertFalse(videoPTS.isEmpty)
+            return (mapMpegTS, cueIntervals, videoPTS, vtt)
+        }
+
+        func assertIntervals(
+            _ result: (mapMpegTS: Int64, cueIntervals: [(Double, Double)], videoPTS: [Int64], vtt: String),
+            expectedSourceIntervals: [(Double, Double)],
+            encoderOrigin: Double
+        ) {
+            let mapSeconds = Double(result.mapMpegTS) / 90_000
+            XCTAssertEqual(result.cueIntervals.count, expectedSourceIntervals.count, result.vtt)
+            for expected in expectedSourceIntervals {
+                let matched = result.cueIntervals.contains { cue in
+                    let actualStart = mapSeconds + cue.0 + encoderOrigin
+                    let actualEnd = mapSeconds + cue.1 + encoderOrigin
+                    return abs(actualStart - expected.0) <= tolerance && abs(actualEnd - expected.1) <= tolerance
+                }
+                XCTAssertTrue(matched, "expected source interval \(expected), map=\(result.mapMpegTS), cues=\(result.cueIntervals)")
+            }
+        }
+
+        for mode in ["remux", "transcode"] {
+            let result = try export(mode: mode, startOffsetMs: 0)
+            let outputFirstVideoPTS = Double(result.videoPTS[0]) / 90_000
+            let encoderOrigin = mode == "transcode" ? sourceFirstVideoPTS - outputFirstVideoPTS : 0
+            assertIntervals(
+                result,
+                expectedSourceIntervals: [(10, 11), (11, 12)],
+                encoderOrigin: encoderOrigin
+            )
+        }
+
+        // On-demand VOD covers the whole title; the offset becomes a player-side seek.
+        let seeked = try export(mode: "remux", startOffsetMs: 500)
+        assertIntervals(
+            seeked,
+            expectedSourceIntervals: [(10, 11), (11, 12)],
+            encoderOrigin: 0
+        )
     }
 
     func testHighFrameRateTimestampRepairPreservesCadence() {
@@ -185,39 +1499,43 @@ final class ProbeTest: XCTestCase {
     func testAudioRingHeadPTS() {
         let timeBase = AVRational(num: 1, den: 90_000)
         var packets: [UnsafeMutablePointer<AVPacket>] = []
-        for (i, pts) in [Int64(4_500), 9_000, 13_500].enumerated() {
+        for pts in [Int64(4_500), 9_000, 13_500] {
             guard let packet = av_packet_alloc() else { return XCTFail("alloc failed") }
             packet.pointee.pts = pts
-            packet.pointee.stream_index = Int32(i)
+            packet.pointee.stream_index = 0
             packets.append(packet)
         }
         defer { packets.forEach { var p: UnsafeMutablePointer<AVPacket>? = $0; av_packet_free(&p) } }
-        // Head is the oldest retained packet.
-        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase), 4_500)
-        // Both unset yields nil.
+        let timeBases: [Int32: AVRational] = [0: timeBase]
+        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBases: timeBases), 4_500)
+
         for packet in packets {
             packet.pointee.pts = Int64.min
             packet.pointee.dts = Int64.min
         }
-        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase))
+        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBases: timeBases))
+
         packets[0].pointee.duration = 50
         packets[1].pointee.pts = 100
         XCTAssertEqual(
-            RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: AVRational(num: 1, den: 1_000)),
+            RigelHlsExporter.audioRingHeadPTS90k(
+                packets,
+                timeBases: [0: AVRational(num: 1, den: 1_000)]
+            ),
             4_500
         )
-        // Empty ring yields nil.
-        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k([], timeBase: timeBase), nil)
-        // Missing PTS falls back to DTS so the rebase is not skipped.
+
+        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k([], timeBases: timeBases))
+
         packets[0].pointee.pts = Int64.min
         packets[0].pointee.dts = 9_000
         packets[0].pointee.duration = 0
-        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase), 9_000)
-        // Both unset yields nil.
+        XCTAssertEqual(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBases: timeBases), 9_000)
+
         packets[0].pointee.dts = Int64.min
         packets[1].pointee.pts = Int64.min
         packets[1].pointee.dts = Int64.min
-        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBase: timeBase))
+        XCTAssertNil(RigelHlsExporter.audioRingHeadPTS90k(packets, timeBases: timeBases))
     }
 
     func testPrimingReadClassification() {
@@ -226,5 +1544,193 @@ final class ProbeTest: XCTestCase {
         guard case .eof = RigelHlsExporter.classifyPrimingRead(-541_478_725) else { return XCTFail("expected eof") }
         guard case .again = RigelHlsExporter.classifyPrimingRead(-EAGAIN) else { return XCTFail("expected again") }
         guard case .readError = RigelHlsExporter.classifyPrimingRead(-5) else { return XCTFail("expected readError") }
+    }
+
+    func testInputWatchdogDeadlineSemantics() {
+        let watchdog = InputWatchdog(timeoutSeconds: 1)
+        XCTAssertFalse(watchdog.shouldAbort(), "fresh open budget must not abort")
+        Thread.sleep(forTimeInterval: 1.1)
+        XCTAssertTrue(watchdog.shouldAbort(), "open budget must expire")
+
+        watchdog.startReading()
+        XCTAssertFalse(watchdog.shouldAbort(), "reading resets the budget")
+        Thread.sleep(forTimeInterval: 1.1)
+        XCTAssertTrue(watchdog.shouldAbort(), "a read stalled past the budget must abort")
+
+        watchdog.touch()
+        XCTAssertFalse(watchdog.shouldAbort(), "touch must refresh the read budget")
+    }
+    func testSessionWatchdogCancellationCoversExistingAndLateSidecars() {
+        let session = RigelHlsExporter.Session(
+            queue: DispatchQueue(label: "rigel-test-watchdog-cancellation"),
+            inputWatchdog: InputWatchdog(timeoutSeconds: 10),
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: false
+        )
+        let existingSidecar = InputWatchdog(timeoutSeconds: 10)
+        let lateSidecar = InputWatchdog(timeoutSeconds: 10)
+
+        XCTAssertFalse(session.inputWatchdog.shouldAbort())
+        XCTAssertFalse(existingSidecar.shouldAbort())
+        XCTAssertFalse(lateSidecar.shouldAbort())
+        session.retainSidecarWatchdog(existingSidecar)
+
+        session.cancelWatchdogs()
+        session.retainSidecarWatchdog(lateSidecar)
+
+        XCTAssertTrue(session.inputWatchdog.shouldAbort(), "primary watchdog must be cancelled")
+        XCTAssertTrue(existingSidecar.shouldAbort(), "retained sidecar watchdog must be cancelled")
+        XCTAssertTrue(lateSidecar.shouldAbort(), "late sidecar registration must be cancelled")
+
+        let cancelledBeforeFirstRetain = RigelHlsExporter.Session(
+            queue: DispatchQueue(label: "rigel-test-watchdog-cancel-before-retain"),
+            inputWatchdog: InputWatchdog(timeoutSeconds: 10),
+            startOffsetMs: 0,
+            subtitleTracks: [],
+            waitForCompletion: false
+        )
+        let firstSidecar = InputWatchdog(timeoutSeconds: 10)
+        cancelledBeforeFirstRetain.cancelWatchdogs()
+        cancelledBeforeFirstRetain.retainSidecarWatchdog(firstSidecar)
+
+        XCTAssertTrue(cancelledBeforeFirstRetain.inputWatchdog.shouldAbort())
+        XCTAssertTrue(firstSidecar.shouldAbort(), "first sidecar after cancellation must be cancelled")
+    }
+
+    func testExportPacingDecision() {
+        XCTAssertFalse(
+            RigelHlsExporter.shouldPace(exportedUs: 90_000_000, playheadMs: -1, playheadAgeSeconds: 1),
+            "unknown playhead keeps free-run"
+        )
+        XCTAssertFalse(
+            RigelHlsExporter.shouldPace(exportedUs: 90_000_000, playheadMs: 10_000, playheadAgeSeconds: nil),
+            "missing freshness keeps free-run"
+        )
+        XCTAssertFalse(
+            RigelHlsExporter.shouldPace(exportedUs: 90_000_000, playheadMs: 10_000, playheadAgeSeconds: 16),
+            "stale playhead keeps free-run"
+        )
+        XCTAssertFalse(
+            RigelHlsExporter.shouldPace(exportedUs: 25_000_000, playheadMs: 10_000, playheadAgeSeconds: 1),
+            "within the run-ahead limit keeps exporting"
+        )
+        XCTAssertTrue(
+            RigelHlsExporter.shouldPace(exportedUs: 90_000_000, playheadMs: 10_000, playheadAgeSeconds: 1),
+            "far ahead of a fresh playhead must idle"
+        )
+    }
+
+    /// Sidecar URLs arrive percent-encoded (absoluteString); FFmpeg cannot
+    /// open them that way, so the exporter must resolve file URLs to paths.
+    func testSidecarFileURLPercentEscapesAreDecoded() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pct-sidecar-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("EN 23.976 sidecar.srt")
+        try Data("1\n00:00:00,000 --> 00:00:01,000\nHello\n".utf8).write(to: fileURL)
+        XCTAssertTrue(fileURL.absoluteString.contains("%20"), fileURL.absoluteString)
+
+        var fmt: UnsafeMutablePointer<AVFormatContext>? = nil
+        let watchdog = InputWatchdog(timeoutSeconds: 10)
+        let opened = RigelHlsExporter.openSidecarInput(
+            url: fileURL.absoluteString,
+            headers: [:],
+            watchdog: watchdog,
+            fmt: &fmt
+        )
+        RigelHlsExporter.closeInput(&fmt)
+        XCTAssertTrue(opened, "exporter must open percent-encoded file URLs: \(fileURL.absoluteString)")
+    }
+
+    /// A sidecar source whose server accepts the connection and then stalls
+    /// must fail the session within the watchdog budget, never hang it.
+    func testStalledSidecarSourceFailsSession() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture", withExtension: "mp4"))
+        let listener = try NWListener(using: .tcp, on: .any)
+        let ready = expectation(description: "stall server ready")
+        var port: UInt16 = 0
+        listener.stateUpdateHandler = { state in
+            if case .ready = state {
+                port = listener.port?.rawValue ?? 0
+                ready.fulfill()
+            }
+        }
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: .global())
+            // Intentionally never reads or replies: the stall is the point.
+        }
+        listener.start(queue: .global())
+        wait(for: [ready], timeout: 5)
+        defer { listener.cancel() }
+
+        let sessionId = "test-stalled-sidecar-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer { try? FileManager.default.removeItem(at: outputDir) }
+        let finished = expectation(description: "stalled sidecar session settles")
+        var readyPath: String?
+        var error: String?
+
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            startOffsetMs: 0,
+            subtitleTracks: [SubtitleTrack(url: "http://127.0.0.1:\(port)/stalled.srt", language: "eng", title: "Stalled")],
+            onReady: { path, message in
+                readyPath = path
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        // Watchdog budget is 10s; allow generous slack before declaring a hang.
+        wait(for: [finished], timeout: 20)
+        RigelHlsExporter.stopSession(sessionId: sessionId)
+
+        let cleanupDeadline = Date().addingTimeInterval(2)
+        while FileManager.default.fileExists(atPath: outputDir.path), Date() < cleanupDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outputDir.path))
+        XCTAssertNil(readyPath, "a stalled sidecar must not publish a playlist")
+        XCTAssertEqual(error, "Could not prepare the selected subtitle")
+    }
+    private func readVideoPackets(from url: URL) throws -> [(pts: Int64, dts: Int64, size: Int32)] {
+        var format: UnsafeMutablePointer<AVFormatContext>? = nil
+        let openRet = url.absoluteString.withCString { address in
+            avformat_open_input(&format, address, nil, nil)
+        }
+        guard openRet >= 0, let context = format else {
+            throw NSError(domain: "ProbeTest", code: Int(openRet), userInfo: nil)
+        }
+        defer { avformat_close_input(&format) }
+        guard avformat_find_stream_info(context, nil) >= 0 else {
+            throw NSError(domain: "ProbeTest", code: -1, userInfo: nil)
+        }
+        guard let videoIndex = (0..<Int(context.pointee.nb_streams)).first(where: { index in
+            context.pointee.streams[index]?.pointee.codecpar?.pointee.codec_type == AVMEDIA_TYPE_VIDEO
+        }) else {
+            throw NSError(domain: "ProbeTest", code: -2, userInfo: nil)
+        }
+
+        var packet = AVPacket()
+        av_init_packet(&packet)
+        var result: [(pts: Int64, dts: Int64, size: Int32)] = []
+        while av_read_frame(context, &packet) >= 0 {
+            if packet.stream_index == Int32(videoIndex) {
+                result.append((pts: packet.pts, dts: packet.dts, size: packet.size))
+            }
+            av_packet_unref(&packet)
+        }
+        guard !result.isEmpty else {
+            throw NSError(domain: "ProbeTest", code: -3, userInfo: nil)
+        }
+        return result
     }
 }

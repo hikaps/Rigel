@@ -26,7 +26,7 @@ final class JellyfinCancellationTests: XCTestCase {
     }
 
     func testKotlinRequestExceptionIsNotCancellation() {
-        let error = JellyfinRequestException(message: "401").asError()
+        let error = JellyfinRequestException(statusCode: 401).asError()
         XCTAssertFalse(JellyfinCancellation.isCancellation(error))
     }
 
@@ -40,5 +40,13 @@ final class JellyfinCancellationTests: XCTestCase {
                 NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet)
             )
         )
+    }
+    func testHTTPStatusIsClassifiedFromKotlinThrowable() {
+        let unauthorized = JellyfinInterop.shared.makeRequestException(statusCode: 401).asError()
+        let forbidden = JellyfinInterop.shared.makeRequestException(statusCode: 403).asError()
+
+        XCTAssertEqual(JellyfinCancellation.httpStatusCode(unauthorized), 401)
+        XCTAssertEqual(JellyfinCancellation.httpStatusCode(forbidden), 403)
+        XCTAssertNil(JellyfinCancellation.httpStatusCode(NSError(domain: "test", code: 500)))
     }
 }

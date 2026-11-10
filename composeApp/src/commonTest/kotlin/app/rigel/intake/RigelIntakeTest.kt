@@ -1,23 +1,61 @@
 package app.rigel.intake
 
+import app.rigel.bridge.Bridges
+import app.rigel.bridge.ProbeBridge
+import app.rigel.bridge.ProbeOperation
+import app.rigel.bridge.ProbeResult
+import app.rigel.bridge.RigelBridgeFactory
 import app.rigel.player.PlayerController
 import app.rigel.player.PlayerPhase
-import app.rigel.player.RigelIntake
+import app.rigel.settings.LinkHistoryEntry
 import app.rigel.settings.SettingsStore
-import com.russhwolf.settings.Settings
+import com.russhwolf.settings.MapSettings
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class RigelIntakeTest {
 
-    private fun controller() = PlayerController(SettingsStore(Settings()))
+    private val dispatcher = StandardTestDispatcher()
+
+    private fun controller() = PlayerController(SettingsStore(MapSettings(mutableMapOf())))
+
+    private class RecordingProbeOperation : ProbeOperation {
+        var cancelCount = 0
+        override fun cancel() {
+            cancelCount += 1
+        }
+    }
 
     @BeforeTest
-    fun resetIntake() {
+    fun setUp() {
+        Dispatchers.setMain(dispatcher)
         RigelIntake.resetForTest()
+        RigelBridgeFactory.register(null, null, null, null)
+    }
+
+    @AfterTest
+    fun tearDown() {
+        RigelIntake.resetForTest()
+        RigelBridgeFactory.register(null, null, null, null)
+        Dispatchers.resetMain()
     }
 
     @Test
@@ -52,5 +90,95 @@ class RigelIntakeTest {
         RigelIntake.attach(c)
         // Both replayed; the last one wins the final state.
         assertEquals(PlayerPhase.ERROR, c.uiState.value.phase)
+    }
+
+    @Test
+    fun handleWithTitleRecordsTitleInHistory() = runTest(dispatcher.scheduler) {
+        RigelBridgeFactory.register(
+            discovery = null,
+            probe = object : ProbeBridge {
+                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
+                    onResult(null, "probe unavailable in intake test")
+                    return object : ProbeOperation {
+                        override fun cancel() = Unit
+                    }
+                }
+            },
+            transcode = null,
+            httpServer = null,
+        )
+        val settings = SettingsStore(MapSettings(mutableMapOf()))
+        val c = PlayerController(settings)
+        RigelIntake.attach(c)
+
+        assertTrue(RigelIntake.handle("http://h/v.mp4", "My Movie"))
+        advanceUntilIdle()
+        assertEquals(
+            listOf(LinkHistoryEntry("http://h/v.mp4", "My Movie")),
+            settings.linkHistory(),
+        )
+    }
+    @Test
+    fun probeBridgeHandlesSynchronousCallbackWithoutCancellingCompletedOperation() = runTest {
+        val operation = RecordingProbeOperation()
+        RigelBridgeFactory.register(
+            discovery = null,
+            probe = object : ProbeBridge {
+                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
+                    onResult(null, "synchronous result")
+                    return operation
+                }
+            },
+            transcode = null,
+            httpServer = null,
+        )
+
+        assertEquals(null to "synchronous result", Bridges.probe("http://h/v.mp4", emptyMap()))
+        assertEquals(0, operation.cancelCount)
+    }
+
+    @Test
+    fun canceledProbeCancelsNativeOperation() = runTest {
+        val operation = RecordingProbeOperation()
+        val started = CompletableDeferred<Unit>()
+        RigelBridgeFactory.register(
+            discovery = null,
+            probe = object : ProbeBridge {
+                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
+                    started.complete(Unit)
+                    return operation
+                }
+            },
+            transcode = null,
+            httpServer = null,
+        )
+
+        val probe = launch { Bridges.probe("http://h/v.mp4", emptyMap()) }
+        started.await()
+        probe.cancelAndJoin()
+        assertEquals(1, operation.cancelCount)
+    }
+
+    @Test
+    fun cancellationBeforeOperationHandleRegistrationStillCancelsOperation() = runTest {
+        val parent = Job()
+        val operation = RecordingProbeOperation()
+        RigelBridgeFactory.register(
+            discovery = null,
+            probe = object : ProbeBridge {
+                override fun probe(url: String, headers: Map<String, String>, onResult: (ProbeResult?, String?) -> Unit): ProbeOperation {
+                    parent.cancel()
+                    return operation
+                }
+            },
+            transcode = null,
+            httpServer = null,
+        )
+
+        val probe = launch(parent, start = CoroutineStart.UNDISPATCHED) {
+            Bridges.probe("http://h/v.mp4", emptyMap())
+        }
+        probe.join()
+        assertEquals(1, operation.cancelCount)
     }
 }
