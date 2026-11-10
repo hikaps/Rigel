@@ -453,6 +453,40 @@ final class OpenSubtitlesTests: XCTestCase {
         return URLSession(configuration: configuration)
     }
 
+    func testExpiredTokenIsRenewedWithSavedAccountAndRequestRetried() async throws {
+        let store = TestCredentialStore()
+        store.apiKey = "app-key"
+        store.username = "rigel-user"
+        store.password = "secret"
+        store.token = "expired"
+        store.baseURL = "api.opensubtitles.com"
+        let lock = NSLock()
+        var searchTokens: [String?] = []
+        OpenSubtitlesURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/api/v1/login":
+                return Self.response(request: request, body: "{\"token\":\"fresh\",\"base_url\":\"api.opensubtitles.com\"}")
+            case "/api/v1/subtitles":
+                lock.lock()
+                searchTokens.append(request.value(forHTTPHeaderField: "Authorization"))
+                lock.unlock()
+                if request.value(forHTTPHeaderField: "Authorization") == "Bearer expired" {
+                    return Self.response(request: request, statusCode: 401, body: "{}")
+                }
+                return Self.response(request: request, body: "{\"data\":[]}")
+            default:
+                return Self.response(request: request, statusCode: 404, body: "{}")
+            }
+        }
+        defer { OpenSubtitlesURLProtocol.handler = nil }
+
+        let client = OpenSubtitlesClient(store: store, session: makeSession())
+        _ = try await client.search(query: "movie")
+
+        XCTAssertEqual(searchTokens, ["Bearer expired", "Bearer fresh"])
+        XCTAssertEqual(store.token, "fresh")
+    }
+
     private func makeAuthorizedClient() -> OpenSubtitlesClient {
         let store = TestCredentialStore()
         store.apiKey = "app-key"
@@ -534,6 +568,7 @@ final class OpenSubtitlesTests: XCTestCase {
 
 private final class TestCredentialStore: OpenSubtitlesCredentialStore {
     var apiKey: String?
+    var password: String?
     var username: String?
     var token: String?
     var baseURL: String?

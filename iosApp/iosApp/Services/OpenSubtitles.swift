@@ -3,7 +3,9 @@ import Security
 import ComposeApp
 
 protocol OpenSubtitlesCredentialStore: AnyObject {
-    var apiKey: String? { get set }
+    /// Application key shipped with the app; users only sign in with their account.
+    var apiKey: String? { get }
+    var password: String? { get set }
     var username: String? { get set }
     var token: String? { get set }
     var baseURL: String? { get set }
@@ -17,8 +19,13 @@ final class OpenSubtitlesKeychainStore: OpenSubtitlesCredentialStore {
     private let service = "com.rigel.player.opensubtitles"
 
     var apiKey: String? {
-        get { value(for: "api-key") }
-        set { setValue(newValue, for: "api-key") }
+        (Bundle.main.object(forInfoDictionaryKey: "OpenSubtitlesAPIKey") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var password: String? {
+        get { value(for: "password") }
+        set { setValue(newValue, for: "password") }
     }
 
     var username: String? {
@@ -46,7 +53,7 @@ final class OpenSubtitlesKeychainStore: OpenSubtitlesCredentialStore {
     }
 
     func clear() {
-        for key in ["api-key", "username", "token", "base-url"] {
+        for key in ["username", "password", "token", "base-url"] {
             setValue(nil, for: key)
         }
     }
@@ -208,27 +215,27 @@ final class OpenSubtitlesClient {
     }
 
     func search(query: String, language: String? = nil) async throws -> [OpenSubtitlesSearchResult] {
-        guard let apiKey = store.apiKey,
-              let token = store.token,
-              let baseURL = store.baseURL,
-              !apiKey.isEmpty,
-              !token.isEmpty,
-              let url = Self.endpoint(baseURL, path: "subtitles") else {
+        guard store.apiKey?.isEmpty == false,
+              store.token?.isEmpty == false,
+              store.baseURL?.isEmpty == false else {
             throw OpenSubtitlesError.missingCredentials
         }
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuery.isEmpty else { return [] }
-        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.queryItems = [
-            URLQueryItem(name: "query", value: trimmedQuery),
-            URLQueryItem(name: "languages", value: language),
-        ].compactMap { item in
-            item.value == nil ? nil : item
+        let (data, response) = try await authorizedData { apiKey, token, baseURL in
+            guard let url = Self.endpoint(baseURL, path: "subtitles") else {
+                throw OpenSubtitlesError.missingCredentials
+            }
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.queryItems = [
+                URLQueryItem(name: "query", value: trimmedQuery),
+                URLQueryItem(name: "languages", value: language),
+            ].compactMap { item in
+                item.value == nil ? nil : item
+            }
+            guard let requestURL = components?.url else { throw OpenSubtitlesError.invalidResponse }
+            return try self.makeRequest(url: requestURL, apiKey: apiKey, token: token)
         }
-        guard let requestURL = components?.url else { throw OpenSubtitlesError.invalidResponse }
-        let request = try makeRequest(url: requestURL, apiKey: apiKey, token: token)
-        let redirectDelegate = RedirectDelegate(policy: .api(apiKey: apiKey, token: token))
-        let (data, response) = try await session.data(for: request, delegate: redirectDelegate)
         try Self.validate(response: response, data: data)
         let decoded = try JSONDecoder().decode(SearchResponse.self, from: data)
         return decoded.data.flatMap { entry in
@@ -260,23 +267,18 @@ final class OpenSubtitlesClient {
         destinationDirectory: URL? = nil
     ) async throws -> URL {
         guard let apiKey = store.apiKey,
-              let token = store.token,
-              let baseURL = store.baseURL,
-              !apiKey.isEmpty,
-              !token.isEmpty,
-              let url = Self.endpoint(baseURL, path: "download") else {
+              store.token?.isEmpty == false,
+              store.baseURL?.isEmpty == false,
+              !apiKey.isEmpty else {
             throw OpenSubtitlesError.missingCredentials
         }
         let body = try JSONEncoder().encode(DownloadRequest(fileID: result.id, format: "srt"))
-        let request = try makeRequest(
-            url: url,
-            method: "POST",
-            apiKey: apiKey,
-            token: token,
-            body: body
-        )
-        let redirectDelegate = RedirectDelegate(policy: .api(apiKey: apiKey, token: token))
-        let (data, response) = try await session.data(for: request, delegate: redirectDelegate)
+        let (data, response) = try await authorizedData { apiKey, token, baseURL in
+            guard let url = Self.endpoint(baseURL, path: "download") else {
+                throw OpenSubtitlesError.missingCredentials
+            }
+            return try self.makeRequest(url: url, method: "POST", apiKey: apiKey, token: token, body: body)
+        }
         try Self.validate(response: response, data: data)
         let decoded = try JSONDecoder().decode(DownloadResponse.self, from: data)
         guard let rawLink = decoded.link, !rawLink.isEmpty else {
@@ -292,6 +294,31 @@ final class OpenSubtitlesClient {
             session: session,
             directory: destinationDirectory
         )
+    }
+
+    /// Sends an authenticated request; an expired token (401) is renewed once
+    /// with the saved account credentials, then the request is retried.
+    private func authorizedData(
+        _ make: (_ apiKey: String, _ token: String, _ baseURL: String) throws -> URLRequest
+    ) async throws -> (Data, URLResponse) {
+        func attempt() async throws -> (Data, URLResponse) {
+            guard let apiKey = store.apiKey, let token = store.token, let baseURL = store.baseURL,
+                  !apiKey.isEmpty, !token.isEmpty else {
+                throw OpenSubtitlesError.missingCredentials
+            }
+            let request = try make(apiKey, token, baseURL)
+            return try await session.data(for: request, delegate: RedirectDelegate(policy: .api(apiKey: apiKey, token: token)))
+        }
+        let first = try await attempt()
+        guard (first.1 as? HTTPURLResponse)?.statusCode == 401,
+              let apiKey = store.apiKey, let username = store.username, let password = store.password,
+              !username.isEmpty, !password.isEmpty else {
+            return first
+        }
+        let renewed = try await login(apiKey: apiKey, username: username, password: password)
+        store.token = renewed.token
+        store.baseURL = renewed.baseURL
+        return try await attempt()
     }
 
     static func fetchSubtitleFile(
