@@ -189,6 +189,8 @@ final class RigelPlayerViewController: UIViewController {
     private var startOffsetSeconds: Double = 0
     private var isProxyPlayback = false
     private var resumeSeekApplied = false
+    /// Resume point for a full-length on-demand proxy, whose timeline starts at 0.
+    private var zeroBasedResumeSeconds: Double = 0
     private var selectedExternalSubtitleUrl: String?
     private var selectedExternalSubtitleOption: AVMediaSelectionOption?
     private var proxyExternalSubtitleUrl: String?
@@ -1295,6 +1297,12 @@ final class RigelPlayerViewController: UIViewController {
         isScrubbing = false
         knownDurationSeconds = durationSeconds
         self.startOffsetSeconds = max(0, startOffsetSeconds.isFinite ? startOffsetSeconds : 0)
+        if isProxy, let resumeMs = Self.proxySessionId(from: url).flatMap(RigelHlsExporter.onDemandResumeMs(sessionId:)) {
+            zeroBasedResumeSeconds = Double(resumeMs) / 1000
+            self.startOffsetSeconds = 0
+        } else {
+            zeroBasedResumeSeconds = 0
+        }
         isProxyPlayback = isProxy
         airPlayStartupWatchdog.reset()
         isAirPlayDirectAttempt = !isProxy && isCurrentAirPlayDirectPlayback(for: url)
@@ -1659,6 +1667,7 @@ final class RigelPlayerViewController: UIViewController {
         airPlayStartupWatchdog.reset()
         isAirPlayDirectAttempt = false
         resumeSeekApplied = false
+        zeroBasedResumeSeconds = 0
         phaseBufferingRequested = false
         lastReportedNativeBuffering = false
         lastRenderedPlaying = false
@@ -1759,9 +1768,10 @@ final class RigelPlayerViewController: UIViewController {
             events.onError(message: detail)
             return
         case .readyToPlay:
-            if !isProxyPlayback && !resumeSeekApplied && startOffsetSeconds > 0 {
+            let resumeSeconds = isProxyPlayback ? zeroBasedResumeSeconds : startOffsetSeconds
+            if !resumeSeekApplied && resumeSeconds > 0 {
                 resumeSeekApplied = true
-                let target = CMTime(seconds: startOffsetSeconds, preferredTimescale: 600)
+                let target = CMTime(seconds: resumeSeconds, preferredTimescale: 600)
                 player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
             }
             if player.timeControlStatus == .playing, !notifiedPlaying {

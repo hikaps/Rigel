@@ -17,7 +17,7 @@ final class RigelHlsExporter {
         private let watchdogLock = NSLock()
         private var sidecarWatchdogs: [InputWatchdog] = []
         private var watchdogsCancelled = false
-        let startOffsetMs: Int64
+        var startOffsetMs: Int64
         let waitForCompletion: Bool
         let subtitleTracks: [SubtitleTrack]
         var cancel = false
@@ -30,6 +30,9 @@ final class RigelHlsExporter {
         var playheadUpdatedAt: DispatchTime?
         /// Set for on-demand AirPlay VOD sessions; guarded by RigelHlsExporter.lock.
         var onDemand: OnDemandRequests?
+        /// On-demand VOD covers the whole title from 0; this is the position the
+        /// player must seek to instead of a shortened playlist. RigelHlsExporter.lock.
+        var onDemandResumeMs: Int64?
 
         init(
             queue: DispatchQueue,
