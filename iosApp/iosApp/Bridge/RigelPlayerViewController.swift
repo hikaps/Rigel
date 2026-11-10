@@ -156,6 +156,7 @@ final class RigelPlayerViewController: UIViewController {
     private let tracksButton = UIButton(type: .system)
     private let trackButtonsStack = UIStackView()
     private let bottomBar = UIView()
+    private let volumeView = MPVolumeView(frame: .zero)
     private let progressSlider = UISlider()
     private let skipBackwardButton = UIButton(type: .system)
     private let playPauseButton = UIButton(type: .system)
@@ -486,13 +487,15 @@ final class RigelPlayerViewController: UIViewController {
         transportControls.translatesAutoresizingMaskIntoConstraints = false
         bottomBar.addSubview(transportControls)
 
-        // System volume; while AirPlaying this adjusts the receiver's volume.
-        let volumeView = MPVolumeView(frame: .zero)
+        // System volume (adjusts the receiver while AirPlaying), shown as a
+        // vertical slider on the trailing edge.
         volumeView.showsRouteButton = false
         volumeView.tintColor = .white
         volumeView.accessibilityIdentifier = "player.volumeSlider"
         volumeView.translatesAutoresizingMaskIntoConstraints = false
-        bottomBar.addSubview(volumeView)
+        volumeView.transform = CGAffineTransform(rotationAngle: -.pi / 2)
+        volumeView.isHidden = true
+        view.addSubview(volumeView)
 
         NSLayoutConstraint.activate([
             bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -506,13 +509,14 @@ final class RigelPlayerViewController: UIViewController {
 
             transportControls.centerXAnchor.constraint(equalTo: bottomBar.centerXAnchor),
             transportControls.topAnchor.constraint(equalTo: timeline.bottomAnchor, constant: 2),
-            transportControls.bottomAnchor.constraint(equalTo: volumeView.topAnchor, constant: -4),
+            transportControls.bottomAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.bottomAnchor),
+            bottomBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 116),
 
-            volumeView.leadingAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.leadingAnchor, constant: 24),
-            volumeView.trailingAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.trailingAnchor, constant: -24),
+            // Laid out horizontally, then rotated about its centre.
+            volumeView.widthAnchor.constraint(equalToConstant: 160),
             volumeView.heightAnchor.constraint(equalToConstant: 30),
-            volumeView.bottomAnchor.constraint(equalTo: bottomBar.layoutMarginsGuide.bottomAnchor),
-            bottomBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 152),
+            volumeView.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24),
+            volumeView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
         ])
     }
 
@@ -524,7 +528,7 @@ final class RigelPlayerViewController: UIViewController {
 
     @objc private func controlsTapped(_ gesture: UITapGestureRecognizer) {
         let point = gesture.location(in: view)
-        if topBar.frame.contains(point) || (customPlaybackControls && bottomBar.frame.contains(point)) {
+        if topBar.frame.contains(point) || (customPlaybackControls && (bottomBar.frame.contains(point) || volumeView.frame.contains(point))) {
             showControls()
             return
         }
@@ -539,6 +543,7 @@ final class RigelPlayerViewController: UIViewController {
         controlsVisible = true
         topBar.isHidden = false
         bottomBar.isHidden = !customPlaybackControls
+        volumeView.isHidden = !customPlaybackControls
         UIView.animate(
             withDuration: 0.25,
             delay: 0,
@@ -546,6 +551,7 @@ final class RigelPlayerViewController: UIViewController {
         ) {
             self.topBar.alpha = 1
             self.bottomBar.alpha = 1
+            self.volumeView.alpha = 1
             self.topGradient.alpha = 1
             self.bottomGradient.alpha = self.customPlaybackControls ? 1 : 0
         }
@@ -563,6 +569,7 @@ final class RigelPlayerViewController: UIViewController {
             animations: {
                 self.topBar.alpha = 0
                 self.bottomBar.alpha = 0
+                self.volumeView.alpha = 0
                 self.topGradient.alpha = 0
                 self.bottomGradient.alpha = 0
             },
@@ -571,6 +578,7 @@ final class RigelPlayerViewController: UIViewController {
                     self.topBar.isHidden = true
                     if self.customPlaybackControls {
                         self.bottomBar.isHidden = true
+                        self.volumeView.isHidden = true
                     }
                 }
             }
@@ -1297,6 +1305,7 @@ final class RigelPlayerViewController: UIViewController {
         customPlaybackControls = Self.isHLSURL(url)
         pendingScrubValue = nil
         bottomBar.isHidden = !customPlaybackControls
+        volumeView.isHidden = !customPlaybackControls
         progressSlider.isHidden = true
         progressSlider.value = 0
         elapsedLabel.text = "00:00"
@@ -1639,6 +1648,7 @@ final class RigelPlayerViewController: UIViewController {
         topBar.isHidden = false
         topBar.alpha = 1
         bottomBar.alpha = 1
+        volumeView.alpha = 1
         topGradient.alpha = 1
         bottomGradient.alpha = 0
         customPlaybackControls = false
@@ -1658,6 +1668,7 @@ final class RigelPlayerViewController: UIViewController {
         pendingScrubValue = nil
         scrubGeneration &+= 1
         bottomBar.isHidden = true
+        volumeView.isHidden = true
         trackPickerHost?.dismiss(animated: false)
         trackPickerHost = nil
         trackPickerModel = nil
