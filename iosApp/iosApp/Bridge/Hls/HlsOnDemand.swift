@@ -307,7 +307,8 @@ extension RigelHlsExporter {
         let timeBase = video.pointee.time_base
         let ninety = AVRational(num: 1, den: 90_000)
         let origin90k = sourceTimestampOrigin90k(ctx, videoIndex: videoIndex, audioIndices: audioIndices)
-        let startAbs90k = origin90k + av_rescale_q(session.startOffsetMs, AVRational(num: 1, den: 1_000), ninety)
+        // The playlist always covers the whole title so the receiver shows the true duration.
+        let startAbs90k = origin90k
         let firstTs = video.pointee.start_time != Int64.min ? video.pointee.start_time : 0
         // Matroska parses deferred cues on its first seek.
         session.inputWatchdog.touch()
@@ -371,6 +372,11 @@ extension RigelHlsExporter {
         lock.unlock()
         guard let requests, let key = requests.key(fileName: String(parts[2])) else { return nil }
         return (requests, key)
+    }
+
+    static func onDemandResumeMs(sessionId: String) -> Int64? {
+        lock.lock(); defer { lock.unlock() }
+        return activeSessionKey(for: sessionId).flatMap { sessions[$0]?.onDemandResumeMs }
     }
 
     static func noteOnDemandRequest(requestPath: String) {

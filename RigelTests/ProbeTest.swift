@@ -506,6 +506,41 @@ final class ProbeTest: XCTestCase {
         XCTAssertNil(RigelHlsExporter.onDemandSegmentBoundaries(keyframes: [], start: 0, end: 40, minimum: 4, maximum: 30))
     }
 
+    func testAirPlayOnDemandWithResumeOffsetStillCoversWholeTitle() throws {
+        let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_gop", withExtension: "mkv"))
+        let sessionId = "test-on-demand-resume-\(UUID().uuidString)"
+        let outputDir = RigelHlsExporter.sessionDir(sessionId: sessionId)
+        defer {
+            RigelHlsExporter.stopSession(sessionId: sessionId)
+            try? FileManager.default.removeItem(at: outputDir)
+        }
+        let finished = expectation(description: "on-demand session becomes ready")
+        var error: String?
+        RigelHlsExporter.startSession(
+            sessionId: sessionId,
+            sourceUrl: fixture.absoluteString,
+            headers: [:],
+            mode: "remux",
+            passthroughAudioCodecs: ["aac"],
+            startOffsetMs: 20_000,
+            subtitleTracks: [],
+            waitForCompletion: true,
+            onReady: { _, message in
+                error = message
+                finished.fulfill()
+            },
+            onError: { message in
+                error = message
+                finished.fulfill()
+            }
+        )
+        wait(for: [finished], timeout: 10)
+        XCTAssertNil(error)
+        let playlist = try String(contentsOf: outputDir.appendingPathComponent("variant_0.m3u8"), encoding: .utf8)
+        XCTAssertEqual(playlist.components(separatedBy: "#EXTINF:").count - 1, 9, playlist)
+        XCTAssertEqual(RigelHlsExporter.onDemandResumeMs(sessionId: sessionId), 20_000)
+    }
+
     func testAirPlayOnDemandServesNonSequentialSegments() throws {
         let fixture = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "fixture_gop", withExtension: "mkv"))
         let sessionId = "test-on-demand-\(UUID().uuidString)"
@@ -1375,10 +1410,11 @@ final class ProbeTest: XCTestCase {
             )
         }
 
+        // On-demand VOD covers the whole title; the offset becomes a player-side seek.
         let seeked = try export(mode: "remux", startOffsetMs: 500)
         assertIntervals(
             seeked,
-            expectedSourceIntervals: [(10.5, 11), (11, 12)],
+            expectedSourceIntervals: [(10, 11), (11, 12)],
             encoderOrigin: 0
         )
     }

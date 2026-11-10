@@ -192,6 +192,10 @@ extension RigelHlsExporter {
                audioIndices: outputAudioIndices,
                passthroughAudioCodecs: passthroughAudioCodecs
            ) {
+            lock.lock()
+            session.onDemandResumeMs = session.startOffsetMs
+            session.startOffsetMs = 0
+            lock.unlock()
             let failure = runOnDemand(
                 session: session,
                 sessionId: sessionId,
