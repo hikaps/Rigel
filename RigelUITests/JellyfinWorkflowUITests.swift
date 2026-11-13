@@ -3,6 +3,18 @@ import Network
 import XCTest
 
 final class JellyfinWorkflowUITests: XCTestCase {
+    /// Taps `target` until `result` appears. SwiftUI list/sheet rebuilds on loaded CI runners can
+    /// drop a tap on an element that already exists, so a single tap is not a reliable trigger.
+    /// Only use it where a repeated tap is idempotent or lands on an already-covered element.
+    private func tap(_ target: XCUIElement, until result: XCUIElement, attempts: Int = 3) -> Bool {
+        for _ in 0..<attempts {
+            if result.exists { return true }
+            if target.waitForExistence(timeout: 5), target.isHittable { target.tap() }
+            if result.waitForExistence(timeout: 8) { return true }
+        }
+        return result.exists
+    }
+
     func testJellyfinHandoffAutoClosesAndControlsCanReopen() throws {
         let server = try JellyfinFixtureServer(remoteSession: true)
         try server.start()
@@ -19,8 +31,20 @@ final class JellyfinWorkflowUITests: XCTestCase {
         app.buttons.matching(identifier: "Devices").firstMatch.tap()
         let receiver = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Fixture TV")).firstMatch
         XCTAssertTrue(receiver.waitForExistence(timeout: 20))
-        app.staticTexts["Fixture TV"].tap()
-        XCTAssertTrue(app.staticTexts["Selected Fixture TV"].waitForExistence(timeout: 5), app.debugDescription)
+        // Discovery order varies and real LAN devices can fill the list: scroll the row clear of the
+        // tab bar, and assert the row's own checkmark (the footer notice can be off-screen).
+        let name = app.staticTexts["Fixture TV"]
+        for _ in 0..<4 where !name.isHittable { app.swipeUp() }
+        XCTAssertTrue(name.isHittable, app.debugDescription)
+        name.tap()
+        // The checkmark is a sibling of the row button, so match it by the row's vertical band.
+        let rowSelected = NSPredicate { _, _ in
+            app.images.matching(identifier: "checkmark").allElementsBoundByIndex.contains {
+                abs($0.frame.midY - name.frame.midY) < 30
+            }
+        }
+        let selected = XCTNSPredicateExpectation(predicate: rowSelected, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [selected], timeout: 5), .completed, app.debugDescription)
         app.buttons.matching(identifier: "Sources").firstMatch.tap()
         let search = app.textFields["Movies, shows, or episodes"]
         XCTAssertTrue(search.waitForExistence(timeout: 15))
@@ -28,9 +52,8 @@ final class JellyfinWorkflowUITests: XCTestCase {
         search.typeText("smoke\n")
         let play = app.buttons.matching(identifier: "Play").firstMatch
         XCTAssertTrue(play.waitForExistence(timeout: 15))
-        play.tap()
         let version = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "1080p master")).firstMatch
-        XCTAssertTrue(version.waitForExistence(timeout: 10))
+        XCTAssertTrue(tap(play, until: version), app.debugDescription)
         version.tap()
         let returnedToBrowsing = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
@@ -103,8 +126,7 @@ final class JellyfinWorkflowUITests: XCTestCase {
         server.onSourceRequest = { _ in noNegotiationAfterCancel.fulfill() }
         let play = app.buttons.matching(identifier: "Play").firstMatch
         XCTAssertTrue(play.waitForExistence(timeout: 5))
-        play.tap()
-        XCTAssertTrue(app.navigationBars["Choose version"].waitForExistence(timeout: 10))
+        XCTAssertTrue(tap(play, until: app.navigationBars["Choose version"]), app.debugDescription)
         XCTAssertTrue(app.staticTexts["720p copy"].exists)
         XCTAssertTrue(app.staticTexts["1080p master"].exists)
 
@@ -127,8 +149,10 @@ final class JellyfinWorkflowUITests: XCTestCase {
         XCTAssertEqual(server.directStreamRequestCount, 0)
         server.onSourceRequest = nil
 
-        app.buttons.matching(identifier: "Play").firstMatch.tap()
-        XCTAssertTrue(app.navigationBars["Choose version"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            tap(app.buttons.matching(identifier: "Play").firstMatch, until: app.navigationBars["Choose version"]),
+            app.debugDescription
+        )
         let highVersion = app.buttons.matching(
             NSPredicate(format: "label CONTAINS %@", "1080p master")
         ).firstMatch
